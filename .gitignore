@@ -1,0 +1,74 @@
+# Build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+dist/
+
+# Test binary
+*.test
+
+# Output
+*.out
+*.output
+
+# Logs
+logs/
+
+# Local config
+config.local.json
+.mcp.json
+
+# Claude Code — entire directory (agents, commands, settings, sync)
+.claude/
+
+# Claude Code personal/local files
+.claude-personal/
+
+# Internal docs (plans, spikes, tasks, audits)
+docs/PLAN*.md
+docs/TASKS*.md
+docs/REVIEW*.md
+docs/ANALYSIS.md
+docs/ROADMAP.md
+docs/TEST-CHECKLIST.md
+docs/adr/
+docs/spikes/
+
+# VS Code extension build artifacts
+vscode/mcp-gateway-dashboard/out/
+vscode/mcp-gateway-dashboard/node_modules/
+vscode/mcp-gateway-dashboard/*.vsix
+
+# Secrets & credentials
+.env
+.env.*
+*.env
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+*.kdbx
+.npmrc
+.netrc
+
+# Coverage & profiling
+coverage/
+*.coverprofile
+*.prof
+
+# Logs (loose files — logs/ dir already covered above)
+*.log
+
+# Local databases
+*.sqlite
+*.db
+
+# Local safety notes
+DONT-PUSH-ALL.md
+
+# OS files
+.DS_Store
+Thumbs.db

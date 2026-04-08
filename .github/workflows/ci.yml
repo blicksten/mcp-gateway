@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Test with race detector (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -race ./...
+        # Note: race detector unavailable on Windows without gcc (MinGW-w64).
+        # Windows-specific code paths (job_windows.go, config.go atomic write)
+        # require manual review at Phase 5.5 GATE.
+
+  smoke-test:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binary
+        run: go build -o mcp-gateway ./cmd/mcp-gateway
+
+      - name: Start daemon
+        run: |
+          ./mcp-gateway -config testdata/smoke-config.json &
+          echo "PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for health endpoint
+        run: |
+          url="http://127.0.0.1:18765/api/v1/health"
+          delay_ms=100
+          total_ms=0
+          max_ms=10000
+          while [ "$total_ms" -lt "$max_ms" ]; do
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "Daemon process $PID died before health endpoint was ready"
+              exit 1
+            fi
+            if curl -sf "$url" > /dev/null 2>&1; then
+              echo "Health endpoint ready after ${total_ms}ms"
+              exit 0
+            fi
+            sleep "$(printf '%d.%03d' $((delay_ms / 1000)) $((delay_ms % 1000)))"
+            total_ms=$((total_ms + delay_ms))
+            delay_ms=$((delay_ms * 2))
+            if [ "$delay_ms" -gt 3200 ]; then delay_ms=3200; fi
+          done
+          echo "Health endpoint not ready after ${max_ms}ms"
+          exit 1
+
+      - name: Assert health HTTP 200
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18765/api/v1/health)
+          if [ "$status" != "200" ]; then
+            echo "Expected HTTP 200, got $status"
+            exit 1
+          fi
+          echo "Health endpoint returned HTTP $status"
+
+      - name: Graceful shutdown
+        run: |
+          kill -TERM "$PID"
+          # Wait up to 5s for graceful exit (GNU tail --pid; ubuntu-latest only)
+          timeout 5 tail --pid="$PID" -f /dev/null 2>/dev/null || true
+          # Check if process exited
+          if kill -0 "$PID" 2>/dev/null; then
+            echo "Process did not exit after SIGTERM, sending SIGKILL"
+            kill -KILL "$PID"
+            wait "$PID" 2>/dev/null || true
+            exit 1
+          fi
+          echo "Daemon exited gracefully"
+
+  vscode-extension:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vscode/mcp-gateway-dashboard
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile
+        run: npm run compile
+
+      - name: Lint
+        run: npm run lint

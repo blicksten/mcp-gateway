@@ -1,0 +1,119 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+env:
+  - CGO_ENABLED=0
+
+builds:
+  - id: mcp-gateway
+    main: ./cmd/mcp-gateway
+    binary: mcp-gateway
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # windows/arm64 excluded: no CI runner available for testing
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+  - id: mcp-ctl
+    main: ./cmd/mcp-ctl
+    binary: mcp-ctl
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # windows/arm64 excluded: no CI runner available for testing
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+# Both binaries bundled in a single archive per platform.
+archives:
+  - id: default
+    builds:
+      - mcp-gateway
+      - mcp-ctl
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# Changelog generation disabled — release-please manages CHANGELOG.md.
+# GoReleaser's per-release notes would duplicate what release-please already produces.
+changelog:
+  disable: true
+
+# Cosign keyless signing — signs checksums.txt with Sigstore OIDC (no keys needed).
+# Produces checksums.txt.bundle (Sigstore bundle format).
+signs:
+  - cmd: cosign
+    signature: "${artifact}.bundle"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+
+release:
+  draft: false
+  prerelease: auto
+  make_latest: true
+  footer: |
+    ## Installation
+
+    **Automated (recommended):**
+    ```bash
+    # Linux / macOS
+    curl -fsSL https://raw.githubusercontent.com/blicksten/mcp-gateway/main/installer/install.sh | bash
+    ```
+    ```powershell
+    # Windows
+    irm https://raw.githubusercontent.com/blicksten/mcp-gateway/main/installer/install.ps1 | iex
+    ```
+    > Inspect before running: `curl -fsSL <url> | less`. The installer script itself is not signed — only release binaries are.
+
+    **Manual:** Download the archive for your platform, extract, and place the binaries in your PATH.
+
+    **macOS (unsigned binary):** If Gatekeeper blocks execution: `xattr -d com.apple.quarantine ./mcp-gateway ./mcp-ctl`
+
+    **Windows:** If SmartScreen blocks execution, click "More info" → "Run anyway". Binary signing with Authenticode is not yet available.
+
+    ## Verify release signature
+
+    ```
+    cosign verify-blob --bundle checksums.txt.bundle \
+      --certificate-identity-regexp 'https://github.com/blicksten/mcp-gateway/.github/workflows/release.yml@refs/tags/v.*' \
+      --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+      checksums.txt
+    ```

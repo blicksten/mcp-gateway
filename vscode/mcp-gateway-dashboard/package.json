@@ -1,0 +1,249 @@
+{
+  "name": "mcp-gateway-dashboard",
+  "displayName": "MCP Gateway Dashboard",
+  "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
+  "version": "1.0.0",
+  "publisher": "mcp-gateway",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/blicksten/mcp-gateway"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "mcp-gateway",
+          "title": "MCP Gateway",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "mcp-gateway": [
+        {
+          "id": "mcpBackends",
+          "name": "Backends"
+        },
+        {
+          "id": "mcpSapSystems",
+          "name": "SAP Systems"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "mcpGateway.refresh",
+        "title": "MCP Gateway: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "mcpGateway.addServer",
+        "title": "MCP Gateway: Add Server",
+        "icon": "$(add)"
+      },
+      {
+        "command": "mcpGateway.removeServer",
+        "title": "MCP Gateway: Remove Server"
+      },
+      {
+        "command": "mcpGateway.startServer",
+        "title": "MCP Gateway: Enable Server"
+      },
+      {
+        "command": "mcpGateway.stopServer",
+        "title": "MCP Gateway: Disable Server"
+      },
+      {
+        "command": "mcpGateway.restartServer",
+        "title": "MCP Gateway: Restart Server",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "mcpGateway.resetCircuit",
+        "title": "MCP Gateway: Reset Circuit Breaker"
+      },
+      {
+        "command": "mcpGateway.showLogs",
+        "title": "MCP Gateway: Show Logs"
+      },
+      {
+        "command": "mcpGateway.startDaemon",
+        "title": "MCP Gateway: Start Daemon"
+      },
+      {
+        "command": "mcpGateway.stopDaemon",
+        "title": "MCP Gateway: Stop Daemon"
+      },
+      {
+        "command": "mcpGateway.restartSapVsp",
+        "title": "MCP Gateway: Restart SAP VSP"
+      },
+      {
+        "command": "mcpGateway.restartSapGui",
+        "title": "MCP Gateway: Restart SAP GUI"
+      },
+      {
+        "command": "mcpGateway.showSapVspLogs",
+        "title": "MCP Gateway: Show SAP VSP Logs"
+      },
+      {
+        "command": "mcpGateway.showSapGuiLogs",
+        "title": "MCP Gateway: Show SAP GUI Logs"
+      },
+      {
+        "command": "mcpGateway.showServerDetail",
+        "title": "MCP Gateway: Show Server Details"
+      },
+      {
+        "command": "mcpGateway.showSapDetail",
+        "title": "MCP Gateway: Show SAP System Details"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "mcpGateway.refresh",
+          "when": "view == mcpBackends",
+          "group": "navigation"
+        },
+        {
+          "command": "mcpGateway.addServer",
+          "when": "view == mcpBackends",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "mcpGateway.startServer",
+          "when": "view == mcpBackends && viewItem == disabled",
+          "group": "1_lifecycle"
+        },
+        {
+          "command": "mcpGateway.stopServer",
+          "when": "view == mcpBackends && viewItem =~ /^(running|degraded)$/",
+          "group": "1_lifecycle"
+        },
+        {
+          "command": "mcpGateway.restartServer",
+          "when": "view == mcpBackends && viewItem =~ /^(running|degraded|error|stopped)$/",
+          "group": "1_lifecycle"
+        },
+        {
+          "command": "mcpGateway.restartServer",
+          "when": "view == mcpBackends && viewItem =~ /^(error|degraded)$/",
+          "group": "inline"
+        },
+        {
+          "command": "mcpGateway.resetCircuit",
+          "when": "view == mcpBackends && viewItem =~ /^(error|degraded)$/",
+          "group": "1_lifecycle"
+        },
+        {
+          "command": "mcpGateway.showLogs",
+          "when": "view == mcpBackends && viewItem =~ /^(running|degraded|error|starting|restarting|stopped|disabled)$/",
+          "group": "2_info"
+        },
+        {
+          "command": "mcpGateway.showServerDetail",
+          "when": "view == mcpBackends && viewItem =~ /^(running|degraded|error|starting|restarting|stopped|disabled)$/",
+          "group": "2_info"
+        },
+        {
+          "command": "mcpGateway.removeServer",
+          "when": "view == mcpBackends && viewItem =~ /^(stopped|disabled|error|running|degraded)$/",
+          "group": "3_danger"
+        },
+        {
+          "command": "mcpGateway.restartSapVsp",
+          "when": "view == mcpSapSystems && viewItem =~ /^sap-/",
+          "group": "1_lifecycle"
+        },
+        {
+          "command": "mcpGateway.restartSapGui",
+          "when": "view == mcpSapSystems && viewItem =~ /^sap-/",
+          "group": "1_lifecycle"
+        },
+        {
+          "command": "mcpGateway.showSapVspLogs",
+          "when": "view == mcpSapSystems && viewItem =~ /^sap-/",
+          "group": "2_info"
+        },
+        {
+          "command": "mcpGateway.showSapGuiLogs",
+          "when": "view == mcpSapSystems && viewItem =~ /^sap-/",
+          "group": "2_info"
+        },
+        {
+          "command": "mcpGateway.showSapDetail",
+          "when": "view == mcpSapSystems && viewItem =~ /^sap-/",
+          "group": "2_info"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "mcpBackends",
+        "contents": "No MCP servers configured.\n[Add Server](command:mcpGateway.addServer)"
+      },
+      {
+        "view": "mcpSapSystems",
+        "contents": "No SAP systems detected.\nServers with vsp-* or sap-gui-* prefixes appear here automatically."
+      }
+    ],
+    "configuration": {
+      "title": "MCP Gateway",
+      "properties": {
+        "mcpGateway.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:8765",
+          "description": "MCP Gateway REST API URL"
+        },
+        "mcpGateway.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-start gateway daemon when VS Code opens"
+        },
+        "mcpGateway.daemonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to mcp-gateway executable (leave empty to use PATH)",
+          "scope": "machine"
+        },
+        "mcpGateway.pollInterval": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 1000,
+          "description": "Status polling interval in milliseconds"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "tsc --noEmit -p ./",
+    "test": "mocha --require ts-node/register 'src/test/**/*.test.ts'",
+    "package": "vsce package --allow-missing-repository",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.0",
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
+    "mocha": "^10.0.0",
+    "ts-node": "^10.0.0",
+    "typescript": "^5.3.0"
+  }
+}
