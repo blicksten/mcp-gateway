@@ -3,8 +3,9 @@ import type { IGatewayClient } from './extension';
 
 /**
  * Aggregate MCP status bar indicator.
- * Shows "$(server) MCP: N/M" where N = running, M = total.
- * Background: default (all OK), warning (partial), error (offline).
+ * Shows "MCP: N/M" with subtle foreground coloring:
+ *   green = all running, yellow = partial, red = all offline,
+ *   default = no servers or daemon unreachable.
  */
 export class McpStatusBar {
 	private readonly item: vscode.StatusBarItem;
@@ -46,32 +47,41 @@ export class McpStatusBar {
 		}
 	}
 
+	/** Reset item styling to defaults. */
+	private resetStyle(): void {
+		this.item.backgroundColor = undefined;
+		this.item.color = undefined;
+	}
+
 	/** Update display with running/total counts. */
 	private update(running: number, total: number): void {
 		if (this.disposed) { return; }
-		this.item.text = `$(server) MCP: ${running}/${total}`;
+		this.resetStyle();
 
 		if (total === 0) {
-			this.item.tooltip = 'MCP Gateway — no servers configured';
-			this.item.backgroundColor = undefined;
+			this.item.text = '$(circle-slash) MCP: \u2014';
+			this.item.tooltip = 'MCP Gateway \u2014 no servers configured';
 		} else if (running === total) {
-			this.item.tooltip = `MCP Gateway — all ${total} servers running`;
-			this.item.backgroundColor = undefined;
+			this.item.text = `$(check) MCP: ${running}/${total}`;
+			this.item.tooltip = `MCP Gateway \u2014 all ${total} servers running`;
+			this.item.color = new vscode.ThemeColor('testing.iconPassed');
 		} else if (running === 0) {
-			this.item.tooltip = `MCP Gateway — all ${total} servers offline`;
-			this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+			this.item.text = `$(error) MCP: 0/${total}`;
+			this.item.tooltip = `MCP Gateway \u2014 all ${total} servers offline`;
+			this.item.color = new vscode.ThemeColor('testing.iconFailed');
 		} else {
-			this.item.tooltip = `MCP Gateway — ${running} of ${total} servers running`;
-			this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+			this.item.text = `$(warning) MCP: ${running}/${total}`;
+			this.item.tooltip = `MCP Gateway \u2014 ${running} of ${total} servers running`;
+			this.item.color = new vscode.ThemeColor('notificationsWarningIcon.foreground');
 		}
 	}
 
-	/** Show offline state when gateway is unreachable. */
+	/** Show offline state when gateway daemon is unreachable. */
 	private updateOffline(): void {
 		if (this.disposed) { return; }
-		this.item.text = '$(server) MCP: offline';
-		this.item.tooltip = 'MCP Gateway — cannot reach API';
-		this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+		this.resetStyle();
+		this.item.text = '$(debug-disconnect) MCP: offline';
+		this.item.tooltip = 'MCP Gateway \u2014 cannot reach daemon';
 	}
 
 	dispose(): void {

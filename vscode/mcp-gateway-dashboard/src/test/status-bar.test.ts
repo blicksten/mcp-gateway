@@ -26,11 +26,11 @@ function createMockClient(health: { status: string; servers: number; running: nu
 	return mock;
 }
 
-/** Read backgroundColor.id without triggering TypeScript narrowing. */
-function bgId(item: MockStatusBarItem): string | undefined {
-	const bg = item.backgroundColor;
-	if (bg === undefined || bg === null) { return undefined; }
-	return bg.id;
+/** Read color.id (foreground ThemeColor) without triggering TypeScript narrowing. */
+function colorId(item: MockStatusBarItem): string | undefined {
+	const c = item.color;
+	if (c === undefined || c === null) { return undefined; }
+	return (c as any).id;
 }
 
 describe('McpStatusBar', () => {
@@ -64,18 +64,19 @@ describe('McpStatusBar', () => {
 	});
 
 	describe('poll — all running', () => {
-		it('shows N/M with all running', async () => {
+		it('shows N/M with check icon when all running', async () => {
 			client.health = { status: 'ok', servers: 4, running: 4 };
 			statusBar = new McpStatusBar(client as any);
 			await statusBar.poll();
-			assert.strictEqual(mockStatusBarItems[0].text, '$(server) MCP: 4/4');
+			assert.strictEqual(mockStatusBarItems[0].text, '$(check) MCP: 4/4');
 		});
 
-		it('clears background color when all running', async () => {
+		it('uses green foreground when all running', async () => {
 			client.health = { status: 'ok', servers: 3, running: 3 };
 			statusBar = new McpStatusBar(client as any);
 			await statusBar.poll();
 			assert.strictEqual(mockStatusBarItems[0].backgroundColor, undefined);
+			assert.strictEqual(colorId(mockStatusBarItems[0]), 'testing.iconPassed');
 		});
 
 		it('sets tooltip for all running', async () => {
@@ -91,9 +92,9 @@ describe('McpStatusBar', () => {
 			client.health = { status: 'ok', servers: 4, running: 2 };
 			statusBar = new McpStatusBar(client as any);
 			await statusBar.poll();
-			assert.strictEqual(mockStatusBarItems[0].text, '$(server) MCP: 2/4');
-			assert.ok(mockStatusBarItems[0].backgroundColor !== undefined);
-			assert.strictEqual(bgId(mockStatusBarItems[0]), 'statusBarItem.warningBackground');
+			assert.strictEqual(mockStatusBarItems[0].text, '$(warning) MCP: 2/4');
+			assert.strictEqual(mockStatusBarItems[0].backgroundColor, undefined);
+			assert.strictEqual(colorId(mockStatusBarItems[0]), 'notificationsWarningIcon.foreground');
 		});
 
 		it('sets tooltip for partial', async () => {
@@ -109,36 +110,37 @@ describe('McpStatusBar', () => {
 			client.health = { status: 'ok', servers: 3, running: 0 };
 			statusBar = new McpStatusBar(client as any);
 			await statusBar.poll();
-			assert.strictEqual(mockStatusBarItems[0].text, '$(server) MCP: 0/3');
-			assert.strictEqual(bgId(mockStatusBarItems[0]), 'statusBarItem.errorBackground');
+			assert.strictEqual(mockStatusBarItems[0].text, '$(error) MCP: 0/3');
+			assert.strictEqual(mockStatusBarItems[0].backgroundColor, undefined);
+			assert.strictEqual(colorId(mockStatusBarItems[0]), 'testing.iconFailed');
 		});
 	});
 
 	describe('poll — no servers', () => {
-		it('shows 0/0 with no background', async () => {
+		it('shows dash icon with no background when no servers', async () => {
 			client.health = { status: 'ok', servers: 0, running: 0 };
 			statusBar = new McpStatusBar(client as any);
 			await statusBar.poll();
-			assert.strictEqual(mockStatusBarItems[0].text, '$(server) MCP: 0/0');
+			assert.strictEqual(mockStatusBarItems[0].text, '$(circle-slash) MCP: \u2014');
 			assert.strictEqual(mockStatusBarItems[0].backgroundColor, undefined);
 			assert.ok(mockStatusBarItems[0].tooltip?.includes('no servers configured'));
 		});
 	});
 
 	describe('poll — gateway unreachable', () => {
-		it('shows offline with error background', async () => {
+		it('shows offline with no background color', async () => {
 			client.shouldFail = true;
 			statusBar = new McpStatusBar(client as any);
 			await statusBar.poll();
-			assert.strictEqual(mockStatusBarItems[0].text, '$(server) MCP: offline');
-			assert.strictEqual(bgId(mockStatusBarItems[0]), 'statusBarItem.errorBackground');
+			assert.strictEqual(mockStatusBarItems[0].text, '$(debug-disconnect) MCP: offline');
+			assert.strictEqual(mockStatusBarItems[0].backgroundColor, undefined);
 		});
 
 		it('sets offline tooltip', async () => {
 			client.shouldFail = true;
 			statusBar = new McpStatusBar(client as any);
 			await statusBar.poll();
-			assert.ok(mockStatusBarItems[0].tooltip?.includes('cannot reach API'));
+			assert.ok(mockStatusBarItems[0].tooltip?.includes('cannot reach daemon'));
 		});
 	});
 
@@ -149,7 +151,7 @@ describe('McpStatusBar', () => {
 			statusBar.startPolling(50000);
 			// Wait for the immediate async poll to complete
 			await new Promise((r) => setTimeout(r, 50));
-			assert.strictEqual(mockStatusBarItems[0].text, '$(server) MCP: 1/2');
+			assert.strictEqual(mockStatusBarItems[0].text, '$(warning) MCP: 1/2');
 		});
 
 		it('polls repeatedly at interval', async () => {
@@ -206,12 +208,12 @@ describe('McpStatusBar', () => {
 			const item = mockStatusBarItems[0];
 			client.health = { status: 'ok', servers: 3, running: 3 };
 			await statusBar.poll();
-			assert.ok(item.backgroundColor === undefined, 'Expected no background when all running');
+			assert.strictEqual(colorId(item), 'testing.iconPassed');
 
 			client.shouldFail = true;
 			await statusBar.poll();
-			assert.strictEqual(item.text, '$(server) MCP: offline');
-			assert.strictEqual(bgId(item), 'statusBarItem.errorBackground');
+			assert.strictEqual(item.text, '$(debug-disconnect) MCP: offline');
+			assert.strictEqual(item.color, undefined);
 		});
 
 		it('transitions from offline to running', async () => {
@@ -219,13 +221,13 @@ describe('McpStatusBar', () => {
 			statusBar = new McpStatusBar(client as any);
 			const item = mockStatusBarItems[0];
 			await statusBar.poll();
-			assert.strictEqual(bgId(item), 'statusBarItem.errorBackground');
+			assert.strictEqual(item.color, undefined);
 
 			client.shouldFail = false;
 			client.health = { status: 'ok', servers: 2, running: 2 };
 			await statusBar.poll();
-			assert.strictEqual(item.text, '$(server) MCP: 2/2');
-			assert.ok(item.backgroundColor === undefined, 'Expected no background when all running');
+			assert.strictEqual(item.text, '$(check) MCP: 2/2');
+			assert.strictEqual(colorId(item), 'testing.iconPassed');
 		});
 	});
 });

@@ -56,6 +56,7 @@ export interface MockStatusBarItem {
 	tooltip: string | undefined;
 	command: string | undefined;
 	backgroundColor: { id: string } | undefined;
+	color: { id: string } | undefined;
 	visible: boolean;
 	disposed: boolean;
 	show(): void;
@@ -295,6 +296,7 @@ export const mockVscode = {
 				tooltip: undefined,
 				command: undefined,
 				backgroundColor: undefined,
+				color: undefined,
 				visible: false,
 				disposed: false,
 				show() { item.visible = true; },

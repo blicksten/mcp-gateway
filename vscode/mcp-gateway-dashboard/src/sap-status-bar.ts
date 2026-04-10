@@ -43,12 +43,16 @@ export class SapStatusBar implements vscode.Disposable {
 
 		const hasError = systems.some((s) => s.status === 'error');
 		const hasDegraded = systems.some((s) => s.status === 'degraded');
+		const allRunning = systems.every((s) => s.status === 'running');
+		this.item.backgroundColor = undefined;
 		if (hasError) {
-			this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+			this.item.color = new vscode.ThemeColor('testing.iconFailed');
 		} else if (hasDegraded) {
-			this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+			this.item.color = new vscode.ThemeColor('notificationsWarningIcon.foreground');
+		} else if (allRunning) {
+			this.item.color = new vscode.ThemeColor('testing.iconPassed');
 		} else {
-			this.item.backgroundColor = undefined;
+			this.item.color = undefined;
 		}
 
 		this.item.tooltip = systems.map((s) => {

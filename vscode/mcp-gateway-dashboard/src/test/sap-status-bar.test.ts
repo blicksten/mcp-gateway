@@ -84,11 +84,12 @@ describe('SapStatusBar', () => {
 		bar = new SapStatusBar(cache);
 
 		const item = mockStatusBarItems[mockStatusBarItems.length - 1];
-		assert.ok(item.backgroundColor);
-		assert.equal(item.backgroundColor!.id, 'statusBarItem.errorBackground');
+		assert.equal(item.backgroundColor, undefined);
+		assert.ok(item.color);
+		assert.equal((item.color as any).id, 'testing.iconFailed');
 	});
 
-	it('shows warning background when composite status is degraded (VSP running, GUI error)', async () => {
+	it('shows warning foreground when composite status is degraded (VSP running, GUI error)', async () => {
 		cache = new ServerDataCache(createMockClient([
 			{ name: 'vsp-DEV', status: 'running', transport: 'stdio', restart_count: 0 },
 			{ name: 'sap-gui-DEV', status: 'error', transport: 'http', restart_count: 0 },
@@ -97,11 +98,12 @@ describe('SapStatusBar', () => {
 		bar = new SapStatusBar(cache);
 
 		const item = mockStatusBarItems[mockStatusBarItems.length - 1];
-		assert.ok(item.backgroundColor);
-		assert.equal(item.backgroundColor!.id, 'statusBarItem.warningBackground');
+		assert.equal(item.backgroundColor, undefined);
+		assert.ok(item.color);
+		assert.equal((item.color as any).id, 'notificationsWarningIcon.foreground');
 	});
 
-	it('clears background when all systems are running', async () => {
+	it('uses green foreground when all systems are running', async () => {
 		cache = new ServerDataCache(createMockClient([
 			{ name: 'vsp-DEV', status: 'running', transport: 'stdio', restart_count: 0 },
 			{ name: 'sap-gui-DEV', status: 'running', transport: 'http', restart_count: 0 },
@@ -111,6 +113,8 @@ describe('SapStatusBar', () => {
 
 		const item = mockStatusBarItems[mockStatusBarItems.length - 1];
 		assert.equal(item.backgroundColor, undefined);
+		assert.ok(item.color);
+		assert.equal((item.color as any).id, 'testing.iconPassed');
 	});
 
 	it('uses full SID-Client for ≤3 systems with client codes', async () => {
