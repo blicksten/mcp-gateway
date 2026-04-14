@@ -2,9 +2,10 @@ package main
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/spf13/cobra"
+
+	"mcp-gateway/internal/models"
 )
 
 func newServersSetEnvCmd() *cobra.Command {
@@ -20,10 +21,8 @@ func newServersSetEnvCmd() *cobra.Command {
 			}
 
 			envPairs := args[1:]
-			for _, e := range envPairs {
-				if !strings.Contains(e, "=") {
-					return fmt.Errorf("invalid env entry %q: must be in KEY=VALUE format", e)
-				}
+			if err := models.ValidateEnvEntries(envPairs); err != nil {
+				return fmt.Errorf("invalid env entry: %w", err)
 			}
 
 			client, err := getClient(cmd)

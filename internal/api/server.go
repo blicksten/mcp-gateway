@@ -418,6 +418,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	// Handle disabled toggle (outside mutexes).
 	if patch.Disabled != nil {
 		if *patch.Disabled {
+			_ = s.lm.Stop(r.Context(), name)
 			s.lm.SetStatus(name, models.StatusDisabled, "disabled by user")
 		} else {
 			current, _ := s.lm.Entry(name)

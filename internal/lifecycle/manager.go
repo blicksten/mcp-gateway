@@ -510,6 +510,9 @@ func (m *Manager) AddServer(name string, cfg *models.ServerConfig) error {
 	if _, exists := m.entries[name]; exists {
 		return fmt.Errorf("server %q already exists", name)
 	}
+	if len(m.entries) >= models.MaxServers {
+		return fmt.Errorf("cannot add server: maximum of %d servers reached", models.MaxServers)
+	}
 	m.entries[name] = &entry{
 		ServerEntry: models.ServerEntry{
 			Name:   name,
@@ -523,6 +526,13 @@ func (m *Manager) AddServer(name string, cfg *models.ServerConfig) error {
 
 // RemoveServer stops and removes a server. Must be called without the lock held.
 func (m *Manager) RemoveServer(ctx context.Context, name string) error {
+	m.mu.RLock()
+	_, exists := m.entries[name]
+	m.mu.RUnlock()
+	if !exists {
+		return fmt.Errorf("server %q not found", name)
+	}
+
 	// Stop outside the lock.
 	_ = m.Stop(ctx, name)
 
@@ -648,6 +658,13 @@ func configChanged(a, b *models.ServerConfig) bool {
 		if b.Headers[k] != v {
 			return true
 		}
+	}
+	// Compare ExposeTools (nil-safe: nil means default true).
+	if (a.ExposeTools == nil) != (b.ExposeTools == nil) {
+		return true
+	}
+	if a.ExposeTools != nil && *a.ExposeTools != *b.ExposeTools {
+		return true
 	}
 	return false
 }

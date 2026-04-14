@@ -176,12 +176,19 @@ func validateHTTPURL(raw, field string) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("%s: URL %q must use http or https scheme", field, raw)
 	}
+	if u.Host == "" {
+		return fmt.Errorf("%s: URL %q must include a host", field, raw)
+	}
+	if u.User != nil {
+		return fmt.Errorf("%s: URL %q must not include userinfo", field, raw)
+	}
 	return nil
 }
 
 // IsDangerousEnvKey returns true if the key is in the dangerous env keys blocklist.
+// Case-insensitive: Windows env vars are case-insensitive, so "path" == "PATH".
 func IsDangerousEnvKey(key string) bool {
-	return dangerousEnvKeys[key]
+	return dangerousEnvKeys[strings.ToUpper(key)]
 }
 
 // ValidateEnvEntries checks env entries are KEY=VALUE format and rejects dangerous keys.
@@ -203,7 +210,10 @@ func validateEnv(env []string) error {
 		if !ok {
 			return fmt.Errorf("env entry %q must be in KEY=VALUE format", e)
 		}
-		if dangerousEnvKeys[key] {
+		if key == "" {
+			return fmt.Errorf("env entry %q has empty key", e)
+		}
+		if dangerousEnvKeys[strings.ToUpper(key)] {
 			return fmt.Errorf("env key %q is not permitted (security risk)", key)
 		}
 		if strings.ContainsAny(val, "\r\n\x00") {
@@ -332,6 +342,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	for name, sc := range c.Servers {
+		if sc == nil {
+			return fmt.Errorf("server %q: nil config entry", name)
+		}
 		if err := sc.Validate(); err != nil {
 			return fmt.Errorf("server %q: %w", name, err)
 		}

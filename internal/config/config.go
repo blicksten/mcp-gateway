@@ -205,6 +205,9 @@ func mergeLocal(base, local *models.Config) {
 	if local.Gateway.ToolFilter != nil {
 		base.Gateway.ToolFilter = local.Gateway.ToolFilter
 	}
+	if local.Gateway.CompressSchemas {
+		base.Gateway.CompressSchemas = true
+	}
 
 	// Servers: shallow merge — local server replaces entire base server.
 	if base.Servers == nil {
@@ -228,13 +231,13 @@ func SaveBytes(path string, data []byte) error {
 	path = expandHome(path)
 
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create config dir %s: %w", dir, err)
 	}
 
 	// Atomic write: temp file + rename.
 	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o640); err != nil {
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
 		return fmt.Errorf("write temp config %s: %w", tmpPath, err)
 	}
 
@@ -248,10 +251,12 @@ func SaveBytes(path string, data []byte) error {
 				return fmt.Errorf("remove old config %s: %w", path, rmErr)
 			}
 			if err := os.Rename(tmpPath, path); err != nil {
+				_ = os.Remove(tmpPath)
 				return fmt.Errorf("rename config %s: %w", path, err)
 			}
 			return nil
 		}
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename config %s: %w", path, err)
 	}
 
