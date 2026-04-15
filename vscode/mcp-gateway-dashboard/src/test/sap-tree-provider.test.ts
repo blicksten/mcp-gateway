@@ -86,4 +86,113 @@ describe('SapTreeProvider', () => {
 		// After dispose, refresh() should not throw (EventEmitter is disposed).
 		assert.doesNotThrow(() => provider.refresh());
 	});
+
+	it('does not fire onDidChangeTreeData when fingerprint unchanged', async () => {
+		const servers: ServerView[] = [
+			{ name: 'vsp-DEV', status: 'running', transport: 'stdio', restart_count: 0 },
+			{ name: 'sap-gui-DEV', status: 'running', transport: 'http', restart_count: 0 },
+		];
+		cache = new ServerDataCache(createMockClient(servers) as any);
+		await cache.refresh();
+		provider = new SapTreeProvider(cache);
+		let fireCount = 0;
+		provider.onDidChangeTreeData(() => { fireCount++; });
+		provider.refresh();
+		assert.strictEqual(fireCount, 1);
+		provider.refresh();
+		assert.strictEqual(fireCount, 1, 'identical-snapshot refresh should not fire');
+	});
+
+	it('fires again when VSP restart_count changes', async () => {
+		let counter = 0;
+		const client = {
+			listServers: async () => [
+				{ name: 'vsp-DEV', status: 'running' as const, transport: 'stdio', restart_count: counter },
+				{ name: 'sap-gui-DEV', status: 'running' as const, transport: 'http', restart_count: 0 },
+			],
+			getHealth: async () => ({}),
+			getServer: async () => ({}),
+			addServer: async () => ({}),
+			removeServer: async () => ({}),
+			patchServer: async () => ({}),
+			restartServer: async () => ({}),
+			resetCircuit: async () => ({}),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+		cache = new ServerDataCache(client as any);
+		provider = new SapTreeProvider(cache);
+		let fireCount = 0;
+		provider.onDidChangeTreeData(() => { fireCount++; });
+		await cache.refresh(); // counter=0
+		counter = 3;
+		await cache.refresh(); // restart_count changed
+		assert.strictEqual(fireCount, 2);
+	});
+
+	it('fires when vsp pid changes silently (same status)', async () => {
+		let pid = 1111;
+		const client = {
+			listServers: async () => [
+				{ name: 'vsp-DEV', status: 'running' as const, transport: 'stdio', restart_count: 0, pid },
+				{ name: 'sap-gui-DEV', status: 'running' as const, transport: 'http', restart_count: 0 },
+			],
+			getHealth: async () => ({}),
+			getServer: async () => ({}),
+			addServer: async () => ({}),
+			removeServer: async () => ({}),
+			patchServer: async () => ({}),
+			restartServer: async () => ({}),
+			resetCircuit: async () => ({}),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+		cache = new ServerDataCache(client as any);
+		provider = new SapTreeProvider(cache);
+		let fireCount = 0;
+		provider.onDidChangeTreeData(() => { fireCount++; });
+		await cache.refresh();
+		pid = 2222;
+		await cache.refresh();
+		assert.strictEqual(fireCount, 2, 'pid change should trigger tooltip refresh');
+	});
+
+	it('fires when vsp last_error appears (same status)', async () => {
+		let lastError: string | undefined = undefined;
+		const client = {
+			listServers: async () => [
+				{ name: 'vsp-DEV', status: 'degraded' as const, transport: 'stdio', restart_count: 1, last_error: lastError },
+			],
+			getHealth: async () => ({}),
+			getServer: async () => ({}),
+			addServer: async () => ({}),
+			removeServer: async () => ({}),
+			patchServer: async () => ({}),
+			restartServer: async () => ({}),
+			resetCircuit: async () => ({}),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+		cache = new ServerDataCache(client as any);
+		provider = new SapTreeProvider(cache);
+		let fireCount = 0;
+		provider.onDidChangeTreeData(() => { fireCount++; });
+		await cache.refresh();
+		lastError = 'timeout';
+		await cache.refresh();
+		assert.strictEqual(fireCount, 2);
+	});
+
+	it('resets fingerprint to null on dispose', async () => {
+		const servers: ServerView[] = [
+			{ name: 'vsp-DEV', status: 'running', transport: 'stdio', restart_count: 0 },
+		];
+		cache = new ServerDataCache(createMockClient(servers) as any);
+		await cache.refresh();
+		provider = new SapTreeProvider(cache);
+		provider.refresh();
+		assert.notStrictEqual(provider.getFingerprint(), null);
+		provider.dispose();
+		assert.strictEqual(provider.getFingerprint(), null);
+	});
 });

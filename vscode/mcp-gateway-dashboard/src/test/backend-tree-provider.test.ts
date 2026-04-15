@@ -186,6 +186,86 @@ describe('BackendTreeProvider', () => {
 			provider.dispose();
 			provider.refresh(); // should not throw
 		});
+
+		it('resets fingerprint to null on dispose', async () => {
+			cache = new ServerDataCache(createMockClient(sampleServers) as any);
+			await cache.refresh();
+			provider = new BackendTreeProvider(cache);
+			provider.refresh();
+			assert.notStrictEqual(provider.getFingerprint(), null);
+			provider.dispose();
+			assert.strictEqual(provider.getFingerprint(), null);
+		});
+	});
+
+	describe('fingerprint (diff refresh)', () => {
+		it('does not fire onDidChangeTreeData when fingerprint unchanged', async () => {
+			cache = new ServerDataCache(createMockClient(sampleServers) as any);
+			await cache.refresh();
+			provider = new BackendTreeProvider(cache);
+			// First refresh establishes the fingerprint and fires once.
+			let fireCount = 0;
+			provider.onDidChangeTreeData(() => { fireCount++; });
+			provider.refresh();
+			assert.strictEqual(fireCount, 1, 'first refresh should fire');
+			// Second refresh against identical cached data should skip fire().
+			provider.refresh();
+			assert.strictEqual(fireCount, 1, 'identical-snapshot refresh should not fire');
+		});
+
+		it('fires onDidChangeTreeData when a status changes', async () => {
+			const initial: ServerView[] = [
+				{ name: 'a', status: 'running', transport: 'stdio', restart_count: 0 },
+			];
+			const client = {
+				calls: 0,
+				snapshots: [initial, [{ ...initial[0], status: 'error' as const }]],
+				listServers: async function () { return this.snapshots[Math.min(this.calls++, this.snapshots.length - 1)]; },
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			cache = new ServerDataCache(client as any);
+			provider = new BackendTreeProvider(cache);
+			let fireCount = 0;
+			provider.onDidChangeTreeData(() => { fireCount++; });
+			await cache.refresh(); // snapshot 1 — fires
+			await cache.refresh(); // snapshot 2 (status changed) — fires again
+			assert.strictEqual(fireCount, 2, 'status change should trigger a second fire');
+		});
+
+		it('fires when restart_count changes even with same status', async () => {
+			const initial: ServerView[] = [
+				{ name: 'a', status: 'degraded', transport: 'stdio', restart_count: 1 },
+			];
+			const client = {
+				calls: 0,
+				snapshots: [initial, [{ ...initial[0], restart_count: 2 }]],
+				listServers: async function () { return this.snapshots[Math.min(this.calls++, this.snapshots.length - 1)]; },
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			cache = new ServerDataCache(client as any);
+			provider = new BackendTreeProvider(cache);
+			let fireCount = 0;
+			provider.onDidChangeTreeData(() => { fireCount++; });
+			await cache.refresh();
+			await cache.refresh();
+			assert.strictEqual(fireCount, 2);
+		});
 	});
 });
 

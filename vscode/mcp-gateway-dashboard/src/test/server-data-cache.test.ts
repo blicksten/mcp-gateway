@@ -81,8 +81,9 @@ describe('ServerDataCache', () => {
 
 	it('onDidRefresh fires after refresh', (done) => {
 		cache = new ServerDataCache(createMockClient(mixedServers) as any);
-		cache.onDidRefresh((servers) => {
-			assert.equal(servers.length, 3);
+		cache.onDidRefresh((payload) => {
+			assert.equal(payload.servers.length, 3);
+			assert.equal(payload.lastRefreshFailed, false);
 			done();
 		});
 		cache.refresh();
@@ -90,13 +91,46 @@ describe('ServerDataCache', () => {
 
 	it('offline state: client throws → fires event with empty data', (done) => {
 		cache = new ServerDataCache(createFailingClient() as any);
-		cache.onDidRefresh((servers) => {
-			assert.equal(servers.length, 0);
+		cache.onDidRefresh((payload) => {
+			assert.equal(payload.servers.length, 0);
+			assert.equal(payload.lastRefreshFailed, true);
 			assert.equal(cache.getMcpServers().length, 0);
 			assert.equal(cache.getSapSystems().length, 0);
 			done();
 		});
 		cache.refresh();
+	});
+
+	it('lastRefreshFailed getter mirrors refresh outcome', async () => {
+		const client = createMockClient(mixedServers);
+		cache = new ServerDataCache(client as any);
+		await cache.refresh();
+		assert.equal(cache.lastRefreshFailed, false);
+	});
+
+	it('lastRefreshFailed flips to true when client throws, back to false on success', async () => {
+		let shouldFail = true;
+		const client = {
+			listServers: async () => {
+				if (shouldFail) { throw new Error('connection refused'); }
+				return mixedServers;
+			},
+			getHealth: async () => ({}),
+			getServer: async () => ({}),
+			addServer: async () => ({}),
+			removeServer: async () => ({}),
+			patchServer: async () => ({}),
+			restartServer: async () => ({}),
+			resetCircuit: async () => ({}),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+		cache = new ServerDataCache(client as any);
+		await cache.refresh();
+		assert.equal(cache.lastRefreshFailed, true);
+		shouldFail = false;
+		await cache.refresh();
+		assert.equal(cache.lastRefreshFailed, false);
 	});
 
 	it('startAutoRefresh triggers immediate refresh', (done) => {

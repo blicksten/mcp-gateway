@@ -58,11 +58,13 @@
       },
       {
         "command": "mcpGateway.startServer",
-        "title": "MCP Gateway: Enable Server"
+        "title": "MCP Gateway: Enable Server",
+        "icon": "$(play)"
       },
       {
         "command": "mcpGateway.stopServer",
-        "title": "MCP Gateway: Disable Server"
+        "title": "MCP Gateway: Disable Server",
+        "icon": "$(debug-stop)"
       },
       {
         "command": "mcpGateway.restartServer",
@@ -140,8 +142,18 @@
           "group": "1_lifecycle"
         },
         {
+          "command": "mcpGateway.startServer",
+          "when": "view == mcpBackends && viewItem == disabled",
+          "group": "inline"
+        },
+        {
+          "command": "mcpGateway.stopServer",
+          "when": "view == mcpBackends && viewItem =~ /^(running|degraded)$/",
+          "group": "inline"
+        },
+        {
           "command": "mcpGateway.restartServer",
-          "when": "view == mcpBackends && viewItem =~ /^(error|degraded)$/",
+          "when": "view == mcpBackends && viewItem =~ /^(running|degraded|error|stopped)$/",
           "group": "inline"
         },
         {
