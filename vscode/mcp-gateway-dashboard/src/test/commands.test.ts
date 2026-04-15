@@ -1,5 +1,5 @@
 // Import mock BEFORE production modules (CommonJS require order).
-import { dialogResponses, mockCalls, mockOutputChannels, resetMockState, getRegisteredCommands, MockSecretStorage, MockMemento } from './mock-vscode';
+import { dialogResponses, mockCalls, mockOutputChannels, mockWebviewPanels, resetMockState, getRegisteredCommands, MockSecretStorage, MockMemento } from './mock-vscode';
 
 import * as assert from 'node:assert';
 import { describe, it, beforeEach } from 'mocha';
@@ -204,10 +204,19 @@ describe('Commands', () => {
 	});
 
 	describe('mcpGateway.addServer', () => {
-		it('does nothing when name input is cancelled', async () => {
-			dialogResponses.showInputBox = undefined; // user cancelled
+		it('opens the Add Server webview panel (Phase 11.C)', async () => {
+			// Phase 11.C: the addServer command no longer shows InputBox —
+			// it opens an AddServerPanel webview. Verify the panel is created.
+			const before = mockWebviewPanels.length;
 			await commands.get('mcpGateway.addServer')!();
+			const newPanels = mockWebviewPanels.slice(before);
+			assert.equal(newPanels.length, 1, 'expected one new webview panel');
+			assert.equal(newPanels[0].viewType, 'mcpAddServer');
+			assert.equal(newPanels[0].title, 'Add MCP Server');
 			assert.deepStrictEqual(mockCalls.errorMessages, []);
+			// Cleanup singleton for subsequent tests.
+			const { AddServerPanel } = require('../webview/add-server-panel');
+			AddServerPanel._reset();
 		});
 	});
 });
@@ -278,41 +287,18 @@ describe('Commands (with injected client)', () => {
 		assert.strictEqual(trackingClient.calls.length, 0);
 	});
 
-	it('addServer stdio calls client.addServer with trimmed name and command', async () => {
-		dialogResponses.inputBoxQueue = ['  test-server  ', '/usr/bin/server'];
-		dialogResponses.quickPickQueue = ['stdio (command)', 'Skip', 'Skip']; // transport, env skip, header skip
+	// Phase 11.C: the sequential InputBox addServer flow was replaced by
+	// AddServerPanel. End-to-end coverage for stdio / http / env / headers lives
+	// in src/test/webview/add-server-panel.test.ts. Here we only verify that the
+	// command dispatches to the panel — no client.addServer call at command time.
+	it('addServer command opens panel without calling client.addServer', async () => {
+		const before = trackingClient.calls.length;
+		const panelsBefore = mockWebviewPanels.length;
 		await commands.get('mcpGateway.addServer')!();
-		assert.strictEqual(trackingClient.calls.length, 1);
-		assert.strictEqual(trackingClient.calls[0].method, 'addServer');
-		assert.deepStrictEqual(trackingClient.calls[0].args, ['test-server', { command: '/usr/bin/server' }]);
-	});
-
-	it('addServer http calls client.addServer with trimmed URL', async () => {
-		dialogResponses.inputBoxQueue = ['http-server', 'http://localhost:3000/mcp'];
-		dialogResponses.quickPickQueue = ['http (URL)', 'Skip', 'Skip'];
-		await commands.get('mcpGateway.addServer')!();
-		assert.strictEqual(trackingClient.calls.length, 1);
-		assert.strictEqual(trackingClient.calls[0].method, 'addServer');
-		assert.deepStrictEqual(trackingClient.calls[0].args, ['http-server', { url: 'http://localhost:3000/mcp' }]);
-	});
-
-	it('addServer with env vars includes env in config', async () => {
-		dialogResponses.inputBoxQueue = ['env-server', '/usr/bin/srv', 'API_KEY=secret', '']; // empty → done
-		dialogResponses.quickPickQueue = ['stdio (command)', 'Yes', 'Skip']; // transport, add env, skip headers
-		await commands.get('mcpGateway.addServer')!();
-		assert.strictEqual(trackingClient.calls.length, 1);
-		const [, config] = trackingClient.calls[0].args as [string, Record<string, unknown>];
-		assert.deepStrictEqual(config.env, ['API_KEY=secret']);
-		assert.strictEqual(config.command, '/usr/bin/srv');
-	});
-
-	it('addServer with headers includes headers in config', async () => {
-		dialogResponses.inputBoxQueue = ['hdr-server', 'http://localhost:3000/mcp', 'Authorization: Bearer tok', ''];
-		dialogResponses.quickPickQueue = ['http (URL)', 'Skip', 'Yes']; // transport, skip env, add headers
-		await commands.get('mcpGateway.addServer')!();
-		assert.strictEqual(trackingClient.calls.length, 1);
-		const [, config] = trackingClient.calls[0].args as [string, Record<string, unknown>];
-		assert.deepStrictEqual(config.headers, { Authorization: 'Bearer tok' });
+		assert.strictEqual(trackingClient.calls.length, before, 'command must not call client directly');
+		assert.strictEqual(mockWebviewPanels.length, panelsBefore + 1, 'command must open exactly one panel');
+		const { AddServerPanel } = require('../webview/add-server-panel');
+		AddServerPanel._reset();
 	});
 
 	it('removeServer cleans credentials even when daemon fails', async () => {

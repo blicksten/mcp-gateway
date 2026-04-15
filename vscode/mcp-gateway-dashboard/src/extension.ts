@@ -1,4 +1,3 @@
-import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { GatewayClient } from './gateway-client';
 import { BackendTreeProvider } from './backend-tree-provider';
@@ -14,6 +13,12 @@ import { SapStatusBar } from './sap-status-bar';
 import { ServerDetailPanel } from './webview/server-detail-panel';
 import { SapDetailPanel } from './webview/sap-detail-panel';
 import { ServerDetailViewProvider } from './webview/server-detail-view-provider';
+import { AddServerPanel } from './webview/add-server-panel';
+import {
+	SERVER_NAME_RE,
+	validateServerName,
+	validateUrl,
+} from './validation';
 
 // Accepted client interface — allows dependency injection for tests.
 export interface IGatewayClient {
@@ -139,31 +144,9 @@ export function deactivate(): void {
 // In-flight guard: prevents concurrent operations on the same server (D1 fix).
 const pendingOps = new Set<string>();
 
-/** Server name validation: alphanumeric, hyphens, underscores, max 64 chars (matches Go serverNameRe). */
-const SERVER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
-
-/** Validate server name — exported for direct unit testing (RR-02 fix). */
-export function validateServerName(v: string): string | null {
-	if (!v.trim()) { return 'Name is required'; }
-	if (!SERVER_NAME_RE.test(v.trim())) {
-		return 'Name must start with a letter/digit, contain only letters, digits, hyphens, or underscores, and be at most 64 characters';
-	}
-	return null;
-}
-
-/** Validate HTTP URL — exported for direct unit testing (RR-02 fix). */
-export function validateUrl(v: string): string | null {
-	if (!v.trim()) { return 'URL is required'; }
-	try {
-		const parsed = new URL(v.trim());
-		if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-			return 'URL must use http: or https: scheme';
-		}
-	} catch {
-		return 'Invalid URL format';
-	}
-	return null;
-}
+// Re-export shared validators so existing tests importing from '../extension'
+// continue to work without a test-file rewrite.
+export { validateServerName, validateUrl };
 
 function registerCommands(
 	context: vscode.ExtensionContext,
@@ -232,123 +215,12 @@ function registerCommands(
 	}));
 
 	push(vscode.commands.registerCommand('mcpGateway.addServer', async () => {
-		const name = await vscode.window.showInputBox({
-			prompt: 'Server name',
-			placeHolder: 'my-mcp-server',
-			validateInput: validateServerName,
-		});
-		if (!name) { return; }
-
-		const transport = await vscode.window.showQuickPick(
-			['stdio (command)', 'http (URL)'],
-			{ placeHolder: 'Select transport type' },
+		await AddServerPanel.createOrShow(
+			context.extensionUri,
+			client,
+			credentialStore,
+			() => { void cache.refresh(); },
 		);
-		if (!transport) { return; }
-
-		const config: Record<string, unknown> = {};
-
-		if (transport.startsWith('stdio')) {
-			const command = await vscode.window.showInputBox({
-				prompt: 'Absolute path to MCP server executable',
-				placeHolder: '/usr/local/bin/my-mcp-server',
-				validateInput: (v) => {
-					if (!v.trim()) { return 'Command is required'; }
-					if (!path.isAbsolute(v.trim())) {
-						return 'Use an absolute path — run "where <cmd>" to find it';
-					}
-					return null;
-				},
-			});
-			if (!command) { return; }
-			config.command = command.trim();
-		} else {
-			const url = await vscode.window.showInputBox({
-				prompt: 'MCP server URL',
-				placeHolder: 'http://localhost:3000/mcp',
-				validateInput: validateUrl,
-			});
-			if (!url) { return; }
-			config.url = url.trim();
-		}
-
-		// Phase 8.2: collect environment variables (optional).
-		const envEntries = await collectKeyValuePairs(
-			'Add environment variables?',
-			'Enter env var (KEY=VALUE format, empty to finish)',
-			'API_KEY=sk-...',
-			(v) => {
-				if (!v.trim()) { return null; } // empty → done
-				const eq = v.indexOf('=');
-				if (eq < 1) { return 'Must be KEY=VALUE format'; }
-				const key = v.substring(0, eq);
-				if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
-					return 'Key must be a valid identifier (letters, digits, underscores)';
-				}
-				return null;
-			},
-		);
-
-		// Phase 8.2: collect auth headers (optional).
-		const headerEntries = await collectKeyValuePairs(
-			'Add authentication headers?',
-			'Enter header (Name: Value format, empty to finish)',
-			'Authorization: Bearer token...',
-			(v) => {
-				if (!v.trim()) { return null; }
-				const colon = v.indexOf(':');
-				if (colon < 1) { return 'Must be Name: Value format'; }
-				const hName = v.substring(0, colon).trim();
-				if (!/^[!#$%&'*+\-.^_`|~A-Za-z0-9]+$/.test(hName)) {
-					return 'Header name must be a valid RFC 7230 token';
-				}
-				return null;
-			},
-		);
-
-		// Build env/headers arrays for API call.
-		if (envEntries.length > 0) {
-			config.env = envEntries; // KEY=VALUE strings
-		}
-		if (headerEntries.length > 0) {
-			const headers: Record<string, string> = {};
-			for (const entry of headerEntries) {
-				const colon = entry.indexOf(':');
-				headers[entry.substring(0, colon).trim()] = entry.substring(colon + 1).trim();
-			}
-			config.headers = headers;
-		}
-
-		try {
-			await client.addServer(name.trim(), config);
-		} catch (err) {
-			vscode.window.showErrorMessage(`Failed to add server: ${errorMsg(err)}`);
-			return;
-		}
-
-		// Store credentials in SecretStorage for later retrieval.
-		// Separate from API call — a credential indexing failure should not
-		// hide the fact that the server was successfully registered.
-		const serverName = name.trim();
-		for (const entry of envEntries) {
-			const eq = entry.indexOf('=');
-			try {
-				await credentialStore.storeEnvVar(serverName, entry.substring(0, eq), entry.substring(eq + 1));
-			} catch (credErr) {
-				vscode.window.showWarningMessage(
-					`Server "${serverName}" added, but failed to index credential "${entry.substring(0, eq)}": ${errorMsg(credErr)}`);
-			}
-		}
-		for (const entry of headerEntries) {
-			const colon = entry.indexOf(':');
-			try {
-				await credentialStore.storeHeader(serverName, entry.substring(0, colon).trim(), entry.substring(colon + 1).trim());
-			} catch (credErr) {
-				vscode.window.showWarningMessage(
-					`Server "${serverName}" added, but failed to index header "${entry.substring(0, colon).trim()}": ${errorMsg(credErr)}`);
-			}
-		}
-
-		cache.refresh(); // Re-fetch; new server appears in correct view (MCP or SAP).
 	}));
 
 	push(vscode.commands.registerCommand('mcpGateway.resetCircuit', async (item?: BackendItem) => {
@@ -446,32 +318,6 @@ function registerCommands(
 				break;
 		}
 	}));
-}
-
-/** Collect optional key-value pairs via QuickPick + InputBox loop. */
-async function collectKeyValuePairs(
-	quickPickPrompt: string,
-	inputPrompt: string,
-	placeholder: string,
-	validate: (v: string) => string | null,
-): Promise<string[]> {
-	const addChoice = await vscode.window.showQuickPick(
-		['Yes', 'Skip'],
-		{ placeHolder: quickPickPrompt },
-	);
-	if (!addChoice || addChoice === 'Skip') { return []; }
-
-	const entries: string[] = [];
-	for (;;) {
-		const value = await vscode.window.showInputBox({
-			prompt: inputPrompt,
-			placeHolder: placeholder,
-			validateInput: validate,
-		});
-		if (!value || !value.trim()) { break; }
-		entries.push(value.trim());
-	}
-	return entries;
 }
 
 function errorMsg(err: unknown): string {

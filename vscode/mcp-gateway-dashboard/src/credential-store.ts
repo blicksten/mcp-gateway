@@ -1,14 +1,6 @@
 import * as vscode from 'vscode';
 import type { CredentialIndex, ServerCredentials } from './types';
-
-// Must match Go serverNameRe — max 64 chars.
-const SERVER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
-
-// Env key: C-identifier pattern (same as Go expandVarAllowlist key format).
-const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-// Header name: RFC 7230 token (no control chars, no separators).
-const HEADER_KEY_RE = /^[!#$%&'*+\-.^_`|~A-Za-z0-9]+$/;
+import { SERVER_NAME_RE, ENV_KEY_RE, HEADER_NAME_RE as HEADER_KEY_RE } from './validation';
 
 const INDEX_KEY = 'mcpGateway.credentialIndex';
 const CURRENT_VERSION = 1;
