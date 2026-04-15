@@ -35,6 +35,25 @@ interface SapDetailData {
 	cspSource: string;
 }
 
+/** Build empty-state HTML for the sidebar detail view (no server selected). */
+export function buildDetailPlaceholderHtml(nonce: string, cspSource: string): string {
+	return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src ${cspSource} 'nonce-${nonce}'; script-src 'none';">
+<title>Server Detail</title>
+<style nonce="${nonce}">
+body { font-family: var(--vscode-font-family); color: var(--vscode-descriptionForeground); background: var(--vscode-editor-background); padding: 12px; margin: 0; font-style: italic; }
+</style>
+</head>
+<body>
+<p>Select a server to view details.</p>
+</body>
+</html>`;
+}
+
 /** Build MCP server detail webview HTML. */
 export function buildMcpDetailHtml(data: McpDetailData): string {
 	const { server, credentialKeys, nonce, cspSource } = data;

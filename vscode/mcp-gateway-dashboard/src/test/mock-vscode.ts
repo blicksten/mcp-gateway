@@ -3,12 +3,44 @@
 
 import Module from 'node:module';
 
+// Mock MarkdownString — matches the subset of vscode.MarkdownString used by the
+// extension. `value` accumulates appended markdown, `isTrusted` guards command
+// links, `supportHtml` mirrors the VS Code API field. Exported so tests can
+// type-narrow tooltips set by production code.
+export class MockMarkdownString {
+	value: string;
+	isTrusted: boolean;
+	supportHtml: boolean;
+
+	constructor(value?: string, supportThemeIcons: boolean = false) {
+		void supportThemeIcons;
+		this.value = value ?? '';
+		this.isTrusted = false;
+		this.supportHtml = false;
+	}
+
+	appendMarkdown(value: string): this {
+		this.value += value;
+		return this;
+	}
+
+	appendText(value: string): this {
+		this.value += value;
+		return this;
+	}
+
+	appendCodeblock(value: string, language?: string): this {
+		this.value += `\n\`\`\`${language ?? ''}\n${value}\n\`\`\`\n`;
+		return this;
+	}
+}
+
 class MockTreeItem {
 	label: string;
 	collapsibleState: number;
 	contextValue?: string;
 	description?: string;
-	tooltip?: string;
+	tooltip?: string | MockMarkdownString;
 	iconPath?: unknown;
 	command?: unknown;
 
@@ -53,7 +85,7 @@ const StatusBarAlignment = { Left: 1, Right: 2 };
 // Mock StatusBarItem — tracks state for assertions.
 export interface MockStatusBarItem {
 	text: string;
-	tooltip: string | undefined;
+	tooltip: string | MockMarkdownString | undefined;
 	command: string | undefined;
 	backgroundColor: { id: string } | undefined;
 	color: { id: string } | undefined;
@@ -88,6 +120,50 @@ export interface MockWebviewPanel {
 }
 
 export const mockWebviewPanels: MockWebviewPanel[] = [];
+
+// Mock WebviewView — sidebar variant used by WebviewViewProvider.
+export interface MockWebviewView {
+	webview: MockWebview;
+	visible: boolean;
+	disposed: boolean;
+	dispose(): void;
+	onDidDispose: (handler: () => void) => { dispose(): void };
+	_disposeHandlers: Array<() => void>;
+}
+
+export function createMockWebviewView(): MockWebviewView {
+	const messageHandlers: Array<(msg: unknown) => void> = [];
+	const disposeHandlers: Array<() => void> = [];
+	const postedMessages: unknown[] = [];
+
+	const webview: MockWebview & { options?: unknown } = {
+		html: '',
+		cspSource: '${webview.cspSource}',
+		onDidReceiveMessage: (handler: (msg: unknown) => void) => {
+			messageHandlers.push(handler);
+			return { dispose: () => { const i = messageHandlers.indexOf(handler); if (i >= 0) { messageHandlers.splice(i, 1); } } };
+		},
+		postMessage: async (msg: unknown) => { postedMessages.push(msg); return true; },
+		_messageHandlers: messageHandlers,
+		_simulateMessage: (msg: unknown) => { for (const h of messageHandlers) { h(msg); } },
+	};
+
+	const view: MockWebviewView = {
+		webview,
+		visible: true,
+		disposed: false,
+		dispose() {
+			view.disposed = true;
+			for (const h of disposeHandlers) { h(); }
+		},
+		onDidDispose: (handler: () => void) => {
+			disposeHandlers.push(handler);
+			return { dispose: () => { const i = disposeHandlers.indexOf(handler); if (i >= 0) { disposeHandlers.splice(i, 1); } } };
+		},
+		_disposeHandlers: disposeHandlers,
+	};
+	return view;
+}
 
 // Mock OutputChannel — tracks appended lines for assertions.
 export interface MockOutputChannel {
@@ -224,6 +300,7 @@ export const mockVscode = {
 	EventEmitter: MockEventEmitter,
 	ThemeIcon: MockThemeIcon,
 	ThemeColor: MockThemeColor,
+	MarkdownString: MockMarkdownString,
 	commands: {
 		registerCommand: (id: string, handler: (...args: unknown[]) => unknown) => {
 			registeredCommands.set(id, handler);
@@ -235,7 +312,11 @@ export const mockVscode = {
 		},
 	},
 	window: {
-		createTreeView: () => ({ dispose: () => {} }),
+		createTreeView: () => ({
+			dispose: () => {},
+			onDidChangeSelection: (_handler: (e: unknown) => void) => ({ dispose: () => {} }),
+		}),
+		registerWebviewViewProvider: (_viewType: string, _provider: unknown) => ({ dispose: () => {} }),
 		createWebviewPanel: (viewType: string, title: string, _showOptions?: unknown, _options?: unknown): MockWebviewPanel => {
 			const messageHandlers: Array<(msg: unknown) => void> = [];
 			const disposeHandlers: Array<() => void> = [];

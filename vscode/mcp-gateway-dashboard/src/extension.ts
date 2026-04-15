@@ -13,6 +13,7 @@ import { SapSystemItem } from './sap-item';
 import { SapStatusBar } from './sap-status-bar';
 import { ServerDetailPanel } from './webview/server-detail-panel';
 import { SapDetailPanel } from './webview/sap-detail-panel';
+import { ServerDetailViewProvider } from './webview/server-detail-view-provider';
 
 // Accepted client interface — allows dependency injection for tests.
 export interface IGatewayClient {
@@ -77,10 +78,37 @@ export function activate(
 	const credentialStore = new CredentialStore(context);
 	credentialStore.reconcile().catch(() => { /* stale entries pruned on best-effort */ });
 
+	// Phase 11.B: sidebar detail view provider — always-on webview replacing
+	// the click-toggle WebviewPanel UX pitfall (VS Code issues #34130, #51536,
+	// #77418, #85636, #105256). Legacy ServerDetailPanel / SapDetailPanel are
+	// retained for the explicit context-menu "Show Details" action.
+	const detailViewProvider = new ServerDetailViewProvider(context.extensionUri, cache, credentialStore);
+	context.subscriptions.push(detailViewProvider);
+	context.subscriptions.push(vscode.window.registerWebviewViewProvider(
+		ServerDetailViewProvider.viewType,
+		detailViewProvider,
+	));
+	context.subscriptions.push(treeView.onDidChangeSelection((e) => {
+		const first = e.selection[0];
+		if (first instanceof BackendItem) {
+			detailViewProvider.setMcpSelection(first.server);
+		} else {
+			detailViewProvider.setMcpSelection(null);
+		}
+	}));
+	context.subscriptions.push(sapTreeView.onDidChangeSelection((e) => {
+		const first = e.selection[0];
+		if (first instanceof SapSystemItem) {
+			detailViewProvider.setSapSelection(first.system);
+		} else {
+			detailViewProvider.setSapSelection(null);
+		}
+	}));
+
 	registerCommands(context, client, cache, daemon, logViewer, credentialStore);
 
 	// Phase 8.3: shared listServers() timer in cache (replaces per-provider timers).
-	// Note: McpStatusBar retains its own timer for the /health endpoint.
+	// Phase 11.B: McpStatusBar now consumes cache events; only cache has a timer.
 	cache.startAutoRefresh(pollInterval);
 
 	// Phase 8.4: auto-update open webview panels on cache refresh.
@@ -95,9 +123,9 @@ export function activate(
 	}
 
 	// Phase 2.5: status bar — aggregate MCP N/M indicator.
-	const statusBar = new McpStatusBar(client);
+	// Phase 11.B: driven by ServerDataCache.onDidRefresh (no independent polling).
+	const statusBar = new McpStatusBar(cache);
 	context.subscriptions.push(statusBar);
-	statusBar.startPolling(pollInterval);
 
 	// Phase 8.3: SAP status bar.
 	const sapStatusBar = new SapStatusBar(cache);

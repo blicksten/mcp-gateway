@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { ServerView, ServerStatus } from './types';
+import { escapeMd } from './markdown-utils';
 
 interface IconDef {
 	id: string;
@@ -35,21 +36,25 @@ export class BackendItem extends vscode.TreeItem {
 		);
 	}
 
-	private static buildTooltip(server: ServerView): string {
-		const lines = [`${server.name} \u2014 ${server.status}`];
-		lines.push(`Transport: ${server.transport || 'rest'}`);
+	private static buildTooltip(server: ServerView): vscode.MarkdownString {
+		const md = new vscode.MarkdownString();
+		md.isTrusted = false;
+		md.supportHtml = false;
+		md.appendMarkdown(`**${escapeMd(server.name)}** — ${server.status}\n\n`);
+		md.appendMarkdown(`- Transport: \`${escapeMd(server.transport || 'rest')}\`\n`);
 		if (server.pid) {
-			lines.push(`PID: ${server.pid}`);
+			md.appendMarkdown(`- PID: \`${server.pid}\`\n`);
 		}
 		if (server.restart_count > 0) {
-			lines.push(`Restarts: ${server.restart_count}`);
+			md.appendMarkdown(`- Restarts: ${server.restart_count}\n`);
 		}
 		if (server.last_error) {
-			lines.push(`Error: ${server.last_error}`);
+			md.appendMarkdown(`- Error: ${escapeMd(server.last_error)}\n`);
 		}
 		if (server.tools?.length) {
-			lines.push(`Tools: ${server.tools.length}`);
+			md.appendMarkdown(`- Tools: ${server.tools.length}\n`);
 		}
-		return lines.join('\n');
+		return md;
 	}
 }
+

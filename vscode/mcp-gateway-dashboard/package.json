@@ -38,6 +38,11 @@
         {
           "id": "mcpSapSystems",
           "name": "SAP Systems"
+        },
+        {
+          "id": "mcpGateway.serverDetail",
+          "name": "Server Detail",
+          "type": "webview"
         }
       ]
     },

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import type { ServerDataCache } from './server-data-cache';
 import type { SapSystem } from './sap-detector';
 import type { ServerStatus } from './types';
+import { escapeMd } from './markdown-utils';
 
 const STATUS_DOTS: Record<ServerStatus, string> = {
 	running: '\u25CF',
@@ -55,14 +56,28 @@ export class SapStatusBar implements vscode.Disposable {
 			this.item.color = undefined;
 		}
 
-		this.item.tooltip = systems.map((s) => {
-			const parts = [`${s.key}: ${s.status}`];
-			if (s.vsp) { parts.push(`  VSP: ${s.vsp.name} (${s.vsp.status})`); }
-			if (s.gui) { parts.push(`  GUI: ${s.gui.name} (${s.gui.status})`); }
-			return parts.join('\n');
-		}).join('\n\n');
+		this.item.tooltip = this.buildTooltip(systems);
 
 		this.item.show();
+	}
+
+	private buildTooltip(systems: readonly SapSystem[]): vscode.MarkdownString {
+		const md = new vscode.MarkdownString();
+		md.isTrusted = false;
+		md.supportHtml = false;
+
+		md.appendMarkdown(`**SAP Systems** (${systems.length})\n`);
+
+		for (const s of systems) {
+			md.appendMarkdown(`\n**${escapeMd(s.key)}** — ${s.status}\n`);
+			if (s.vsp) {
+				md.appendMarkdown(`- VSP: \`${escapeMd(s.vsp.name)}\` (${s.vsp.status})\n`);
+			}
+			if (s.gui) {
+				md.appendMarkdown(`- GUI: \`${escapeMd(s.gui.name)}\` (${s.gui.status})\n`);
+			}
+		}
+		return md;
 	}
 
 	dispose(): void {
@@ -70,3 +85,4 @@ export class SapStatusBar implements vscode.Disposable {
 		this.item.dispose();
 	}
 }
+

@@ -1,5 +1,6 @@
 // Import mock BEFORE production modules (CommonJS require order).
 import './mock-vscode';
+import { MockMarkdownString } from './mock-vscode';
 
 import * as assert from 'node:assert';
 import { describe, it, beforeEach, afterEach } from 'mocha';
@@ -315,6 +316,15 @@ describe('BackendItem', () => {
 	});
 
 	describe('tooltip', () => {
+		it('is a MarkdownString with non-trusted flag', () => {
+			const server: ServerView = { name: 'srv', status: 'running', transport: 'http', restart_count: 0 };
+			const item = new BackendItem(server);
+			const tip = item.tooltip as MockMarkdownString;
+			assert.ok(tip instanceof MockMarkdownString, 'tooltip should be a MarkdownString');
+			assert.strictEqual(tip.isTrusted, false);
+			assert.strictEqual(tip.supportHtml, false);
+		});
+
 		it('includes name, status, transport, and optional fields', () => {
 			const server: ServerView = {
 				name: 'ctx7', status: 'running', transport: 'http',
@@ -322,12 +332,12 @@ describe('BackendItem', () => {
 				tools: [{ name: 't', description: 'd', server: 'ctx7' }],
 			};
 			const item = new BackendItem(server);
-			const tip = item.tooltip as string;
+			const tip = (item.tooltip as MockMarkdownString).value;
 			assert.ok(tip.includes('ctx7'));
 			assert.ok(tip.includes('running'));
 			assert.ok(tip.includes('http'));
 			assert.ok(tip.includes('42'));
-			assert.ok(tip.includes('3'));
+			assert.ok(tip.includes('Restarts: 3'));
 			assert.ok(tip.includes('oops'));
 			assert.ok(tip.includes('Tools: 1'));
 		});
@@ -335,7 +345,7 @@ describe('BackendItem', () => {
 		it('omits optional fields when absent', () => {
 			const server: ServerView = { name: 'min', status: 'stopped', transport: 'stdio', restart_count: 0 };
 			const item = new BackendItem(server);
-			const tip = item.tooltip as string;
+			const tip = (item.tooltip as MockMarkdownString).value;
 			assert.ok(!tip.includes('PID'));
 			assert.ok(!tip.includes('Restarts'));
 			assert.ok(!tip.includes('Error'));
@@ -373,8 +383,9 @@ describe('BackendItem description (transport badge + restart count)', () => {
 		const server: ServerView = { name: 'srv', status: 'running', transport: '', restart_count: 0 };
 		const item = new BackendItem(server);
 		assert.strictEqual(item.description, 'rest');
-		const tip = item.tooltip as string;
-		assert.ok(tip.includes('Transport: rest'), `Expected tooltip to contain "Transport: rest", got: ${tip}`);
+		const tip = (item.tooltip as MockMarkdownString).value;
+		assert.ok(tip.includes('Transport:') && tip.includes('rest'),
+			`Expected tooltip to mention Transport and rest, got: ${tip}`);
 	});
 
 	it('falls back to "rest" with restart count when transport is empty', () => {
