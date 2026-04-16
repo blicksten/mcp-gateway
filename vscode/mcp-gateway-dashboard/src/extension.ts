@@ -15,6 +15,7 @@ import { SapDetailPanel } from './webview/sap-detail-panel';
 import { ServerDetailViewProvider } from './webview/server-detail-view-provider';
 import { AddServerPanel } from './webview/add-server-panel';
 import { AddSapPanel } from './webview/add-sap-panel';
+import { SlashCommandGenerator } from './slash-command-generator';
 import {
 	SERVER_NAME_RE,
 	validateServerName,
@@ -138,6 +139,20 @@ export function activate(
 	// Phase 8.3: SAP status bar.
 	const sapStatusBar = new SapStatusBar(cache);
 	context.subscriptions.push(sapStatusBar);
+
+	// Phase 11.E: slash command auto-generation.
+	const slashGen = new SlashCommandGenerator(cache);
+	context.subscriptions.push(slashGen);
+	if (config.get<boolean>('slashCommandsEnabled', false)) {
+		slashGen.enable();
+	}
+	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
+		if (e.affectsConfiguration('mcpGateway.slashCommandsEnabled')) {
+			const enabled = vscode.workspace.getConfiguration('mcpGateway')
+				.get<boolean>('slashCommandsEnabled', false);
+			if (enabled) { slashGen.enable(); } else { slashGen.disable(); }
+		}
+	}));
 }
 
 export function deactivate(): void {

@@ -257,6 +257,16 @@
           "type": "boolean",
           "default": false,
           "description": "Group SAP systems hierarchically (SID → VSP/GUI children). When off, each SAP system row shows composite status inline."
+        },
+        "mcpGateway.slashCommandsEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-generate .claude/commands/<server>.md files when servers start or stop."
+        },
+        "mcpGateway.slashCommandsPath": {
+          "type": "string",
+          "default": "${workspaceFolder}/.claude/commands",
+          "description": "Directory for auto-generated slash command files. Supports ${workspaceFolder} variable."
         }
       }
     }
