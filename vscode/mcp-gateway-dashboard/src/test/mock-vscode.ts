@@ -183,6 +183,21 @@ export const mockOutputChannels: MockOutputChannel[] = [];
 // Exported for test assertions.
 export const mockStatusBarItems: MockStatusBarItem[] = [];
 
+// Configurable workspace.getConfiguration values: tests can set/clear entries
+// in `mockConfigValues` to exercise production code paths that depend on
+// specific settings (e.g. `mcpGateway.sapGroupBySid`).
+export const mockConfigValues: Record<string, unknown> = {};
+
+// Registered onDidChangeConfiguration handlers — tests use
+// `fireConfigChange(key)` to simulate a live setting change from the UI.
+const configChangeHandlers: Array<(e: { affectsConfiguration: (key: string) => boolean }) => void> = [];
+
+/** Fire a synthetic configuration-change event to all registered handlers. */
+export function fireConfigChange(changedKey: string): void {
+	const evt = { affectsConfiguration: (k: string) => k === changedKey };
+	for (const h of [...configChangeHandlers]) { h(evt); }
+}
+
 // Registered commands store — accessible from tests for invocation.
 const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
 
@@ -274,6 +289,8 @@ export function resetMockState(): void {
 	mockStatusBarItems.length = 0;
 	mockOutputChannels.length = 0;
 	mockWebviewPanels.length = 0;
+	for (const k of Object.keys(mockConfigValues)) { delete mockConfigValues[k]; }
+	configChangeHandlers.length = 0;
 }
 
 export function getRegisteredCommands(): Map<string, (...args: unknown[]) => unknown> {
@@ -413,9 +430,24 @@ export const mockVscode = {
 		},
 	},
 	workspace: {
-		getConfiguration: () => ({
-			get: (_key: string, defaultValue: unknown) => defaultValue,
+		getConfiguration: (section?: string) => ({
+			get: (key: string, defaultValue: unknown) => {
+				// Match either the fully-qualified key (`${section}.${key}`)
+				// or the bare key — tests may set either form.
+				const fullKey = section ? `${section}.${key}` : key;
+				if (fullKey in mockConfigValues) { return mockConfigValues[fullKey]; }
+				if (key in mockConfigValues) { return mockConfigValues[key]; }
+				return defaultValue;
+			},
 		}),
+		onDidChangeConfiguration: (handler: (e: { affectsConfiguration: (key: string) => boolean }) => void) => {
+			configChangeHandlers.push(handler);
+			return { dispose: () => {
+				const i = configChangeHandlers.indexOf(handler);
+				if (i >= 0) { configChangeHandlers.splice(i, 1); }
+			} };
+		},
+		workspaceFolders: undefined as unknown[] | undefined,
 	},
 	env: {
 		clipboard: {

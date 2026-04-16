@@ -4,17 +4,21 @@ import {
 	SERVER_NAME_RE,
 	ENV_KEY_RE,
 	HEADER_NAME_RE,
+	SAP_SID_RE,
+	SAP_CLIENT_RE,
 	validateServerName,
 	validateUrl,
 	validateStdioCommand,
 	validateEnvEntry,
 	validateHeaderEntry,
+	validateSapSid,
+	validateSapClient,
 	detectTransport,
 	isAbsolutePath,
 	parseEnvEntry,
 	parseHeaderEntry,
 } from '../validation';
-import { buildAddServerHtml } from '../webview/html-builder';
+import { buildAddServerHtml, buildAddSapHtml } from '../webview/html-builder';
 
 describe('validation: validateServerName', () => {
 	it('accepts valid names', () => {
@@ -242,6 +246,158 @@ describe('validation: isAbsolutePath (platform-agnostic)', () => {
 		assert.ok(!isAbsolutePath('../server'));
 		assert.ok(!isAbsolutePath('C:'));
 		assert.ok(!isAbsolutePath('CC:\\x'));
+	});
+});
+
+describe('validation: validateSapSid', () => {
+	it('accepts 3 uppercase letters', () => {
+		assert.equal(validateSapSid('DEV'), null);
+		assert.equal(validateSapSid('QAS'), null);
+		assert.equal(validateSapSid('PRD'), null);
+	});
+
+	it('accepts mixed letters and digits', () => {
+		assert.equal(validateSapSid('A4H'), null);
+		assert.equal(validateSapSid('S42'), null);
+		assert.equal(validateSapSid('000'), null);
+	});
+
+	it('trims surrounding whitespace', () => {
+		assert.equal(validateSapSid('  DEV  '), null);
+	});
+
+	it('rejects empty and whitespace-only', () => {
+		assert.ok(validateSapSid('') !== null);
+		assert.ok(validateSapSid('   ') !== null);
+	});
+
+	it('rejects too short', () => {
+		assert.ok(validateSapSid('AB') !== null);
+		assert.ok(validateSapSid('A') !== null);
+	});
+
+	it('rejects too long', () => {
+		assert.ok(validateSapSid('DEVX') !== null);
+	});
+
+	it('rejects lowercase (validator does not uppercase)', () => {
+		assert.ok(validateSapSid('dev') !== null);
+	});
+
+	it('rejects punctuation', () => {
+		assert.ok(validateSapSid('A-H') !== null);
+		assert.ok(validateSapSid('A_H') !== null);
+		assert.ok(validateSapSid('A H') !== null);
+	});
+
+	it('SAP_SID_RE matches exactly', () => {
+		assert.ok(SAP_SID_RE.test('A4H'));
+		assert.ok(!SAP_SID_RE.test('abc'));
+	});
+});
+
+describe('validation: validateSapClient', () => {
+	it('accepts 3 digits', () => {
+		assert.equal(validateSapClient('000'), null);
+		assert.equal(validateSapClient('100'), null);
+		assert.equal(validateSapClient('800'), null);
+	});
+
+	it('accepts empty (client is optional)', () => {
+		assert.equal(validateSapClient(''), null);
+		assert.equal(validateSapClient('   '), null);
+	});
+
+	it('rejects non-digit characters', () => {
+		assert.ok(validateSapClient('abc') !== null);
+		assert.ok(validateSapClient('1a2') !== null);
+	});
+
+	it('rejects wrong length', () => {
+		assert.ok(validateSapClient('10') !== null);
+		assert.ok(validateSapClient('1000') !== null);
+	});
+
+	it('SAP_CLIENT_RE matches exactly', () => {
+		assert.ok(SAP_CLIENT_RE.test('100'));
+		assert.ok(!SAP_CLIENT_RE.test('10'));
+	});
+});
+
+describe('validation: webview isAbsolutePath runtime parity', () => {
+	// Extract the `isAbsolutePath` function from the emitted webview HTML and
+	// execute it in an isolated Function scope. This proves the template-literal
+	// escape layers produce a correct runtime function — two previous Sonnet
+	// reviews incorrectly flagged this as broken by miscounting escape depths
+	// (TS template literal `\\` → output text `\` → JS runtime `\`).
+	function extractWebviewIsAbsolutePath(html: string): (p: string) => boolean {
+		const match = html.match(/function isAbsolutePath\([\s\S]*?\n\}/);
+		if (!match) { throw new Error('isAbsolutePath function not found in emitted HTML'); }
+		// eslint-disable-next-line @typescript-eslint/no-implied-eval -- intentional: we are verifying the embedded script's runtime behavior.
+		return new Function('p', `${match[0]}\nreturn isAbsolutePath(p);`) as (p: string) => boolean;
+	}
+
+	it('buildAddServerHtml webview isAbsolutePath recognizes POSIX/UNC/Windows', () => {
+		const fn = extractWebviewIsAbsolutePath(buildAddServerHtml('n', 'c'));
+		assert.strictEqual(fn('/usr/bin/server'), true);
+		assert.strictEqual(fn('C:\\bin\\server'), true);
+		assert.strictEqual(fn('C:/bin/server'), true);
+		assert.strictEqual(fn('\\\\host\\share'), true);
+		assert.strictEqual(fn('relative/path'), false);
+		assert.strictEqual(fn(''), false);
+		assert.strictEqual(fn('C:'), false);
+	});
+
+	it('buildAddSapHtml webview isAbsolutePath recognizes POSIX/UNC/Windows', () => {
+		const fn = extractWebviewIsAbsolutePath(buildAddSapHtml('n', 'c'));
+		assert.strictEqual(fn('/usr/bin/server'), true);
+		assert.strictEqual(fn('C:\\bin\\server'), true);
+		assert.strictEqual(fn('C:/bin/server'), true);
+		assert.strictEqual(fn('\\\\host\\share'), true);
+		assert.strictEqual(fn('relative/path'), false);
+		assert.strictEqual(fn(''), false);
+	});
+
+	it('webview isAbsolutePath behavior matches src/validation.ts#isAbsolutePath exactly', () => {
+		const fn = extractWebviewIsAbsolutePath(buildAddSapHtml('n', 'c'));
+		const samples = [
+			'/usr/bin', '/', '/tmp/a',
+			'C:\\', 'C:\\bin', 'C:/x', 'z:\\y',
+			'\\\\host\\share', '\\\\server\\path',
+			'', '   ', 'C:', 'CC:\\x', 'relative', './foo', '../foo',
+		];
+		for (const s of samples) {
+			assert.strictEqual(fn(s), isAbsolutePath(s), `mismatch on ${JSON.stringify(s)}`);
+		}
+	});
+});
+
+describe('validation: SAP webview regex parity (buildAddSapHtml)', () => {
+	const html = buildAddSapHtml('test-nonce', 'https://example');
+
+	function jsonForScript(value: unknown): string {
+		return JSON.stringify(value)
+			.replace(/&/g, '\\u0026')
+			.replace(/</g, '\\u003c')
+			.replace(/>/g, '\\u003e');
+	}
+
+	it('embeds SAP_SID_RE source via new RegExp', () => {
+		const injected = jsonForScript(SAP_SID_RE.source);
+		assert.ok(html.includes(`new RegExp(${injected})`));
+	});
+
+	it('embeds SAP_CLIENT_RE source via new RegExp', () => {
+		const injected = jsonForScript(SAP_CLIENT_RE.source);
+		assert.ok(html.includes(`new RegExp(${injected})`));
+	});
+
+	it('buildAddSapHtml has restrictive CSP with form-action none', () => {
+		assert.ok(html.includes("default-src 'none'"));
+		assert.ok(html.includes(`script-src 'nonce-test-nonce'`));
+		assert.ok(html.includes("form-action 'none'"));
+		assert.ok(!html.includes("'unsafe-inline'"));
+		assert.ok(!html.includes("'unsafe-eval'"));
 	});
 });
 

@@ -8,12 +8,13 @@ import { LogViewer } from './log-viewer';
 import { CredentialStore } from './credential-store';
 import { ServerDataCache } from './server-data-cache';
 import { SapTreeProvider } from './sap-tree-provider';
-import { SapSystemItem } from './sap-item';
+import { SapSystemItem, SapComponentItem } from './sap-item';
 import { SapStatusBar } from './sap-status-bar';
 import { ServerDetailPanel } from './webview/server-detail-panel';
 import { SapDetailPanel } from './webview/sap-detail-panel';
 import { ServerDetailViewProvider } from './webview/server-detail-view-provider';
 import { AddServerPanel } from './webview/add-server-panel';
+import { AddSapPanel } from './webview/add-sap-panel';
 import {
 	SERVER_NAME_RE,
 	validateServerName,
@@ -103,7 +104,9 @@ export function activate(
 	}));
 	context.subscriptions.push(sapTreeView.onDidChangeSelection((e) => {
 		const first = e.selection[0];
-		if (first instanceof SapSystemItem) {
+		// Hierarchical mode: clicking a SapComponentItem child row must surface
+		// the parent system in the detail view, not clear it (fallback fixed H-2).
+		if (first instanceof SapSystemItem || first instanceof SapComponentItem) {
 			detailViewProvider.setSapSelection(first.system);
 		} else {
 			detailViewProvider.setSapSelection(null);
@@ -254,26 +257,50 @@ function registerCommands(
 	}));
 
 	// Phase 8.3: SAP-specific commands.
-	push(vscode.commands.registerCommand('mcpGateway.restartSapVsp', async (item?: SapSystemItem) => {
-		if (!item?.system.vsp) { return; }
-		await guarded(item.system.vsp.name, 'restart SAP VSP', () =>
-			client.restartServer(item.system.vsp!.name) as Promise<void>);
+	// Resolve the VSP/GUI server name from either a SapSystemItem (flat tree
+	// or group parent in hierarchical mode) or a SapComponentItem (child row
+	// in hierarchical mode). Returns null when the component is not present.
+	function resolveSapServer(item: SapSystemItem | SapComponentItem | undefined, kind: 'vsp' | 'gui'): string | null {
+		if (!item) { return null; }
+		if (item instanceof SapComponentItem) {
+			return item.kind === kind ? item.server.name : null;
+		}
+		return item.system[kind]?.name ?? null;
+	}
+
+	push(vscode.commands.registerCommand('mcpGateway.restartSapVsp', async (item?: SapSystemItem | SapComponentItem) => {
+		const name = resolveSapServer(item, 'vsp');
+		if (!name) { return; }
+		await guarded(name, 'restart SAP VSP', () =>
+			client.restartServer(name) as Promise<void>);
 	}));
 
-	push(vscode.commands.registerCommand('mcpGateway.restartSapGui', async (item?: SapSystemItem) => {
-		if (!item?.system.gui) { return; }
-		await guarded(item.system.gui.name, 'restart SAP GUI', () =>
-			client.restartServer(item.system.gui!.name) as Promise<void>);
+	push(vscode.commands.registerCommand('mcpGateway.restartSapGui', async (item?: SapSystemItem | SapComponentItem) => {
+		const name = resolveSapServer(item, 'gui');
+		if (!name) { return; }
+		await guarded(name, 'restart SAP GUI', () =>
+			client.restartServer(name) as Promise<void>);
 	}));
 
-	push(vscode.commands.registerCommand('mcpGateway.showSapVspLogs', (item?: SapSystemItem) => {
-		if (!item?.system.vsp) { return; }
-		logViewer.show(item.system.vsp.name);
+	push(vscode.commands.registerCommand('mcpGateway.showSapVspLogs', (item?: SapSystemItem | SapComponentItem) => {
+		const name = resolveSapServer(item, 'vsp');
+		if (!name) { return; }
+		logViewer.show(name);
 	}));
 
-	push(vscode.commands.registerCommand('mcpGateway.showSapGuiLogs', (item?: SapSystemItem) => {
-		if (!item?.system.gui) { return; }
-		logViewer.show(item.system.gui.name);
+	push(vscode.commands.registerCommand('mcpGateway.showSapGuiLogs', (item?: SapSystemItem | SapComponentItem) => {
+		const name = resolveSapServer(item, 'gui');
+		if (!name) { return; }
+		logViewer.show(name);
+	}));
+
+	push(vscode.commands.registerCommand('mcpGateway.addSapSystem', async () => {
+		await AddSapPanel.createOrShow(
+			context.extensionUri,
+			client,
+			cache,
+			() => { void cache.refresh(); },
+		);
 	}));
 
 	// Phase 8.4: webview detail panels.
@@ -283,10 +310,14 @@ function registerCommands(
 			context.extensionUri, item.server, credentialStore, client);
 	}));
 
-	push(vscode.commands.registerCommand('mcpGateway.showSapDetail', async (item?: SapSystemItem) => {
+	push(vscode.commands.registerCommand('mcpGateway.showSapDetail', async (item?: SapSystemItem | SapComponentItem) => {
 		if (!item) { return; }
+		// In hierarchical mode, showSapDetail may be invoked from a child row —
+		// the detail panel always targets the parent SapSystem, so SapComponentItem
+		// falls back to item.system.
+		const system = item.system;
 		await SapDetailPanel.createOrShow(
-			context.extensionUri, item.system, credentialStore, client);
+			context.extensionUri, system, credentialStore, client);
 	}));
 
 	// Phase 8.4: internal command for webview action messages.

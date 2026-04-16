@@ -128,6 +128,12 @@ describe('Commands', () => {
 			'mcpGateway.showLogs',
 			'mcpGateway.startDaemon',
 			'mcpGateway.stopDaemon',
+			'mcpGateway.restartSapVsp',
+			'mcpGateway.restartSapGui',
+			'mcpGateway.showSapVspLogs',
+			'mcpGateway.showSapGuiLogs',
+			'mcpGateway.showSapDetail',
+			'mcpGateway.addSapSystem',
 		];
 
 		for (const cmd of expectedCommands) {
@@ -299,6 +305,84 @@ describe('Commands (with injected client)', () => {
 		assert.strictEqual(mockWebviewPanels.length, panelsBefore + 1, 'command must open exactly one panel');
 		const { AddServerPanel } = require('../webview/add-server-panel');
 		AddServerPanel._reset();
+	});
+
+	// Phase 11.D: SAP command dispatch with SapSystemItem vs SapComponentItem.
+	describe('SAP commands (Phase 11.D dispatch)', () => {
+		function makeSapSystem(name = 'DEV', hasVsp = true, hasGui = true) {
+			const { SapSystemItem } = require('../sap-item');
+			return new SapSystemItem({
+				key: name,
+				sid: name,
+				status: 'running',
+				vsp: hasVsp ? { name: `vsp-${name}`, status: 'running', transport: 'stdio', restart_count: 0 } : undefined,
+				gui: hasGui ? { name: `sap-gui-${name}`, status: 'running', transport: 'http', restart_count: 0 } : undefined,
+			});
+		}
+
+		function makeSapComponent(systemName: string, kind: 'vsp' | 'gui') {
+			const { SapComponentItem } = require('../sap-item');
+			const system = {
+				key: systemName,
+				sid: systemName,
+				status: 'running',
+				vsp: { name: `vsp-${systemName}`, status: 'running', transport: 'stdio', restart_count: 0 },
+				gui: { name: `sap-gui-${systemName}`, status: 'running', transport: 'http', restart_count: 0 },
+			};
+			const server = kind === 'vsp' ? system.vsp : system.gui;
+			return new SapComponentItem(system, kind, server);
+		}
+
+		it('restartSapVsp with SapSystemItem calls client.restartServer for VSP', async () => {
+			const item = makeSapSystem('DEV');
+			await commands.get('mcpGateway.restartSapVsp')!(item);
+			assert.strictEqual(trackingClient.calls.length, 1);
+			assert.strictEqual(trackingClient.calls[0].method, 'restartServer');
+			assert.deepStrictEqual(trackingClient.calls[0].args, ['vsp-DEV']);
+		});
+
+		it('restartSapVsp with SapComponentItem (vsp) calls client.restartServer', async () => {
+			const item = makeSapComponent('DEV', 'vsp');
+			await commands.get('mcpGateway.restartSapVsp')!(item);
+			assert.strictEqual(trackingClient.calls.length, 1);
+			assert.deepStrictEqual(trackingClient.calls[0].args, ['vsp-DEV']);
+		});
+
+		it('restartSapVsp with SapComponentItem (gui) is a no-op (wrong kind)', async () => {
+			const item = makeSapComponent('DEV', 'gui');
+			await commands.get('mcpGateway.restartSapVsp')!(item);
+			assert.strictEqual(trackingClient.calls.length, 0);
+		});
+
+		it('restartSapGui with SapComponentItem (gui) calls client.restartServer', async () => {
+			const item = makeSapComponent('DEV', 'gui');
+			await commands.get('mcpGateway.restartSapGui')!(item);
+			assert.strictEqual(trackingClient.calls.length, 1);
+			assert.deepStrictEqual(trackingClient.calls[0].args, ['sap-gui-DEV']);
+		});
+
+		it('restartSapGui with SapSystemItem calls client.restartServer for GUI', async () => {
+			const item = makeSapSystem('DEV');
+			await commands.get('mcpGateway.restartSapGui')!(item);
+			assert.strictEqual(trackingClient.calls.length, 1);
+			assert.deepStrictEqual(trackingClient.calls[0].args, ['sap-gui-DEV']);
+		});
+
+		it('restartSapVsp on SapSystemItem without vsp is a no-op', async () => {
+			const item = makeSapSystem('DEV', false, true);
+			await commands.get('mcpGateway.restartSapVsp')!(item);
+			assert.strictEqual(trackingClient.calls.length, 0);
+		});
+
+		it('addSapSystem command opens panel without calling client.addServer', async () => {
+			const before = trackingClient.calls.length;
+			const panelsBefore = mockWebviewPanels.length;
+			await commands.get('mcpGateway.addSapSystem')!();
+			assert.strictEqual(trackingClient.calls.length, before, 'command must not call client directly');
+			assert.strictEqual(mockWebviewPanels.length, panelsBefore + 1, 'command must open exactly one panel');
+			const { AddSapPanel } = require('../webview/add-sap-panel');
+			AddSapPanel._reset();
+		});
 	});
 
 	it('removeServer cleans credentials even when daemon fails', async () => {

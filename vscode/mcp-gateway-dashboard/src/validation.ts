@@ -1,6 +1,12 @@
 /** Server name validation: alphanumeric, hyphens, underscores, max 64 chars (matches Go serverNameRe). */
 export const SERVER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 
+/** SAP system ID: exactly 3 uppercase letters/digits, matching SAP_VSP_RE in sap-detector.ts. */
+export const SAP_SID_RE = /^[A-Z0-9]{3}$/;
+
+/** SAP client: exactly 3 digits. */
+export const SAP_CLIENT_RE = /^\d{3}$/;
+
 /** Environment variable key: POSIX identifier. */
 export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -92,6 +98,26 @@ export function validateHeaderEntry(v: string): string | null {
 	const hName = trimmed.substring(0, colon).trim();
 	if (!HEADER_NAME_RE.test(hName)) {
 		return 'Header name must be a valid RFC 7230 token';
+	}
+	return null;
+}
+
+/** Validate SAP system ID. */
+export function validateSapSid(v: string): string | null {
+	const trimmed = v.trim();
+	if (!trimmed) { return 'SID is required'; }
+	if (!SAP_SID_RE.test(trimmed)) {
+		return 'SID must be exactly 3 uppercase letters or digits (e.g. DEV, A4H, S42)';
+	}
+	return null;
+}
+
+/** Validate SAP client number (empty is OK — client is optional). */
+export function validateSapClient(v: string): string | null {
+	const trimmed = v.trim();
+	if (!trimmed) { return null; } // client is optional
+	if (!SAP_CLIENT_RE.test(trimmed)) {
+		return 'Client must be exactly 3 digits (e.g. 000, 100, 800)';
 	}
 	return null;
 }

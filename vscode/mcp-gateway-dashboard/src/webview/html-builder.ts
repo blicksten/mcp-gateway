@@ -1,6 +1,6 @@
 import type { ServerView, ToolInfo } from '../types';
 import type { SapSystem } from '../sap-detector';
-import { SERVER_NAME_RE, ENV_KEY_RE, HEADER_NAME_RE } from '../validation';
+import { SERVER_NAME_RE, ENV_KEY_RE, HEADER_NAME_RE, SAP_SID_RE, SAP_CLIENT_RE } from '../validation';
 
 /** Escape HTML special characters to prevent XSS. */
 export function escapeHtml(s: string): string {
@@ -440,6 +440,228 @@ window.addEventListener('message', (event) => {
 });
 
 updateDetected();
+</script>
+</body>
+</html>`;
+}
+
+/** Build Add SAP System webview form HTML. Client-side SID/Client validation. */
+export function buildAddSapHtml(nonce: string, cspSource: string): string {
+	const sidRe = jsonForScript(SAP_SID_RE.source);
+	const clientRe = jsonForScript(SAP_CLIENT_RE.source);
+
+	return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src ${cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}'; form-action 'none';">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Add SAP System</title>
+<style nonce="${nonce}">
+body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); padding: 16px; margin: 0; }
+h1 { font-size: 1.25em; margin: 0 0 12px 0; }
+form { display: flex; flex-direction: column; gap: 12px; max-width: 640px; }
+label { display: flex; flex-direction: column; gap: 4px; font-size: 0.95em; }
+.hint { font-size: 0.85em; color: var(--vscode-descriptionForeground); }
+input[type="text"] { font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); padding: 6px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 2px; }
+#sid { text-transform: uppercase; }
+input:focus { outline: 1px solid var(--vscode-focusBorder); }
+.components { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--vscode-panel-border); border-radius: 2px; }
+.components label { flex-direction: row; align-items: center; gap: 8px; }
+.actions { display: flex; gap: 8px; margin-top: 4px; }
+button { padding: 6px 16px; border: 1px solid var(--vscode-button-border, var(--vscode-panel-border)); background: var(--vscode-button-background); color: var(--vscode-button-foreground); cursor: pointer; border-radius: 2px; font-family: inherit; font-size: 0.95em; }
+button:hover { background: var(--vscode-button-hoverBackground); }
+button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
+button:disabled { opacity: 0.5; cursor: default; }
+.error { color: var(--vscode-errorForeground); font-size: 0.85em; min-height: 1em; }
+.banner { padding: 8px 12px; border-radius: 3px; margin-bottom: 8px; font-size: 0.9em; display: none; }
+.banner.err { background: var(--vscode-inputValidation-errorBackground); color: var(--vscode-inputValidation-errorForeground); border: 1px solid var(--vscode-inputValidation-errorBorder); }
+.banner.warn { background: var(--vscode-inputValidation-warningBackground); color: var(--vscode-inputValidation-warningForeground); border: 1px solid var(--vscode-inputValidation-warningBorder); }
+.preview { font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); color: var(--vscode-descriptionForeground); padding: 6px 0; }
+</style>
+</head>
+<body>
+<h1>Add SAP System</h1>
+<div id="banner" class="banner err" role="alert"></div>
+<form id="addForm" novalidate>
+  <label>
+    SID
+    <input type="text" id="sid" name="sid" autocomplete="off" spellcheck="false" maxlength="3" placeholder="DEV" required>
+    <span class="hint">Exactly 3 uppercase letters or digits (e.g. DEV, A4H, S42).</span>
+    <span class="error" id="sid-err"></span>
+  </label>
+
+  <label>
+    Client <span class="hint">(optional)</span>
+    <input type="text" id="client" name="client" autocomplete="off" spellcheck="false" maxlength="3" placeholder="100">
+    <span class="hint">Exactly 3 digits (e.g. 000, 100, 800). Leave empty for a clientless SID.</span>
+    <span class="error" id="client-err"></span>
+  </label>
+
+  <div class="components" role="group" aria-label="SAP components to create">
+    <span class="hint">Components to create</span>
+    <label><input type="checkbox" id="comp-vsp" checked> VSP (Virtual Service Provider)</label>
+    <label><input type="checkbox" id="comp-gui" checked> GUI (SAP GUI automation)</label>
+    <span class="error" id="components-err"></span>
+  </div>
+
+  <label>
+    VSP executable <span class="hint">(required if VSP selected; absolute path)</span>
+    <input type="text" id="vsp-cmd" name="vsp-cmd" autocomplete="off" spellcheck="false" placeholder="/opt/mcp-gateway/sap-vsp">
+    <span class="error" id="vsp-cmd-err"></span>
+  </label>
+
+  <label>
+    GUI executable <span class="hint">(required if GUI selected; absolute path)</span>
+    <input type="text" id="gui-cmd" name="gui-cmd" autocomplete="off" spellcheck="false" placeholder="/opt/mcp-gateway/sap-gui">
+    <span class="error" id="gui-cmd-err"></span>
+  </label>
+
+  <div class="preview" id="preview"></div>
+
+  <div class="actions">
+    <button type="submit" id="submit">Add SAP system</button>
+    <button type="button" id="cancel" class="secondary">Cancel</button>
+  </div>
+</form>
+
+<script nonce="${nonce}">
+const vscode = acquireVsCodeApi();
+
+const SID_RE = new RegExp(${sidRe});
+const CLIENT_RE = new RegExp(${clientRe});
+
+const $ = (id) => document.getElementById(id);
+
+function validateSid(v) {
+  const t = v.trim();
+  if (!t) { return 'SID is required'; }
+  if (!SID_RE.test(t)) { return 'SID must be 3 uppercase letters/digits'; }
+  return null;
+}
+
+function validateClient(v) {
+  const t = v.trim();
+  if (!t) { return null; } // optional
+  if (!CLIENT_RE.test(t)) { return 'Client must be 3 digits'; }
+  return null;
+}
+
+// Mirror of src/validation.ts#isAbsolutePath (string methods only).
+function isAbsolutePath(p) {
+  const s = (p || '').trim();
+  if (s.length === 0) { return false; }
+  if (s.charAt(0) === '/') { return true; }
+  if (s.length >= 2 && s.charAt(0) === '\\\\' && s.charAt(1) === '\\\\') { return true; }
+  if (s.length >= 3) {
+    const c = s.charCodeAt(0);
+    const isLetter = (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+    if (isLetter && s.charAt(1) === ':' && (s.charAt(2) === '\\\\' || s.charAt(2) === '/')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function validateCommand(v, required) {
+  const t = (v || '').trim();
+  if (!t) { return required ? 'Command is required' : null; }
+  if (!isAbsolutePath(t)) { return 'Use an absolute path'; }
+  return null;
+}
+
+function currentComponents() {
+  const vsp = $('comp-vsp').checked;
+  const gui = $('comp-gui').checked;
+  return { vsp, gui };
+}
+
+function updatePreview() {
+  const sid = $('sid').value.trim().toUpperCase();
+  const client = $('client').value.trim();
+  const { vsp, gui } = currentComponents();
+  if (!sid) { $('preview').textContent = ''; return; }
+  const suffix = client ? '-' + sid + '-' + client : '-' + sid;
+  const names = [];
+  if (vsp) { names.push('vsp' + suffix); }
+  if (gui) { names.push('sap-gui' + suffix); }
+  $('preview').textContent = names.length ? 'Will create: ' + names.join(', ') : 'Select at least one component';
+}
+
+function setError(field, msg) {
+  const el = $(field + '-err');
+  if (el) { el.textContent = msg || ''; }
+}
+
+function showBanner(msg, kind) {
+  const b = $('banner');
+  b.textContent = msg;
+  b.classList.remove('err', 'warn');
+  b.classList.add(kind === 'warn' ? 'warn' : 'err');
+  b.style.display = msg ? 'block' : 'none';
+}
+
+$('sid').addEventListener('input', () => { $('sid').value = $('sid').value.toUpperCase(); updatePreview(); });
+$('client').addEventListener('input', updatePreview);
+$('comp-vsp').addEventListener('change', updatePreview);
+$('comp-gui').addEventListener('change', updatePreview);
+$('cancel').addEventListener('click', () => vscode.postMessage({ type: 'cancel' }));
+
+$('addForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  showBanner('', 'err');
+  // Re-uppercase at submit time in case browser autofill pasted lowercase
+  // without firing the 'input' event (fallback fixed F-7).
+  $('sid').value = $('sid').value.toUpperCase();
+  const sid = $('sid').value.trim();
+  const client = $('client').value.trim();
+  const components = currentComponents();
+  const vspCmd = $('vsp-cmd').value.trim();
+  const guiCmd = $('gui-cmd').value.trim();
+
+  const sidErr = validateSid(sid);
+  const clientErr = validateClient(client);
+  const vspCmdErr = validateCommand(vspCmd, components.vsp);
+  const guiCmdErr = validateCommand(guiCmd, components.gui);
+  setError('sid', sidErr || '');
+  setError('client', clientErr || '');
+  setError('vsp-cmd', vspCmdErr || '');
+  setError('gui-cmd', guiCmdErr || '');
+  if (!components.vsp && !components.gui) {
+    setError('components', 'Select at least one component');
+    return;
+  }
+  setError('components', '');
+  if (sidErr || clientErr || vspCmdErr || guiCmdErr) { return; }
+
+  $('submit').disabled = true;
+  vscode.postMessage({
+    type: 'submit',
+    payload: {
+      sid: sid,
+      client: client || null,
+      components: components,
+      vspCommand: components.vsp ? vspCmd : null,
+      guiCommand: components.gui ? guiCmd : null,
+    },
+  });
+});
+
+window.addEventListener('message', (event) => {
+  const msg = event.data;
+  if (!msg || typeof msg !== 'object') { return; }
+  if (msg.type === 'nack') {
+    showBanner(typeof msg.error === 'string' ? msg.error : 'Failed to add SAP system.', 'err');
+    $('submit').disabled = false;
+  } else if (msg.type === 'warn') {
+    showBanner(typeof msg.error === 'string' ? msg.error : 'Warning', 'warn');
+    $('submit').disabled = false;
+  }
+});
+
+updatePreview();
 </script>
 </body>
 </html>`;
