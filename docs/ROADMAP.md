@@ -26,7 +26,7 @@ Phases 1–10.5 implemented. Full history preserved locally in `full-history-bac
 | 11.5 | ✅ Add Server webview form | Replace sequential InputBox prompts with a single form, auto-detect transport type. |
 | 11.6 | ✅ SAP grouping toggle | Group SAP systems by SID with colored VSP/GUI icons, opt-in via settings. |
 | 11.7 | ✅ Add SAP System flow | Webview form: SID + component checkboxes + absolute-path VSP/GUI executables. |
-| 11.8 | Settings consolidation | Rename all extension settings under `mcpGateway.*` namespace. |
+| 11.8 | ✅ Settings consolidation | All 7 settings already under `mcpGateway.*` (apiUrl, autoStart, daemonPath, pollInterval, sapGroupBySid, slashCommandsEnabled, slashCommandsPath); all `getConfiguration('mcpGateway')` calls, all commands, and storage key `mcpGateway.credentialIndex` verified namespace-consistent (audit 2026-04-16, no code changes). |
 | 11.9 | ✅ Slash command generation | Auto-generate `.claude/commands/<server>.md` on server start, delete on stop. |
 
 ### Phase 12 — Auth + KeePass (v1.2.0)
@@ -58,16 +58,13 @@ Phases 1–10.5 implemented. Full history preserved locally in `full-history-bac
 Detailed plan: `docs/PLAN-main.md` (audited [C+O] 2026-04-10, 0 MEDIUM+).
 Full codebase audit: `docs/REVIEW-main.md` (audited [C+O] 2026-04-14, 13 findings fixed, 11 deferred to planned phases).
 
-### Active Pipeline (resume state — 2026-04-15)
+### Phase 11 Completion Summary (2026-04-16)
 
-- **Pipeline:** `feature-ad5b2ffc` — Phase 11 Extension UX batch. Orchestrator MCP disconnected mid-session; 11.D ran without pipeline tracking.
-- **Step:** 3/9 (`backend-dev`) — IN PROGRESS, multi-sub-phase
-- **Sub-phase progress:** 11.A **COMPLETE** (commit `8650505`, 2026-04-15). 11.B **COMPLETE** (commit `6d059e2`, 2026-04-15 — sidebar WebviewView + MarkdownString tooltips + McpStatusBar cache migration; 276 passing, 0 failures; 1 HIGH + 4 MEDIUM found and fixed by Sonnet cross-review). 11.C **COMPLETE** (commit `ec3aae7`, 2026-04-15 — AddServerPanel webview form, shared validation.ts module, platform-agnostic isAbsolutePath; 352 passing, 0 regressions, +76 new tests; 3 HIGH + 5 MEDIUM Sonnet round-1 findings all fixed, round-2 APPROVE zero MEDIUM+). 11.D **COMPLETE** (2026-04-15 — SAP hierarchical tree + AddSapPanel; 430 passing, 0 regressions, +78 new tests; 3 HIGH + 5 MEDIUM + 3 LOW Sonnet round-1 findings all fixed; round-2 found 1 MEDIUM `showSapDetail` when-clause gap fixed + 1 MEDIUM UNC escape false positive verified via `node -e` eval and guarded by new `webview isAbsolutePath runtime parity` tests). 11.E pending.
-- **Next sub-phase (11.E):** slash command auto-generation (`.claude/commands/<server>.md`).
-- **Unpushed commits:** `8650505` (11.A), `2a10e8b` (deploy script), `6d059e2` (11.B), `ec3aae7` (11.C), plus the forthcoming 11.D commit. Push to GitLab (`git push origin main`) before starting a new session if ready to publish.
-- **Resume command:** `/run main` — picks next incomplete phase from `docs/PLAN-main.md` and drives it through the same pipeline checkpoint.
+- **Status:** Phase 11 (Extension UX v1.1.0) — ALL sub-phases COMPLETE. Final commits: `8650505` (11.A) → `6d059e2` (11.B) → `ec3aae7` (11.C) → `44f0d7a` (11.D) → `991121f` (11.E) → `64f6057` (ROADMAP/REVIEW update). 11.8 audit 2026-04-16.
+- **Unpushed commits on `main`:** `8650505`, `2a10e8b`, `6d059e2`, `ec3aae7`, `44f0d7a`, `991121f`, `64f6057` — push to GitLab (`git push origin main`) to publish v1.1.0 work.
+- **Next plan:** Phase 12 (Auth + KeePass) — run `/phase 12` to create detailed task breakdown, then `/run main`.
 - **PAL MCP status:** unavailable in this project; all cross-validation runs via sonnet sub-agent fallback per CLAUDE.md.
-- **Manual follow-up:** 31 pre-existing `GatewayClient` + `LogViewer` test failures need a local mock HTTP server — tracked as out-of-phase test-infra cleanup, not a Phase 11 blocker. The rebuilt VSIX (`vscode/mcp-gateway-dashboard/mcp-gateway-dashboard-latest.vsix`) must be installed manually via VSCode UI because `code --install-extension` fails on this machine's PATH.
+- **Known test-infra debt:** 31 pre-existing `GatewayClient` + `LogViewer` test failures need a local mock HTTP server — tracked as out-of-phase cleanup, not a Phase 11 blocker. The rebuilt VSIX (`vscode/mcp-gateway-dashboard/mcp-gateway-dashboard-latest.vsix`) must be installed manually via VSCode UI because `code --install-extension` fails on this machine's PATH.
 
 ---
 
