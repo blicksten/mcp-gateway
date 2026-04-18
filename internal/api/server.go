@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -335,7 +336,10 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		}
 	}
 
-	addr := fmt.Sprintf("%s:%d", bindAddr, port)
+	// PAL HIGH fix: use net.JoinHostPort so IPv6 addresses like "::1"
+	// get the mandatory [brackets]. fmt.Sprintf("%s:%d") would produce
+	// "::1:8765" which net.Listen rejects.
+	addr := net.JoinHostPort(bindAddr, strconv.Itoa(port))
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)

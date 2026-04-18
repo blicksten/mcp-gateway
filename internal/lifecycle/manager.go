@@ -154,8 +154,12 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 		if session != nil {
 			_ = session.Close()
 		}
+		// PAL HIGH fix: use group-aware termination so grandchildren
+		// of this MCP server are reaped on the "removed during start"
+		// error path, matching Stop()'s guarantee.
 		if cmd != nil && cmd.Process != nil {
-			_ = cmd.Process.Kill()
+			_ = terminateProcessGroup(cmd.Process)
+			_ = killProcessGroup(cmd.Process)
 			_ = cmd.Wait()
 		}
 		return fmt.Errorf("server %q removed during start", name)
@@ -269,8 +273,12 @@ func (m *Manager) connectStdio(ctx context.Context, name string, client *mcp.Cli
 	if err != nil {
 		// CR-2 fix: do NOT close stderrR here — the background goroutine owns it.
 		// It will get EOF from stderrW.Close() above and close stderrR itself.
+		// PAL HIGH fix: group-aware termination on the connect-failure
+		// path so any grandchildren the MCP server spawned before the
+		// handshake failed are also cleaned up.
 		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+			_ = terminateProcessGroup(cmd.Process)
+			_ = killProcessGroup(cmd.Process)
 			_ = cmd.Wait()
 		}
 		return nil, nil, nil, nil, fmt.Errorf("stdio connect: %w", err)
@@ -393,7 +401,20 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 			// Non-stdio (HTTP/SSE) — write synthetic log before closing session.
 			m.writeLog(name, "session closing")
 		}
-		_ = session.Close()
+		// PAL HIGH fix: a hung or misbehaving MCP server's session.Close
+		// used to block indefinitely, preventing the subsequent kill
+		// path from running. Cap the close at 2s so the kill path
+		// always gets a chance to run.
+		closeDone := make(chan struct{})
+		go func() {
+			_ = session.Close()
+			close(closeDone)
+		}()
+		select {
+		case <-closeDone:
+		case <-time.After(2 * time.Second):
+			m.logger.Warn("session close timed out; proceeding to process termination", "server", name)
+		}
 	}
 
 	// For stdio backends, ensure the child process (and, on POSIX, its

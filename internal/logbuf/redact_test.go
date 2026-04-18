@@ -7,17 +7,23 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestRedact_BearerHeader asserts the canonical HTTP Authorization
-// header is scrubbed.
+// TestRedact_BearerHeader asserts the secret in the canonical HTTP
+// Authorization header is scrubbed while the "Authorization: Bearer "
+// prefix is retained for operator diagnosability (context-preserving
+// redaction).
 func TestRedact_BearerHeader(t *testing.T) {
-	for _, in := range []string{
-		"Authorization: Bearer abcdefABCDEF1234567890-_",
-		"authorization: bearer xyz12345-7890abcdefghij",
-		"Authorization:   Bearer  DEADBEEFDEADBEEFDEADBEEFDEADBEEF",
-	} {
-		out := Redact(in)
-		assert.NotContains(t, out, "Bearer ", "Bearer scheme kept after redaction of %q", in)
+	cases := []struct{ in, secret string }{
+		{"Authorization: Bearer abcdefABCDEF1234567890-_", "abcdefABCDEF1234567890-_"},
+		{"authorization: bearer xyz12345-7890abcdefghij", "xyz12345-7890abcdefghij"},
+		{"Authorization:   Bearer  DEADBEEFDEADBEEFDEADBEEFDEADBEEF", "DEADBEEFDEADBEEFDEADBEEFDEADBEEF"},
+	}
+	for _, tc := range cases {
+		out := Redact(tc.in)
+		assert.NotContains(t, out, tc.secret, "secret value leaked after redaction of %q", tc.in)
 		assert.Contains(t, out, Redacted)
+		// Context-preserving: the word "Bearer" stays so operators
+		// know an auth header WAS present (PAL MEDIUM fix).
+		assert.Regexp(t, `(?i)bearer`, out, "Bearer prefix should be retained for diagnosability")
 	}
 }
 
@@ -43,11 +49,30 @@ func TestRedact_AWSAccessKeyID(t *testing.T) {
 
 func TestRedact_GithubPAT(t *testing.T) {
 	for _, prefix := range []string{"ghp", "gho", "ghu", "ghs", "ghr"} {
-		in := prefix + "_ABCDEFghijklmnopqrstuvwxyzABCDEF1234567"
+		secret := "ABCDEFghijklmnopqrstuvwxyzABCDEF1234567"
+		in := prefix + "_" + secret
 		out := Redact(in)
 		assert.Contains(t, out, Redacted, "GitHub %s token not redacted", prefix)
-		assert.NotContains(t, out, in)
+		assert.NotContains(t, out, secret, "%s secret leaked", prefix)
+		// The type prefix "ghp_" / "gho_" etc. is retained so
+		// operators know which kind of token leaked (context-preserving).
+		assert.Contains(t, out, prefix+"_", "%s prefix should be retained for diagnosability", prefix)
 	}
+}
+
+// TestRedact_JWT verifies three-dot JSON Web Tokens are matched by the
+// dedicated JWT pattern. The generic base64url pattern does NOT include
+// `.` so would miss these without the JWT rule.
+func TestRedact_JWT(t *testing.T) {
+	// Realistic JWT shape: header.payload.signature, each base64url.
+	in := "auth event: jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U more context"
+	out := Redact(in)
+	assert.Contains(t, out, Redacted)
+	// Assert the JWT payload "eyJzdWIiOi..." is gone. The general
+	// pattern might substitute each segment individually, but it would
+	// not span the dots; the JWT pattern ensures the whole token goes
+	// in one shot.
+	assert.NotContains(t, out, "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ")
 }
 
 func TestRedact_PasswordAssignment(t *testing.T) {

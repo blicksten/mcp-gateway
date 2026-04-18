@@ -68,9 +68,29 @@ func Watch(ctx context.Context, mainPath string, localPath string, envFilePath s
 			if !ok {
 				return nil
 			}
-			if event.Op&(fsnotify.Write|fsnotify.Create) == 0 {
+			// PAL HIGH fix: also trigger debounce on Rename|Remove.
+			// Editors that write via "temp file + rename" (atomic save)
+			// otherwise never re-run onChange because the Create event
+			// fires on the temp path, not mainPath, and the only event
+			// on mainPath is Rename.
+			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
 				continue
 			}
+
+			// Re-add the watch when the underlying file was renamed or
+			// removed — fsnotify drops watches with the inode, so the
+			// next edit would never be observed without this.
+			if event.Op&(fsnotify.Rename|fsnotify.Remove) != 0 {
+				// best-effort; the target may legitimately be gone.
+				_ = watcher.Remove(event.Name)
+				_ = watcher.Add(event.Name)
+			}
+
+			// Capture event fields so the AfterFunc closure doesn't
+			// observe a rebinding of `event` on the next iteration
+			// (PAL MEDIUM fix — classic loop-variable capture bug).
+			evName := event.Name
+			evOp := event.Op
 
 			// Debounce: reset timer on each event.
 			if timer != nil {
@@ -89,7 +109,7 @@ func Watch(ctx context.Context, mainPath string, localPath string, envFilePath s
 				if ctx.Err() != nil {
 					return
 				}
-				logger.Info("config file changed", "path", event.Name, "op", event.Op.String())
+				logger.Info("config file changed", "path", evName, "op", evOp.String())
 				onChange()
 			})
 
