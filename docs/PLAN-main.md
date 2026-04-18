@@ -114,28 +114,240 @@ Phase 14 (community/CI) — after 11.C, 11.E, 12.A
 
 ## Phase 12 — Auth + KeePass (v1.2.0)
 
-### 12.A — Bearer Token Auth (Go)
-**Goal:** Daemon generates random token; all mutating endpoints require `Authorization: Bearer <token>`.
+**Incorporates architect refinements (APPROVE_WITH_REFINEMENTS, 2026-04-17):** 4 CRITICAL (12A-1, 12A-3, 12A-7, 12B-3), 6 HIGH (12A-2, 12A-4, 12A-5, 12A-6, 12B-1, 12B-2), 4 MEDIUM (12A-8, 12B-4, 12B-5, csrf-ordering doc), 1 LOW (12B-6), 5 dev-lead hardenings (unified auth contract, DACL deny-by-default + acceptance test, transport allowlist + decision logging, `--json` golden tests, Authorization-header fallback strategy).
 
-- T12A.1-2: New `internal/api/auth.go` — `GenerateToken()` (32 bytes crypto/rand), `BearerAuthMiddleware`
-- T12A.3-4: Exempt GET read-only endpoints; mount middleware on POST/PATCH/DELETE
-- T12A.5-6: `--no-auth` flag; write token to `~/.mcp-gateway/auth-token` (0600)
-- T12A.7-9: Extension `GatewayClient` + CLI `mcp-ctl` read token file, pass in headers
-- T12A.10-12: Tests (Go + TS)
-- GATE: tests + codereview + thinkdeep — zero MEDIUM+
+**Traceability matrix — architect findings → resolving tasks → verification:**
 
-**Files:** new `internal/api/auth.go`, `server.go`, `main.go`, `gateway-client.ts`, `extension.ts`, `cmd/mcp-ctl/main.go`
-**Rollback:** Remove middleware; revert clients. Backward-compatible.
+| Finding ID | Severity | Architect text (one-line) | Resolving task(s) | Verification (test / ADR section) |
+|------------|----------|---------------------------|-------------------|------------------------------------|
+| 12A-1 | CRITICAL | MCP transport (`/mcp`, `/sse`) must enforce auth policy, not be wide-open | T12A.3c | 8-case policy matrix test in T12A.3c; ADR-0003 §policy-matrix |
+| 12A-3 | CRITICAL | Token file permissions must be platform-correct (POSIX 0600, Windows DACL) | T12A.2 | POSIX `os.Stat().Mode()` test + Windows DACL acceptance test in `token_perms_windows_test.go`; ADR-0003 §dacl-rationale |
+| 12A-7 | CRITICAL | `--no-auth` + `allow_remote` must refuse to start without explicit env escape hatch | T12A.4 | `main_noauth_test.go` exit-code matrix + 3-WARN-line grep; ADR-0003 §escape-hatch |
+| 12B-3 | CRITICAL | Master password must not be TTY-only; needs `--password-stdin` for non-TTY exec | T12B.2 | `credential_test.go` piped-stdin test; ADR-0003 §keepass-password-flow |
+| 12A-2 | HIGH | Auth middleware must wrap all mutating + sensitive-read `/api/v1` endpoints | T12A.3b | Integration matrix in T12A.3b + T12A.13; ADR-0003 §policy-matrix |
+| 12A-4 | HIGH | Token file must exist before `http.Server.Serve` accepts first request | T12A.1, T12A.5 | Startup-sequence test in T12A.5 (file mtime < first request); ADR-0003 §startup-ordering |
+| 12A-5 | HIGH | `/logs` SSE endpoint must require Bearer (daemon + extension sides) | T12A.3d (daemon), T12A.9 (extension) | Dedicated `/logs` auth integration test in T12A.3d; `log-viewer.test.ts` in T12A.9 |
+| 12A-6 | HIGH | Token persistence: read-if-exists (≥32b base64), regenerate-if-absent, env override, no breaking clients on restart | T12A.1 (persistence logic), T12A.7 (mcp-ctl env wiring), T12A.11 (first-start UX) | `token_test.go` regen/read/env-override tests in T12A.1; `mcp-ctl` env-first test in T12A.7; first-start test in T12A.11; ADR-0003 §token-lifecycle |
+| 12B-1 | HIGH | Scope reduction — Go-side KeePass already complete; extension is the focus | T12B.1, T12B.2 (Go tweaks only) + T12B.3–T12B.6 (extension) | Phase 12.B task list itself (no new Go `internal/keepass/*` work); 12.B goal paragraph |
+| 12B-2 | HIGH | `mcp-ctl credential import` must emit stable JSON for programmatic consumption | T12B.1 | Golden JSON fixture test in `credential_import_json_test.go` |
+| 12A-8 | MEDIUM | Env var escape hatch `MCP_GATEWAY_AUTH_TOKEN` for ephemeral token supply | T12A.6 (shared helper), T12A.7 (mcp-ctl), T12A.8 (extension) | `client_test.go` env-wins-over-file test; ADR-0003 §env-override-semantics |
+| 12B-4 | MEDIUM | `execFile` argv-array pattern (no shell), stdout/stderr never logged (leaks credentials) | T12B.3 | `keepass-importer.test.ts` argv-is-array + stdout-never-logged assertions |
+| 12B-5 | MEDIUM | Partial-failure-aware SecretStorage writes (skip failed servers, no stale writes) | T12B.4 | Mixed-result test (1 ok, 1 skipped, 1 error) in `keepass-importer.test.ts` |
+| csrf-ordering | MEDIUM | Document auth→csrf middleware ordering + CSRF scope (non-browser routes excluded) | T12A.0 (ADR), T12A.3b (wiring), T12A.13 (integration assertion) | ADR-0003 §csrf-scope + §ordering-rationale; T12A.13 integration test asserting order + intentional non-coverage of `/mcp`, `/sse`, `/api/*` redirect |
+| 12B-6 | LOW | Register `mcpGateway.importKeepassCredentials` command + settings (`keepassPath`, `keepassGroup`) in `package.json` | T12B.5 | `commands.test.ts` — command registered, settings present, handler wired in `activate()` |
 
-### 12.B — KeePass Credential Push (Extension)
-**Goal:** Extension shells out to `mcp-ctl credential import` and pushes credentials via PATCH.
+**PAL planner cross-validation (gpt-5.2-pro, 2026-04-17):** sub-phase split confirmed correct. Adjustments applied: `authTokenPath` setting moved to 12.A (auth infra, not KeePass-specific); `--json`/`--password-stdin` kept in 12.B (KeePass contract); explicit migration/backward-compat task group added to 12.A; logging/redaction tasks added (never log token/Authorization header); token rotation documented as out-of-scope in ADR-0003.
 
-- T12B.1-4: New `keepass-importer.ts` — exec mcp-ctl, parse output, PATCH servers, store in SecretStorage
-- T12B.5-6: Register command + tests
-- GATE: tests + codereview + thinkdeep — zero MEDIUM+
+**Open question (user-escalate before T12A.3c):** Does Claude Desktop / Cursor MCP HTTP client support custom `Authorization` headers on `/mcp` and `/sse`? Resolution blocks T12A.3c (two-branch task). Escalation due before 12.A implementation starts.
 
-**Files:** new `keepass-importer.ts`, `extension.ts`, `package.json`
-**Rollback:** Remove command; delete importer.
+### 12.A — Bearer Token Auth (Go daemon + 3 clients)
+
+**Goal:** Daemon generates a random Bearer token at startup; all mutating + sensitive read endpoints require `Authorization: Bearer <token>`; `/health` and `/version` remain public; token lifecycle (generate/persist/reuse/env-override) and platform-correct file permissions (POSIX `0600`, Windows DACL SID-restricted) are guaranteed. MCP transports (`/mcp`, `/sse`) enforce a policy matrix (loopback-only default, Bearer-gate on `allow_remote`). All three auth consumers (daemon self-test path, `mcp-ctl`, extension `GatewayClient` **and** `LogViewer`) share a single `buildAuthHeader()` contract. Dangerous `--no-auth + allow_remote` combination is refused unless an explicit environment escape hatch is set.
+
+#### 12.A Tasks
+
+**Documentation + policy (land BEFORE code):**
+
+- [ ] T12A.0 — Write `docs/ADR-0003-bearer-token-auth.md` (Size: M)
+  - **What:** Capture the full decision: policy matrix (public/authed/transport), token lifecycle (generate/persist/override/no-rotation), DACL rationale, csrf-ordering (auth→csrf), `MCP_GATEWAY_I_UNDERSTAND_NO_AUTH` escape hatch, `MCP_GATEWAY_AUTH_TOKEN` env override semantics (ephemeral vs persisted — documented choice), Authorization-header fallback strategy, token-rotation explicitly marked out-of-scope.
+  - **CSRF scope (mandatory ADR section §csrf-scope):** Post-12.A, `csrfProtect` is scoped to `/api/v1` only (moved from router-root in T12A.3b). `/mcp`, `/mcp/*`, `/sse`, `/sse/*`, and the `/api/*` backward-compat redirect are **intentionally** not CSRF-protected. Rationale: MCP transports use Bearer authentication (T12A.3c policy: loopback-only default or Bearer-when-remote) and are daemon-to-daemon, not browser-cookie-authenticated, so CSRF does not apply. The `/api/*` redirect (307, preserves method) forwards to `/api/v1` where `csrfProtect` applies downstream — CSRF is enforced at the destination, not the redirect source. This is a deliberate scope change, not a regression.
+  - **Token lifecycle — format note (mandatory ADR section §token-lifecycle, L-2):** Document explicitly: *"The token file format is a bare base64url string with no version field. Future format changes (e.g., rotation metadata, per-client tokens, signed envelopes) therefore require a coordinated client/daemon upgrade — older clients cannot negotiate an unknown structured payload. A format version prefix (`v1:<token>`) was considered and deferred to Phase 15+: adopt it if and when structured metadata becomes needed. Until then, `LoadOrCreate` detects 'looks like a token' by length + base64url character set, with no format version parsed from the file contents."*
+  - **Files:** new `docs/ADR-0003-bearer-token-auth.md`
+  - **Checkpoint:** ADR merged (or at least committed) before any auth code lands so reviewers can point at the decision during review. Grep the ADR file for `csrf-scope` section header — must be present. Grep for `no version field` and `format version was considered` — both must be present in §token-lifecycle.
+
+**Auth package + middleware (core):**
+
+- [ ] T12A.1 — New `internal/auth/token.go` — token generation + persistence (Size: M)
+  - **What:** `GenerateToken()` produces 32 bytes via `crypto/rand` → base64url-encoded string. `LoadOrCreate(path, env)` implements: (a) if `env != ""` return env token (ephemeral, never persisted — per ADR-0003); (b) else read file if exists AND size ≥ 32 bytes of base64 content → return; (c) else generate + atomically write (tmp + rename) + return. Atomic write happens **before** `http.Server.Serve` is called (addresses 12A-4). Resolves HIGH 12A-6 (persistence contract: read-if-valid, regenerate-if-absent, env override; clients do not break on every daemon restart because the token file persists across reboots).
+  - **Files:** new `internal/auth/token.go`, new `internal/auth/token_test.go`
+  - **Tests:** regen-if-absent, read-if-exists, env override wins, short/corrupt file → regen, atomic rename leaves no partial file.
+  - **Checkpoint:** Token file at canonical path, permissions correct per platform (next task), env override path returns without touching disk.
+
+- [ ] T12A.2 — Platform-split file permissions (Size: M)
+  - **What:** Split into `internal/auth/token_perms_windows.go` (DACL via `golang.org/x/sys/windows` — current-user SID only, DENY everyone else explicitly — **deny-by-default**) and `internal/auth/token_perms_other.go` (POSIX `os.Chmod(0600)`). Match existing `internal/lifecycle/procattr_windows.go` / `procattr_other.go` pattern for build-tag discipline. Resolves CRITICAL 12A-3.
+  - **Files:** new `internal/auth/token_perms_windows.go`, new `internal/auth/token_perms_other.go`, new `internal/auth/token_perms_windows_test.go`, new `internal/auth/token_perms_integration_windows_test.go` (build-tag `integration`).
+  - **Tests (tiered — no single-user fallback escape hatch):**
+    - **CI tier (structural — runs on `windows-latest` with single user):** `token_perms_windows_test.go` reads the ACL via `GetNamedSecurityInfo` and asserts: exactly one DENY ACE targeting `Everyone` or `BUILTIN\Users` (well-known SIDs `S-1-1-0` / `S-1-5-32-545`), exactly one ALLOW ACE targeting the current-user SID (`windows.Token.User()`), no inheritable ACEs on the file's DACL, owner is current user. Test comment must say "structural only — does not verify OS enforcement; see integration tier for actual cross-account denial". Deny-by-default rule: removing the DACL should result in no access, not full access (covered structurally by asserting absence of any ALLOW ACE for `Everyone` / `Users`).
+    - **Integration tier (enforcement — runs on dedicated Windows runner):** `token_perms_integration_windows_test.go` guarded by `//go:build integration`. Uses `LogonUser` + `ImpersonateLoggedOnUser` (or `CreateProcessWithLogonW`) to attempt `os.Open` on the token file as a different local account (`testuser` provisioned out-of-band via `net user testuser Pass123! /add`). Expect `os.IsPermission(err) == true` or `ERROR_ACCESS_DENIED`. Gated behind a new `make test-integration-windows` target (or a dedicated CI job that provisions the second account); NOT run in the normal `go test ./...` path.
+    - **POSIX test (unchanged):** `os.Stat().Mode() == 0600`.
+  - Resolves dev-lead recommendation #2. Tiered strategy removes the prior "or simulate" fallback language that risked a false-green CI: structural inspection can pass while enforcement is broken (wrong SID, wrong inherit flags), so it is now clearly marked as a smoke check and real enforcement lives in a separate tier.
+  - **Checkpoint:** **CI:** structural test passes on `windows-latest`. **Integration:** enforcement test passes on a dedicated Windows runner with a second local account, OR is explicitly deferred to release sign-off (documented in `docs/ROADMAP.md`). **POSIX:** `ls -l` shows `-rw-------`.
+
+- [ ] T12A.3a — New `internal/auth/middleware.go` — `BearerAuthMiddleware` (Size: M)
+  - **What:** Standard chi-compatible middleware. Reads `Authorization: Bearer <token>` header, constant-time compare (`crypto/subtle.ConstantTimeCompare`) against loaded token, 401 + `WWW-Authenticate: Bearer` on mismatch/missing. Never logs the received token. Emits a single redacted debug line on 401 (`path` only, no header contents). Resolves dev-lead recommendation #1 (unified contract: same code/message/logging across all three consumers — this middleware defines it).
+  - **401 response body (L-4 — additive, does not break existing `{"error":"..."}` parsers):** 401 responses serialize a JSON body with both `error` and a new `hint` field to guide operators toward the fix without leaking secrets. Example: `{"error":"authentication required","hint":"add Bearer token via MCP_GATEWAY_AUTH_TOKEN env var or ~/.mcp-gateway/auth-token file"}`. The `hint` wording is fixed (testable by grep). Clients that only read `error` are unaffected (additive field); clients that want guidance can read `hint`.
+  - **Files:** new `internal/auth/middleware.go`, new `internal/auth/middleware_test.go`
+  - **Tests:** 401 when missing, 401 when malformed (`Bearer` with no token, non-Bearer scheme, lowercase `bearer`), 401 when wrong token, 200 when correct, never logs token value (test by capturing logs), constant-time compare (smoke test that different-length tokens don't early-return observable timing — best-effort unit check). **401 body shape test:** JSON-parse the 401 body, assert `error == "authentication required"` AND `hint` contains both `MCP_GATEWAY_AUTH_TOKEN` and `~/.mcp-gateway/auth-token` (so future rewording still surfaces both fallbacks).
+
+- [ ] T12A.3b — Wire middleware in `internal/api/server.go` via chi `r.With` route groups (Size: M)
+  - **What:** Replace global `r.Use(csrfProtect)` with two explicit groups inside `r.Route("/api/v1", ...)`:
+    - Public group: `r.Group(func(r chi.Router) { r.Get("/health", ...); r.Get("/version", ...) })` — csrfProtect only, **no** auth.
+    - Authed group: `r.Group(func(r chi.Router) { r.Use(auth.Middleware(token)); r.Use(csrfProtect); ... })` — auth **first** (cheap 401 before csrf), then csrf. Covers all mutating endpoints (POST/PATCH/DELETE) AND sensitive read endpoints (`/logs`, tool listings with credentials). Resolves HIGH 12A-2 and MEDIUM csrf-ordering.
+  - **Files:** `internal/api/server.go`, `internal/api/integration_test.go`
+  - **Tests:** `/api/v1/health` returns 200 without auth; every other endpoint returns 401 without auth and 200 with correct Bearer; `/logs` specifically returns 401 without auth (resolves 12A-5 test requirement).
+  - **Checkpoint:** Integration test sweeps all routes and asserts the policy matrix exactly.
+
+- [ ] T12A.3c — MCP transport policy (`/mcp`, `/sse`) — two-branch conditional task (Size: L)
+  - **What:** New `gateway.auth_mcp_transport` config flag. Policy matrix: `loopback-only` (default; reject requests from non-loopback RemoteAddr with 403 `transport_policy_denied`) | `bearer-required` (apply BearerAuthMiddleware to `/mcp` and `/sse`; requires `allow_remote=true` in config). Resolves CRITICAL 12A-1.
+    - **BRANCH A (Claude Desktop/Cursor SUPPORT custom `Authorization` headers):** implement `bearer-required` mode; document config example; allow `allow_remote=true` + auth.
+    - **BRANCH B (clients do NOT support custom headers):** `bearer-required` mode is declared but documented as "daemon-to-daemon only" (not compatible with Claude Desktop/Cursor); `loopback-only` becomes the only supported mode for those clients. **Never** fall back to token-in-URL (resolves dev-lead recommendation #5).
+    - Decision logging: on request to `/mcp`/`/sse`, log one line `policy=<mode> remote=<ip> decision=<allow|deny>` (no secrets) — resolves dev-lead recommendation #3.
+  - **Files:** `internal/api/server.go`, `internal/config/types.go`, `docs/ADR-0003-bearer-token-auth.md` (update with chosen branch)
+  - **Tests:** loopback request in loopback-only mode → 200; non-loopback request in loopback-only mode → 403; (Branch A only) non-loopback + valid Bearer in bearer-required mode + allow_remote=true → 200; non-loopback + no Bearer in bearer-required mode → 401; decision log emitted for every request without leaking tokens.
+  - **Depends on:** open-question resolution (escalate to user BEFORE starting this task).
+  - **Checkpoint:** Policy matrix test exhaustively covers (loopback × non-loopback) × (loopback-only × bearer-required) × (auth-present × auth-absent) = 8 cases.
+
+- [ ] T12A.3d — Wire Bearer auth on SSE `/logs` group in `internal/api/server.go` (Size: S)
+  - **What:** The SSE log stream is mounted in a **separate** `r.Group` at `server.go:105-108`, outside `r.Route("/api/v1", ...)`, with its own `middleware.Throttle(20)` (F-4 DoS fix). Without explicit wiring here, a literal T12A.3b implementation would leave `GET /api/v1/servers/{name}/logs` reachable at 200 without Bearer. Extend the existing SSE group to apply `auth.Middleware(token)` **before** the `middleware.Throttle(20)` decrement — auth-first rationale: cheap 401 rejection does not consume a throttle slot, so unauthenticated clients cannot exhaust the 20-connection budget (DoS hardening). Handler name: `handleServerLogs` (unchanged). Resolves HIGH 12A-5 (daemon side; extension side is T12A.9).
+  - **Files:** `internal/api/server.go` (SSE group at lines 105-108 — `handleServerLogs`), `internal/api/integration_test.go`
+  - **Tests:** **Dedicated `/logs` auth integration test (separate from the REST matrix in T12A.13):** `GET /api/v1/servers/{name}/logs` → 401 without Bearer; → 401 with malformed Bearer (non-Bearer scheme, lowercase `bearer`, empty token); → 200 with valid Bearer (SSE headers `Content-Type: text/event-stream` observed). Throttle-budget test: 21 parallel unauthenticated requests → all return 401 and the throttle counter never increments (assert via debug counter or follow-up authenticated request within the same test — should succeed, proving no slot was consumed).
+  - **Checkpoint:** `curl http://127.0.0.1:PORT/api/v1/servers/foo/logs` → 401; `curl -H "Authorization: Bearer $(cat ~/.mcp-gateway/auth-token)" http://127.0.0.1:PORT/api/v1/servers/foo/logs` → 200 with SSE stream. Grep `internal/api/server.go` for the SSE group shows `auth.Middleware(token)` appearing before `middleware.Throttle(20)`.
+
+**Startup safety + CLI flags:**
+
+- [ ] T12A.4 — `--no-auth` + `allow_remote` combo guard + Bearer-without-TLS WARN in `cmd/mcp-gateway/main.go` (Size: S)
+  - **What:** On startup, if `--no-auth` is set AND config `allow_remote=true`: require env `MCP_GATEWAY_I_UNDERSTAND_NO_AUTH=1` or refuse to start with a clear error message naming both conditions. If the env IS set, proceed and emit exactly 3 WARN lines: `AUTH DISABLED`, `network binding is not loopback`, `anyone on the network can mutate servers`. Set `/health` response `auth: "disabled"` field (requires health payload schema bump). Resolves CRITICAL 12A-7.
+  - **Bearer-without-TLS WARN (L-1 — new):** On startup, if `allow_remote=true` AND TLS is not configured (Phase 12 has no TLS support yet — `tls_cert_path` / `tls_key_path` both empty) AND auth is enabled (i.e., NOT the `--no-auth` path above): emit exactly one WARN line: `"[WARN] Bearer auth is active but TLS is not configured — token is transmitted in cleartext on public networks (Phase 13 adds TLS support)"`. This is an operator-safety notice, not a startup blocker. Wording is fixed so tests can grep for it.
+  - **Files:** `cmd/mcp-gateway/main.go`, `internal/api/server.go` (health handler), new `cmd/mcp-gateway/main_noauth_test.go`
+  - **Tests:** combo + no env → exit non-zero + stderr contains both condition names; combo + env → starts + 3 WARN lines + `/health` reports `auth: "disabled"`; `--no-auth` alone (loopback-only) → starts quietly; default (auth on, loopback-only) → `/health` reports `auth: "enabled"` and no Bearer-without-TLS WARN (loopback is not "public network"); auth on + `allow_remote=true` + no TLS → exactly one WARN line matching the fixed wording (grep `Bearer auth is active but TLS`); auth on + `allow_remote=true` + TLS configured → no Bearer-without-TLS WARN.
+  - **Checkpoint:** Grep for the three `--no-auth` WARN strings in test output; confirm exit code matrix; grep for the Bearer-without-TLS WARN string in the `allow_remote+no-TLS` test.
+
+- [ ] T12A.5 — Atomic token write ordering (Size: S)
+  - **What:** In daemon startup sequence: `LoadOrCreate(path, env)` → verify permissions → THEN call `http.Server.Serve`. Never start accepting requests before the token file is readable by legitimate clients. Resolves HIGH 12A-4.
+  - **Files:** `cmd/mcp-gateway/main.go`
+  - **Tests:** Integration test observes file mtime < first successful HTTP request timestamp; test with a blocked filesystem write (fake error path) confirms Serve is never called.
+  - **Checkpoint:** Startup-sequence test passes; Serve only runs after token is on disk.
+
+**Client consumers (unified contract):**
+
+- [ ] T12A.6 — Go-side auth helper: `internal/auth/client.go` (Size: S)
+  - **What:** `BuildHeader(tokenFilePath, envName)` — priority: env var > file > error. Shared by daemon self-test path AND `mcp-ctl` (avoid duplicated logic). Resolves MEDIUM 12A-8 (env escape hatch) and dev-lead recommendation #1 (unified contract).
+  - **Files:** new `internal/auth/client.go`, new `internal/auth/client_test.go`
+  - **Tests:** env wins over file; file fallback; both absent → typed error; malformed file → typed error.
+
+- [ ] T12A.7 — Wire `mcp-ctl` to send Bearer header (Size: M)
+  - **What:** Every HTTP request emitted by `mcp-ctl` must carry `Authorization: Bearer <token>`. Use `internal/auth/client.BuildHeader`. Handle 401 → clear error message pointing to token file path and env var name. Never log the token or full Authorization header (redact to `Bearer ***`).
+  - **Files:** `cmd/mcp-ctl/main.go`, `cmd/mcp-ctl/health.go`, `cmd/mcp-ctl/servers.go`, `cmd/mcp-ctl/servers_add.go`, `cmd/mcp-ctl/servers_remove.go`, `cmd/mcp-ctl/servers_setenv.go`, `cmd/mcp-ctl/servers_unsetenv.go`, `cmd/mcp-ctl/servers_setheader.go`, `cmd/mcp-ctl/servers_unsetheader.go`, `cmd/mcp-ctl/servers_enable.go`, `cmd/mcp-ctl/servers_disable.go`, `cmd/mcp-ctl/servers_restart.go`, `cmd/mcp-ctl/servers_reset.go`, `cmd/mcp-ctl/logs.go`, `cmd/mcp-ctl/tools.go`, `cmd/mcp-ctl/tools_call.go`, `cmd/mcp-ctl/credential_list.go`, `cmd/mcp-ctl/validate_server.go`
+  - **Tests:** `cmd_test.go` extended: every command that hits HTTP sends `Authorization` header; 401 response → human-readable error; log capture confirms no token leaks.
+  - **Checkpoint:** Running `mcp-ctl health` with no token file and no env → clear error naming both fallbacks; with token file → 200.
+
+- [ ] T12A.8 — Extension `GatewayClient` sends Bearer header + bounded retry (Size: M)
+  - **What:** `GatewayClient` reads token via a new `readAuthToken()` helper: env (`MCP_GATEWAY_AUTH_TOKEN`) > file (`authTokenPath` setting). Bounded retry on ENOENT: 5 attempts × 200ms (defence-in-depth per HIGH 12A-4 — if extension races daemon startup, token file may not yet exist). Every request sends `Authorization: Bearer <token>`. New `buildAuthHeader()` helper (resolves HIGH 12A-5 — extracted so LogViewer uses same code).
+  - **Files:** `vscode/mcp-gateway-dashboard/src/gateway-client.ts`, new helper section or `src/auth-header.ts` (small helper module so LogViewer can import)
+  - **Tests:** `gateway-client.test.ts` — token from env overrides file; token from file when env absent; ENOENT retries 5× before giving up; 401 surface to UI with actionable message; never logs token.
+
+- [ ] T12A.9 — Extension `LogViewer` migrated to shared `buildAuthHeader()` (Size: S)
+  - **What:** `log-viewer.ts` currently uses raw `http.request` (not GatewayClient). Import the new `buildAuthHeader()` helper from T12A.8 and attach the header to `/logs` requests. Resolves HIGH 12A-5.
+  - **Files:** `vscode/mcp-gateway-dashboard/src/log-viewer.ts`, `vscode/mcp-gateway-dashboard/src/test/log-viewer.test.ts`
+  - **Tests:** extended `log-viewer.test.ts` asserts `Authorization` header on outgoing request; 401 on `/logs` surfaces as a visible error (resolves "add 401 test for /logs" from 12A-5).
+
+- [ ] T12A.10 — `authTokenPath` setting in `package.json` (moved from 12.B per PAL planner) (Size: XS)
+  - **What:** Add `mcpGateway.authTokenPath` setting (string, default platform-resolved `~/.mcp-gateway/auth-token`). GatewayClient + LogViewer consume it via `vscode.workspace.getConfiguration('mcpGateway').get('authTokenPath')`.
+  - **Files:** `vscode/mcp-gateway-dashboard/package.json`
+  - **Tests:** setting shows up in package.json contribution; extension picks it up (unit-covered via T12A.8/T12A.9).
+
+**Migration + backward compat (per PAL planner recommendation):**
+
+- [ ] T12A.11 — First-start migration behaviour + UX (Size: S)
+  - **What:** On first daemon start after upgrade from v1.1.x: file doesn't exist → generate + write atomically + print path to stdout (NOT the token). If file exists but has wrong permissions: log WARN (not error) with remediation hint; **do not** auto-fix permissions (safety: assume user changed them intentionally). Extension: on first 401, show a notification with "Reload token" action that re-reads the file. Per PAL planner point 3.
+  - **Files:** `cmd/mcp-gateway/main.go`, `vscode/mcp-gateway-dashboard/src/extension.ts`, `vscode/mcp-gateway-dashboard/src/gateway-client.ts`
+  - **Tests:** Go: fresh install path (no file) → file created + path printed; existing-file-wrong-perms path → WARN emitted, no auto-fix. TS: 401 → notification shown once (deduped), "Reload token" re-reads.
+
+**Logging + redaction (per PAL planner recommendation B):**
+
+- [ ] T12A.12 — Auth logging hygiene pass (Size: S)
+  - **What:** Grep every `log.*` call in `internal/api/`, `internal/auth/`, `cmd/mcp-gateway/`, `cmd/mcp-ctl/` and extension `src/` for anything that could emit the token value or full `Authorization` header. Replace with redacted form (`Bearer ***` or omit entirely). Add a unit test that captures logs during normal auth flow and asserts no 32+ base64-shaped strings appear.
+  - **Files:** across the above directories as needed; new `internal/auth/logging_redaction_test.go`
+  - **Tests:** Log capture test: run end-to-end auth flow (generate token → client request → 200 response) in a test harness, capture logs, assert regex-free — plain string check that the token value does not appear.
+
+**Integration + gate:**
+
+- [ ] T12A.13 — Comprehensive auth integration test suite in `internal/api/integration_test.go` (Size: M)
+  - **What:** One master test table that sweeps the full policy matrix: (route) × (auth present/absent/wrong) × (transport mode) × (csrf token present/absent). Asserts exact status codes and `WWW-Authenticate` header for 401s. Includes a test that auth middleware runs **before** csrfProtect (order check via crafted request → 401 not 403). **Intentional CSRF non-coverage assertion (per ADR-0003 §csrf-scope):** adds explicit tests documenting that `/mcp`, `/sse`, and the `/api/*` redirect do NOT run `csrfProtect` — this prevents future auditors from re-flagging the scope narrowing as a regression.
+  - **Files:** `internal/api/integration_test.go`
+  - **Tests:** matrix covers at minimum: `/health` public, `/version` public, all `/api/v1/servers*` authed (GET too — decision documented in ADR), `/logs` authed, `/mcp` + `/sse` by transport policy. csrf+auth ordering: malformed Bearer + missing csrf → 401 (auth rejects first), missing Bearer + present csrf → 401. **Intentional non-coverage tests (documentation-as-code):** `POST /mcp` with cross-origin Origin header → no 403 from csrfProtect (bearer/transport policy still applies, csrf does not); `POST /sse` same; `POST /api/v1/servers` via `/api/*` redirect (307) → csrfProtect applies at the redirected `/api/v1` destination, not at the `/api/*` source. Each assertion names ADR-0003 §csrf-scope in the test comment so a future reader sees "intentional per ADR" before assuming a bug.
+
+- [ ] T12A.GATE — Tests + codereview + thinkdeep — zero MEDIUM+
+  - Run `go test ./...` — 0 failures.
+  - Run `go vet ./...` — clean.
+  - Run `npm test` in `vscode/mcp-gateway-dashboard/` — 0 failures.
+  - Call `mcp__pal__codereview` on 12.A files. Call `mcp__pal__thinkdeep` on the auth design. Both must return zero MEDIUM+. If PAL MCP unavailable → Sonnet Agent-tool fallback per CLAUDE.md.
+  - Run `npm run deploy` in `vscode/mcp-gateway-dashboard/`; stage rebuilt VSIX alongside TS source changes.
+  - Commit source + VSIX together.
+  - Remind user to reload VSCode (`Developer: Reload Window`) after commit.
+
+**Files (12.A summary):**
+- New: `internal/auth/token.go`, `internal/auth/token_perms_windows.go`, `internal/auth/token_perms_other.go`, `internal/auth/middleware.go`, `internal/auth/client.go`, corresponding `_test.go` files, `docs/ADR-0003-bearer-token-auth.md`, `vscode/mcp-gateway-dashboard/src/auth-header.ts` (small helper)
+- Modified: `internal/api/server.go`, `internal/api/integration_test.go`, `internal/config/types.go`, `cmd/mcp-gateway/main.go`, all `cmd/mcp-ctl/*.go` command files, `vscode/mcp-gateway-dashboard/src/gateway-client.ts`, `vscode/mcp-gateway-dashboard/src/log-viewer.ts`, `vscode/mcp-gateway-dashboard/src/extension.ts`, `vscode/mcp-gateway-dashboard/package.json`
+- New VSIX: `vscode/mcp-gateway-dashboard/mcp-gateway-dashboard-latest.vsix`
+
+**Rollback (12.A):** Git-revert the commits introducing `internal/auth/*` and the server route-group refactor; the middleware is additive and route groups revert cleanly to `r.Use(csrfProtect)`. Extension rollback: revert `gateway-client.ts` + `log-viewer.ts` to remove `Authorization` header + `authTokenPath` setting. No database/schema implications. Users on v1.1.x remain unaffected; v1.2.0 users must roll back BOTH daemon and extension (mismatched versions → 401 loop).
+
+---
+
+### 12.B — KeePass Credential Push (TS extension + 2 Go tweaks)
+
+**Goal:** Extension spawns `mcp-ctl credential import` via `child_process.execFile`, consumes a stable JSON contract (per-server result), pipes the master password via `--password-stdin` (no TTY required for VS Code), and for each successfully PATCHed server writes the credentials into VS Code SecretStorage (partial-failure aware). Depends on 12.A (Bearer token required for PATCH calls). Scope-reduced per HIGH 12B-1: Go-side KeePass (`internal/keepass/*`, `credential_import.go`) already complete; only 2 small Go tweaks remain.
+
+#### 12.B Tasks
+
+**Go contract tweaks (minimal):**
+
+- [ ] T12B.1 — Add `--json` flag to `cmd/mcp-ctl/credential_import.go` (Size: S)
+  - **What:** New flag; when set, output is a single JSON object `{"version":1, "results":[{"server":..., "env_keys":[...], "header_keys":[...], "status":"ok|skipped|error", "detail":"..."}]}`. When unset, keep existing tabwriter human-readable format (default behaviour unchanged). Resolves HIGH 12B-2 and Resolves HIGH 12B-1 (scope reduction contract — this is the minimal Go-side tweak; `internal/keepass/*` and `credential_import.go` core are already complete, so Phase 12.B adds only `--json` + `--password-stdin` on the Go side and puts the bulk of the work in the extension).
+  - **Files:** `cmd/mcp-ctl/credential_import.go`, new `cmd/mcp-ctl/credential_import_json_test.go`
+  - **Tests:** Golden test on JSON schema (fixture comparison) — resolves dev-lead recommendation #4. Smoke test on human-readable tabwriter output (absent `--json`) still matches existing format.
+  - **Checkpoint:** `mcp-ctl credential import --json <file>` produces parseable JSON; `mcp-ctl credential import <file>` produces existing human output.
+
+- [ ] T12B.2 — Add `--password-stdin` flag to `cmd/mcp-ctl/credential_import.go` (Size: S)
+  - **What:** New flag; when set, read master password from stdin (single line, trimmed of trailing newline). When unset, prompt interactively (existing behaviour). Resolves CRITICAL 12B-3. Never echo the password to stdout/stderr; clear the buffer after use.
+  - **Flag mutual exclusivity (L-5):** `--password-stdin` and the existing `--password-file` flag are mutually exclusive — passing both must fail fast with `"--password-file and --password-stdin are mutually exclusive"` before any password material is read. Add this check to `runCredentialImport()` alongside the existing `toServer` / `envFilePath` mutex at `credential_import.go:59-68` (same error-formatting style; same early-return position).
+  - **Files:** `cmd/mcp-ctl/credential_import.go`, `cmd/mcp-ctl/credential_test.go`
+  - **Tests:** `--password-stdin` with piped input → reads, no prompt emitted; invalid (empty) stdin → clear error; interactive path (unchanged) still works. **New assertion:** `--password-file <path> --password-stdin` → exits non-zero, stderr contains `mutually exclusive`, and neither file nor stdin is read (verify by using an unreadable path that would otherwise explode).
+  - **Checkpoint:** `echo 'secret' | mcp-ctl credential import --password-stdin <file>` runs non-interactively in a test without TTY. `mcp-ctl credential import --password-file x --password-stdin <file>` exits with the mutual-exclusivity error.
+
+**Extension (TS):**
+
+- [ ] T12B.3 — New `src/keepass-importer.ts` — exec wrapper + parser (Size: L)
+  - **What:** `importKeepass(options)` — uses `child_process.execFile('mcp-ctl', ['credential', 'import', '--json', '--password-stdin', keepassPath, '--group', keepassGroup], { maxBuffer: 1024*1024 })`. Master password comes from `vscode.window.showInputBox({ password: true })` and is piped via `child.stdin.end(password + '\n')`. **Never** log stdout/stderr (contains credential keys + possibly partial values). Parse stdout as JSON (per T12B.1 contract), handle non-zero exit by reporting stderr-summary-without-secrets + a hint to check `mcp-ctl credential list`. Resolves MEDIUM 12B-4.
+  - **Files:** new `vscode/mcp-gateway-dashboard/src/keepass-importer.ts`
+  - **Tests:** new `vscode/mcp-gateway-dashboard/src/test/keepass-importer.test.ts` — mock `execFile`, verify: argv is array (no shell), `maxBuffer: 1MB`, stdout never logged, stdin receives password exactly once and is ended, non-zero exit surfaces safe error, JSON parse error → actionable message.
+
+- [ ] T12B.4 — Partial-failure-aware SecretStorage dual-write (Size: M)
+  - **What:** After parsing `mcp-ctl --json` output, for each result with `status == "ok"`: iterate `env_keys` → `credentialStore.storeEnvVar(server, key, value)`; iterate `header_keys` → `credentialStore.storeHeader(server, key, value)`. For `status == "skipped"` or `status == "error"`: do **not** write SecretStorage for that server (avoid storing stale/partial credentials). Show a summary QuickPick listing ok/skipped/error counts with per-server detail. Resolves MEDIUM 12B-5.
+  - **Concurrency — chosen strategy: merge-on-write (single option, no UX guard fallback):** `credential-store.ts:197-207` `_addToIndex` currently does read → mutate → write against `globalState`, which is last-write-wins with no CAS; two VS Code windows running `importKeepassCredentials` at the same time silently lose the second window's new keys. Fix: inside `_addToIndex` (and symmetrically `_removeFromIndex`), **re-read** the index via `this._getIndex()` **immediately** before calling `_setIndex()`, merge the new key into the fresh copy using union semantics (add to array if absent), then write. This shrinks the lost-update window from seconds (human-triggered import in window 2 after window 1 started) to microseconds (between re-read and write inside a single microtask). Document in the task body and in a code comment: "Concurrent multi-window imports are safe via merge-on-write; concurrency is tested below."
+  - **Files:** `vscode/mcp-gateway-dashboard/src/keepass-importer.ts`, `vscode/mcp-gateway-dashboard/src/credential-store.ts` (merge-on-write change to `_addToIndex` + `_removeFromIndex`; plus any API gap surfacing during integration).
+  - **Tests:** mixed result (1 ok, 1 skipped, 1 error) → only the ok server gets SecretStorage writes; summary QuickPick content asserted; credentialStore calls counted exactly. **New concurrency test** in `credential-store.test.ts`: two concurrent `storeEnvVar()` calls against the same AND different servers (using `Promise.all` without awaiting intermediate state) → both keys end up in the index. Simulated-race variant: stub `globalState.update` to defer by one microtask so the read-then-write windows overlap → merge-on-write still converges to the union.
+
+- [ ] T12B.5 — Register `mcpGateway.importKeepassCredentials` command + settings (Size: S)
+  - **What:** Resolves LOW 12B-6. `package.json` additions:
+    - `commands.mcpGateway.importKeepassCredentials` with user-facing title "MCP Gateway: Import Credentials from KeePass".
+    - Settings: `mcpGateway.keepassPath` (string, default empty — user must configure); `mcpGateway.keepassGroup` (string, default empty, optional filter). Note: `mcpGateway.authTokenPath` was moved to 12.A per PAL planner.
+    - Wire command handler in `extension.ts activate()` → opens a QuickPick or uses configured values → calls `importKeepass()`.
+  - **Files:** `vscode/mcp-gateway-dashboard/package.json`, `vscode/mcp-gateway-dashboard/src/extension.ts`
+  - **Tests:** `commands.test.ts` — command is registered; activate() wires handler; missing `keepassPath` → clear prompt to configure.
+
+- [ ] T12B.6 — Extension-side E2E for KeePass push flow (Size: M)
+  - **What:** New integration test that mocks `execFile`, exercises the full flow: showInputBox → execFile with correct argv + stdin → parse JSON → PATCH via GatewayClient (authed path from 12.A) → SecretStorage dual-write → summary. Verifies token is read once (via T12A.8 `buildAuthHeader`), password is piped not argv'd, stdout never logged, partial-failure path handled.
+  - **Files:** new `vscode/mcp-gateway-dashboard/src/test/keepass-importer-e2e.test.ts`
+  - **Tests:** one scenario per outcome class (all-ok, mixed, all-error, execFile failure, JSON parse failure, user cancels password input).
+
+- [ ] T12B.GATE — Tests + codereview + thinkdeep — zero MEDIUM+
+  - Run `go test ./...` — 0 failures (validates T12B.1, T12B.2).
+  - Run `go vet ./...` — clean.
+  - Run `npm test` in `vscode/mcp-gateway-dashboard/` — 0 failures.
+  - Call `mcp__pal__codereview` on 12.B files. Call `mcp__pal__thinkdeep` on the KeePass push design. Zero MEDIUM+. PAL unavailable → Sonnet Agent-tool fallback per CLAUDE.md.
+  - **CHANGELOG.md update (Size: XS, L-3 — single entry covers both sub-phases; land here because 12.B is the last 12.x commit):** Add a `## [1.2.0] - YYYY-MM-DD` entry to the root-level `CHANGELOG.md` following the existing Keep a Changelog format already used in this repo. Sections to populate: **Added** — Bearer token authentication for REST endpoints (`/api/v1/*`) and MCP transports (`/mcp`, `/sse`); `MCP_GATEWAY_AUTH_TOKEN` env override; `authTokenPath` VS Code setting; `mcpGateway.importKeepassCredentials` command; `mcp-ctl credential import --json` and `--password-stdin` flags; KeePass group filter setting. **Changed** — `mcp-ctl` commands now require a Bearer token (reads from env or token file); CSRF scope narrowed to `/api/v1` (per ADR-0003 §csrf-scope). **Security** — Token file permissions enforced (POSIX `0600`, Windows DACL deny-by-default); `--no-auth + allow_remote` refuses to start without `MCP_GATEWAY_I_UNDERSTAND_NO_AUTH=1`; Bearer-without-TLS WARN on public bind. Link to ADR-0003.
+  - Run `npm run deploy` in `vscode/mcp-gateway-dashboard/`; stage rebuilt VSIX alongside TS source changes.
+  - Commit source + VSIX + CHANGELOG together.
+  - Remind user to reload VSCode (`Developer: Reload Window`) after commit.
+
+**Files (12.B summary):**
+- New: `vscode/mcp-gateway-dashboard/src/keepass-importer.ts`, `vscode/mcp-gateway-dashboard/src/test/keepass-importer.test.ts`, `vscode/mcp-gateway-dashboard/src/test/keepass-importer-e2e.test.ts`, `cmd/mcp-ctl/credential_import_json_test.go`
+- Modified: `cmd/mcp-ctl/credential_import.go`, `cmd/mcp-ctl/credential_test.go`, `vscode/mcp-gateway-dashboard/src/extension.ts`, `vscode/mcp-gateway-dashboard/src/credential-store.ts` (possibly), `vscode/mcp-gateway-dashboard/package.json`
+- New VSIX: `vscode/mcp-gateway-dashboard/mcp-gateway-dashboard-latest.vsix`
+
+**Rollback (12.B):** Remove the new command registration + settings from `package.json`; delete `keepass-importer.ts` + its tests. `mcp-ctl` `--json` and `--password-stdin` flags are additive — default behaviour is unchanged so they can stay or be reverted independently. No SecretStorage migration is required (writes are idempotent overwrites; pre-existing entries remain).
 
 ---
 
@@ -194,7 +406,7 @@ Each GATE step runs:
 | Phase | Title | Status | Goal |
 |-------|-------|--------|------|
 | 11 | Extension UX | ✅ COMPLETE | Eliminate flicker, inline buttons, webview forms, slash commands |
-| 12 | Auth + KeePass | 📋 PLANNED | Bearer token auth, extension-side KeePass import |
+| 12 | Auth + KeePass | 📝 DETAILED | Bearer token auth (17 tasks + GATE, 12.A: T12A.0–T12A.13 with 3a/3b/3c/3d sub-tasks) + extension-side KeePass import (6 tasks + GATE, 12.B: T12B.1–T12B.6). ADR-0003 required before implementation. Awaiting user answer on Claude Desktop/Cursor `Authorization` header support (blocks T12A.3c only). |
 | 13 | Security Hardening | 📋 PLANNED | POSIX process groups, TLS, log redaction |
 | 14 | Community & CI | 📋 PLANNED | SECURITY.md, gitleaks, server/command catalogs |
 

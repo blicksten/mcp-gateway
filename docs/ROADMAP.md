@@ -31,11 +31,42 @@ Phases 1–10.5 implemented. Full history preserved locally in `full-history-bac
 
 ### Phase 12 — Auth + KeePass (v1.2.0)
 
+Detailed plan `docs/PLAN-main.md:115-354` (audited 2026-04-17, architect APPROVE_WITH_REFINEMENTS + dev-lead + lead-auditor 2 cycles + specialist-auditor 2 cycles, zero MEDIUM+ findings). ADR-0003 Bearer Token Auth to be drafted as task T12A.0.
+
+**Phase 12.A — Bearer Token Auth (v1.2.0 Go daemon + mcp-ctl + GatewayClient + LogViewer)**
+
 | # | Task | Description |
 |---|------|-------------|
-| 12.1 | Bearer token auth | Daemon generates token on start, all mutating API requests require it. |
-| 12.2 | Extension-side KeePass unlock | Unlock KeePass in extension via SecretStorage, never send master password to daemon. |
-| 12.3 | Credential push via PATCH | Extension fetches credentials from KeePass, sends to daemon via existing PATCH API. |
+| 12.A.0 | ADR-0003 | Policy matrix + Windows DACL rationale + token lifecycle + CSRF scope + escape-hatch semantics |
+| 12.A.1 | Token package | `crypto/rand` 32 bytes, base64url, atomic tmp+rename, read-if-exists persistence |
+| 12.A.2 | Windows DACL | Split `auth_file_windows.go` (DACL SID restrict, deny-by-default) + `auth_file_other.go` (Unix 0600); tiered CI+integration tests |
+| 12.A.3a | BearerAuthMiddleware | chi middleware, `crypto/subtle.ConstantTimeCompare`, 401 with `hint` field guidance |
+| 12.A.3b | Middleware wiring | Global `r.Use` → explicit `/api/v1` groups; auth first (cheap 401), then csrf; CSRF scope narrowed to `/api/v1` |
+| 12.A.3c | MCP transport policy | loopback-only default; Bearer when `allow_remote=true`; policy matrix (8 cases). **User escalation:** Claude Desktop/Cursor custom Authorization header support (T12A.3c:BRANCH-A vs BRANCH-B blocks implementation decision) |
+| 12.A.3d | `/logs` SSE auth | Wrap SSE group with `auth.Middleware` before `middleware.Throttle(20)` (auth-first DoS hardening) |
+| 12.A.4 | Startup guards | Refuse `--no-auth + allow_remote` without `MCP_GATEWAY_I_UNDERSTAND_NO_AUTH=1`; Bearer-without-TLS WARN |
+| 12.A.5 | Atomic token write ordering | `LoadOrCreate` before `http.Server.Serve`; token file mtime < first request |
+| 12.A.6 | Go auth helper | `internal/auth/client.go` `BuildHeader(pathOrEnv)`; shared by daemon self-test + mcp-ctl |
+| 12.A.7 | mcp-ctl auth wiring | Bearer on all HTTP subcommands; `MCP_GATEWAY_AUTH_TOKEN` env override; 401 error messaging |
+| 12.A.8 | Extension `GatewayClient` auth | Read token (env > file), bounded ENOENT retry (5×200ms), `buildAuthHeader()` shared helper |
+| 12.A.9 | Extension `LogViewer` auth | Import `buildAuthHeader()` from T12A.8; attach header to `/logs` requests |
+| 12.A.10 | Auth token path setting | `mcpGateway.authTokenPath` in `package.json`; platform-resolved default |
+| 12.A.11 | First-start migration UX | Token generation on fresh install; permission-wrong WARN (no auto-fix); extension reload-token on 401 |
+| 12.A.12 | Logging hygiene pass | Grep for token/Authorization leaks; redact to `Bearer ***`; capture-logs test |
+| 12.A.13 | Auth integration test matrix | All routes: 401 without Bearer, 200 with; csrf+auth ordering; intentional non-coverage docs (`/mcp`, `/sse`, `/api/*` redirect exempt) |
+| 12.A.GATE | Per-Phase Gate | `go test ./...` + `go vet ./...` + `npm test` + PAL codereview+thinkdeep (zero MEDIUM+) + `npm run deploy` + VSIX commit |
+
+**Phase 12.B — KeePass Credential Push (TS extension + 2 Go tweaks)**
+
+| # | Task | Description |
+|---|------|-------------|
+| 12.B.1 | `--json` flag | `mcp-ctl credential import --json` outputs stable JSON contract; golden test |
+| 12.B.2 | `--password-stdin` flag | Mutual-exclusive with `--password-file`; no-TTY stdin password piping; clears buffer |
+| 12.B.3 | `keepass-importer.ts` | `child_process.execFile` with argv-array, 1MB maxBuffer; never log stdout/stderr |
+| 12.B.4 | SecretStorage dual-write | Partial-failure aware; merge-on-write `_addToIndex` for multi-window safety (concurrent test required) |
+| 12.B.5 | Command + settings registration | `package.json` `mcpGateway.importKeepassCredentials` + `keepassPath`/`keepassGroup` settings |
+| 12.B.6 | Extension E2E test | Full flow: KeePass → `mcp-ctl --json` → token (T12A.8) → PATCH authed → SecretStorage multi-window scenario |
+| 12.B.GATE | Per-Phase Gate | `go test ./...` + `go vet ./...` + `npm test` + PAL codereview+thinkdeep (zero MEDIUM+) + CHANGELOG.md v1.2.0 entry + `npm run deploy` + VSIX commit |
 
 ### Phase 13 — Security Hardening (v1.3.0)
 
