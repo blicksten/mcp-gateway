@@ -290,6 +290,12 @@
           "default": "",
           "description": "Optional KeePass group to filter entries to (e.g. 'MCP/Servers'). Empty = all groups.",
           "scope": "machine"
+        },
+        "mcpGateway.mcpCtlPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the mcp-ctl executable used by the KeePass import command (default: looked up on PATH).",
+          "scope": "machine"
         }
       }
     }

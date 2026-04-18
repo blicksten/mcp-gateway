@@ -19,8 +19,9 @@
  * See docs/ADR-0003 §keepass-password-flow and docs/PLAN-main.md:297.
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, type ExecException } from 'node:child_process';
 import type { CredentialStore } from './credential-store';
+import { validateServerName } from './validation';
 
 /** Maximum stdout+stderr buffer size (1 MB). */
 const MAX_BUFFER = 1 << 20;
@@ -86,28 +87,34 @@ export async function runKeepassImport(opts: ImportOptions): Promise<CredentialI
 	const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
 	const stdout: string = await new Promise((resolve, reject) => {
+		// Explicitly blank MCP_GATEWAY_AUTH_TOKEN — the child doesn't
+		// need it (credential import does not hit the authed daemon)
+		// and blanking it prevents accidental leakage to a binary
+		// resolved from a user-controlled path.
+		const childEnv = { ...process.env, MCP_GATEWAY_AUTH_TOKEN: '' };
+
 		const child = execFile(
 			opts.mcpCtlPath,
 			args,
 			{
 				maxBuffer: MAX_BUFFER,
 				timeout: timeoutMs,
-				// No shell. No env inheritance of MCP_GATEWAY_AUTH_TOKEN
-				// would not hurt here but we also don't need it —
-				// credential import does not require an authed daemon
-				// unless --to-server is set, which the extension never
-				// uses (it writes via SecretStorage then PATCHes after).
 				windowsHide: true,
+				env: childEnv,
 			},
 			(err, stdoutBuf, stderrBuf) => {
 				if (err) {
+					// Distinguish system error codes (string, e.g.
+					// 'ENOENT') from process exit codes (number).
+					const execErr = err as ExecException;
+					const exitCode = typeof execErr.code === 'number' ? execErr.code : undefined;
 					// Only the exit-code and a brief stderr first-line are
 					// surfaced. Full stderr may contain paths; stdout is
 					// NEVER logged.
 					const stderrHead = (stderrBuf ?? '').split(/\r?\n/, 1)[0] ?? '';
 					reject(new KeepassImportError(
 						`mcp-ctl failed${stderrHead ? ': ' + stderrHead : ''}`,
-						(err as NodeJS.ErrnoException & { code?: number }).code as number | undefined,
+						exitCode,
 					));
 					return;
 				}
@@ -179,22 +186,44 @@ export async function applyImportedCredentials(
 			stored_headers: 0,
 		};
 
-		try {
-			for (const [key, value] of Object.entries(srv.env_vars)) {
+		// PAL HIGH fix: validate the KDBX-supplied server name before
+		// touching SecretStorage so malformed names don't pollute the
+		// credential index with entries that can never match a real
+		// server. validateServerName returns the error message or null.
+		const nameError = validateServerName(srv.name);
+		if (nameError) {
+			res.status = 'skipped';
+			res.error = nameError;
+			results.push(res);
+			continue;
+		}
+
+		// PAL MEDIUM fix: collect per-entry errors instead of aborting
+		// the whole server on the first failure. An error on one env
+		// var no longer blocks remaining env vars or headers.
+		const errors: string[] = [];
+
+		for (const [key, value] of Object.entries(srv.env_vars)) {
+			try {
 				await store.storeEnvVar(srv.name, key, value);
 				res.stored_env++;
+			} catch (err) {
+				errors.push(`env ${key}: ${(err as Error).message}`);
 			}
-			for (const [key, value] of Object.entries(srv.headers)) {
+		}
+		for (const [key, value] of Object.entries(srv.headers)) {
+			try {
 				await store.storeHeader(srv.name, key, value);
 				res.stored_headers++;
+			} catch (err) {
+				errors.push(`header ${key}: ${(err as Error).message}`);
 			}
-		} catch (err) {
-			res.status = res.stored_env > 0 || res.stored_headers > 0 ? 'stored' : 'failed';
-			// Only the message — never value content.
-			res.error = (err as Error).message;
-			if (res.status === 'failed') {
-				results.push(res);
-				continue;
+		}
+
+		if (errors.length > 0) {
+			res.error = errors.join('; ');
+			if (res.stored_env === 0 && res.stored_headers === 0) {
+				res.status = 'failed';
 			}
 		}
 

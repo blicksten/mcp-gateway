@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"text/tabwriter"
 
 	"mcp-gateway/internal/keepass"
@@ -134,6 +133,12 @@ func runCredentialImport(cmd *cobra.Command, _ []string) error {
 	db.Credentials = nil
 	db = nil
 	if len(entries) == 0 {
+		if jsonOut {
+			// PAL CRITICAL fix: --json must return valid JSON for every
+			// exit path so programmatic consumers (keepass-importer.ts)
+			// never have to handle a human-text stream.
+			return emitJSONAndMaybeApply(cmd, []keepass.ServerCredentials{}, envFilePath, toServer, dryRun)
+		}
 		fmt.Fprintln(cmd.OutOrStdout(), "No entries found in KDBX database.")
 		return nil
 	}
@@ -332,24 +337,45 @@ func readPassword(cmd *cobra.Command, passwordFile string, passwordStdin bool, k
 	return pw, nil
 }
 
+// maxStdinPasswordBytes caps the stdin read to prevent memory blow-up
+// if a caller mistakenly pipes a huge blob without a newline.
+const maxStdinPasswordBytes = 4096
+
 // readPasswordStdin reads a single line from stdin as the master
-// password. CR/LF are trimmed. The buffer is zeroed on any error path
-// before being returned so partially-read material is not leaked.
+// password. CR/LF are trimmed. The password NEVER transits a Go
+// `string` — strings are immutable and cannot be zeroed, so a string
+// copy would leave the secret in memory until GC. Instead we operate
+// on []byte throughout and zero both the original buffer and any
+// intermediate copies on every exit path. (PAL HIGH + MEDIUM fix.)
 func readPasswordStdin(r io.Reader) ([]byte, error) {
-	br := bufio.NewReader(r)
-	line, err := br.ReadBytes('\n')
+	br := bufio.NewReader(io.LimitReader(r, maxStdinPasswordBytes+1))
+	buf, err := br.ReadBytes('\n')
 	// On EOF without newline, ReadBytes returns the data plus io.EOF.
 	if err != nil && err != io.EOF {
-		zeroBytes(line)
+		zeroBytes(buf)
 		return nil, fmt.Errorf("read password from stdin: %w", err)
 	}
-	// Trim trailing \n and any bare \r (Windows piping).
-	trimmed := strings.TrimRight(string(line), "\r\n")
-	zeroBytes(line) // scrub the buffered copy
-	if trimmed == "" {
+	if len(buf) > maxStdinPasswordBytes {
+		zeroBytes(buf)
+		return nil, fmt.Errorf("--password-stdin input exceeds %d byte cap", maxStdinPasswordBytes)
+	}
+
+	// Trim trailing \n and any bare \r (Windows piping) IN PLACE on []byte.
+	trimEnd := len(buf)
+	for trimEnd > 0 && (buf[trimEnd-1] == '\n' || buf[trimEnd-1] == '\r') {
+		trimEnd--
+	}
+	if trimEnd == 0 {
+		zeroBytes(buf)
 		return nil, fmt.Errorf("--password-stdin provided but stdin was empty")
 	}
-	return []byte(trimmed), nil
+
+	// Copy the trimmed bytes into a new slice so the bufio-owned buffer
+	// can be zeroed. Caller zeroes the returned slice after use.
+	pw := make([]byte, trimEnd)
+	copy(pw, buf[:trimEnd])
+	zeroBytes(buf)
+	return pw, nil
 }
 
 func applyToEnvFile(cmd *cobra.Command, path string, creds []keepass.ServerCredentials) error {

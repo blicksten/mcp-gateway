@@ -280,7 +280,10 @@ function registerCommands(
 			);
 			return;
 		}
-		const mcpCtlPath = cfg.get<string>('daemonPath', '').trim() || 'mcp-ctl';
+		// PAL HIGH fix: dedicated setting for the mcp-ctl binary. Reusing
+		// `daemonPath` (which points at mcp-gateway) would spawn the
+		// wrong binary and surface a confusing error.
+		const mcpCtlPath = cfg.get<string>('mcpCtlPath', '').trim() || 'mcp-ctl';
 		const group = cfg.get<string>('keepassGroup', '').trim() || undefined;
 
 		const password = await vscode.window.showInputBox({
@@ -301,10 +304,20 @@ function registerCommands(
 
 			const stored = results.filter((r) => r.status === 'stored').length;
 			const failed = results.filter((r) => r.status === 'failed').length;
-			const summary = failed === 0
-				? `Imported ${stored} server(s) from KeePass. Credentials are in SecretStorage.`
-				: `Imported ${stored} server(s); ${failed} failed. See detail in logs.`;
-			vscode.window.showInformationMessage(summary);
+			const skipped = results.filter((r) => r.status === 'skipped').length;
+			const warned = results.filter((r) => !!r.error && r.status !== 'failed').length;
+
+			if (failed === 0 && warned === 0 && skipped === 0) {
+				vscode.window.showInformationMessage(
+					`Imported ${stored} server(s) from KeePass. Credentials are in SecretStorage.`,
+				);
+			} else {
+				// PAL MEDIUM fix: partial-failure and skipped entries
+				// must surface as a warning, not buried in an info toast.
+				vscode.window.showWarningMessage(
+					`KeePass import: ${stored} stored, ${failed} failed, ${skipped} skipped${warned > 0 ? `, ${warned} with warnings` : ''}.`,
+				);
+			}
 			void cache.refresh();
 		} catch (err) {
 			if (err instanceof KeepassImportError) {

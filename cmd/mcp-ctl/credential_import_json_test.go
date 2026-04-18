@@ -124,6 +124,34 @@ func TestCredentialImport_PasswordStdin_MutexWithFile(t *testing.T) {
 	assert.Contains(t, err.Error(), "mutually exclusive")
 }
 
+// TestCredentialImport_JSON_FoundZero verifies that --json still emits
+// a valid JSON object when the KDBX has no entries (or the group
+// filter excludes everything). PAL CRITICAL: prior to this, the code
+// printed human text in that path, breaking consumers that parse
+// stdout as JSON.
+func TestCredentialImport_JSON_FoundZero(t *testing.T) {
+	kdbxPath := createTestKDBXFile(t, "pw", "only-server", "u", "p")
+	pwFile := createPasswordFile(t, "pw")
+
+	out, err := executeCredentialCommand(
+		"credential", "import",
+		"--keepass", kdbxPath,
+		"--password-file", pwFile,
+		"--group", "NonExistentGroup",
+		"--json",
+	)
+	require.NoError(t, err)
+
+	var payload credentialImportJSON
+	require.NoError(t, json.Unmarshal([]byte(out), &payload),
+		"--json with no matched entries must still emit valid JSON — got: %q", out)
+
+	assert.Equal(t, CredentialImportJSONVersion, payload.Version)
+	assert.Equal(t, 0, payload.Found)
+	assert.Equal(t, "dry-run", payload.Mode)
+	assert.Empty(t, payload.Servers)
+}
+
 // TestCredentialImport_PasswordStdin_EmptyRejected asserts an empty
 // stdin (no password provided) returns a clear error instead of
 // silently falling through to an unlock attempt with "".

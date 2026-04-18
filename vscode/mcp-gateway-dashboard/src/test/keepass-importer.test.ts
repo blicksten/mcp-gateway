@@ -99,6 +99,42 @@ describe('keepass-importer', () => {
 			assert.equal(results[0].status, 'failed');
 			assert.equal(results[0].stored_env, 0);
 		});
+
+		it('skips servers with invalid names (PAL HIGH — KDBX input validation)', async () => {
+			const store = new FakeStore();
+			const payload: CredentialImportJSON = {
+				version: 1, mode: 'dry-run', found: 1,
+				// Invalid server name — contains a slash.
+				servers: [{ name: 'bad/name', env_vars: { FOO: 'bar' }, headers: {} }],
+			};
+			const results = await applyImportedCredentials(store as unknown as CredentialStore, payload);
+
+			assert.equal(results[0].status, 'skipped', 'invalid server names must not touch SecretStorage');
+			assert.equal(store.stored.length, 0, 'no writes attempted for skipped server');
+			assert.ok(results[0].error, 'skipped result must carry the validation reason');
+		});
+
+		it('per-entry error loop keeps writing remaining env/headers after a mid-entry failure', async () => {
+			// Fails on the SECOND env var only — first env var + all
+			// headers must still persist. PAL MEDIUM.
+			const store = new FakeStore();
+			store.failOn = { server: 'alpha', kind: 'env', key: 'ALPHA_USER' };
+
+			const payload: CredentialImportJSON = {
+				version: 1, mode: 'dry-run', found: 1,
+				servers: [{
+					name: 'alpha',
+					env_vars: { ALPHA_PASSWORD: 'a', ALPHA_USER: 'u' },
+					headers: { 'X-Token': 't' },
+				}],
+			};
+			const results = await applyImportedCredentials(store as unknown as CredentialStore, payload);
+
+			assert.equal(results[0].stored_env, 1, 'first env var persisted before mid-loop failure');
+			assert.equal(results[0].stored_headers, 1, 'headers still written after env failure');
+			assert.equal(results[0].status, 'stored', 'partial progress keeps status=stored with error detail');
+			assert.ok(results[0].error);
+		});
 	});
 
 	describe('KeepassImportError', () => {
