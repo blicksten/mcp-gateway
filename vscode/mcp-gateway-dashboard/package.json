@@ -58,6 +58,11 @@
         "icon": "$(add)"
       },
       {
+        "command": "mcpGateway.importKeepassCredentials",
+        "title": "MCP Gateway: Import KeePass Credentials",
+        "icon": "$(key)"
+      },
+      {
         "command": "mcpGateway.removeServer",
         "title": "MCP Gateway: Remove Server"
       },
@@ -272,6 +277,18 @@
           "type": "string",
           "default": "",
           "description": "Path to the Bearer auth token file (default ~/.mcp-gateway/auth.token). MCP_GATEWAY_AUTH_TOKEN env var overrides this.",
+          "scope": "machine"
+        },
+        "mcpGateway.keepassPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the KDBX file for credential import (KeePass). Used by the 'Import KeePass Credentials' command.",
+          "scope": "machine"
+        },
+        "mcpGateway.keepassGroup": {
+          "type": "string",
+          "default": "",
+          "description": "Optional KeePass group to filter entries to (e.g. 'MCP/Servers'). Empty = all groups.",
           "scope": "machine"
         }
       }

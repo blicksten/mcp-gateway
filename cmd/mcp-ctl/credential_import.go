@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"mcp-gateway/internal/keepass"
@@ -11,6 +15,38 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
+
+// CredentialImportJSONVersion is the stable JSON output contract version
+// consumed by the VS Code extension's keepass-importer.ts (T12B.1).
+// Bump only on breaking schema changes.
+const CredentialImportJSONVersion = 1
+
+// credentialImportJSON is the wire format produced by `mcp-ctl credential
+// import --json`. Stable across minor releases per ADR-0003 consumer
+// contract. Extension parses this verbatim.
+type credentialImportJSON struct {
+	Version int                        `json:"version"`
+	Mode    string                     `json:"mode"` // "dry-run" | "to-env-file" | "to-server"
+	Found   int                        `json:"found"`
+	Servers []credentialImportServer   `json:"servers"`
+	Results []credentialImportResult   `json:"results,omitempty"` // only for to-server mode
+}
+
+// credentialImportServer is one KeePass-sourced server entry.
+// SECURITY: EnvVars / Headers contain plaintext credentials. Callers must
+// never log this struct. The extension writes values into SecretStorage.
+type credentialImportServer struct {
+	Name    string            `json:"name"`
+	EnvVars map[string]string `json:"env_vars"`
+	Headers map[string]string `json:"headers"`
+}
+
+// credentialImportResult is per-server application outcome (to-server mode).
+type credentialImportResult struct {
+	Name   string `json:"name"`
+	Status string `json:"status"` // "ok" | "skipped" | "failed" | "partial"
+	Detail string `json:"detail,omitempty"`
+}
 
 func newCredentialImportCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -36,11 +72,13 @@ servers are NOT rolled back on partial failure.`,
 
 	cmd.Flags().String("keepass", "", "Path to KDBX database file (required)")
 	cmd.Flags().String("password-file", "", "Path to file containing the master password")
+	cmd.Flags().Bool("password-stdin", false, "Read master password from stdin (exclusive with --password-file; enables non-TTY exec, e.g. child process from VS Code extension)")
 	cmd.Flags().String("key-file", "", "Path to key file for KDBX authentication")
 	cmd.Flags().String("to-env-file", "", "Write credentials to .env file (default mode)")
 	cmd.Flags().Bool("to-server", false, "Apply credentials via PATCH API")
 	cmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
 	cmd.Flags().String("group", "", "Only import entries from this KeePass group")
+	cmd.Flags().Bool("json", false, "Output a stable JSON contract to stdout (for programmatic consumption; values are plaintext — do NOT log)")
 
 	_ = cmd.MarkFlagRequired("keepass")
 
@@ -50,24 +88,36 @@ servers are NOT rolled back on partial failure.`,
 func runCredentialImport(cmd *cobra.Command, _ []string) error {
 	kdbxPath, _ := cmd.Flags().GetString("keepass")
 	passwordFile, _ := cmd.Flags().GetString("password-file")
+	passwordStdin, _ := cmd.Flags().GetBool("password-stdin")
 	keyFile, _ := cmd.Flags().GetString("key-file")
 	envFilePath, _ := cmd.Flags().GetString("to-env-file")
 	toServer, _ := cmd.Flags().GetBool("to-server")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	groupFilter, _ := cmd.Flags().GetString("group")
+	jsonOut, _ := cmd.Flags().GetBool("json")
 
 	// Validate mutually exclusive flags.
 	if toServer && envFilePath != "" {
 		return fmt.Errorf("--to-server and --to-env-file are mutually exclusive")
 	}
+	if passwordStdin && passwordFile != "" {
+		return fmt.Errorf("--password-stdin and --password-file are mutually exclusive")
+	}
 
-	// Default mode: env file.
-	if !toServer && envFilePath == "" {
+	// --json forces dry-run semantics when no explicit destination is
+	// given: programmatic callers (VS Code extension) want to see the
+	// structured contents first, then they decide what to do.
+	if jsonOut && !toServer && envFilePath == "" {
+		dryRun = true
+	}
+
+	// Default mode: env file (only when not in --json mode).
+	if !toServer && envFilePath == "" && !jsonOut {
 		envFilePath = ".env"
 	}
 
 	// Read password.
-	password, err := readPassword(cmd, passwordFile, keyFile)
+	password, err := readPassword(cmd, passwordFile, passwordStdin, keyFile)
 	if err != nil {
 		return err
 	}
@@ -99,7 +149,12 @@ func runCredentialImport(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// Print summary.
+	// JSON output path — structured for programmatic consumers.
+	if jsonOut {
+		return emitJSONAndMaybeApply(cmd, creds, envFilePath, toServer, dryRun)
+	}
+
+	// Human-readable summary.
 	fmt.Fprintf(cmd.OutOrStdout(), "Found %d server(s) in KDBX:\n", len(creds))
 	tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "SERVER\tENV VARS\tHEADERS")
@@ -120,7 +175,140 @@ func runCredentialImport(cmd *cobra.Command, _ []string) error {
 	return applyToEnvFile(cmd, envFilePath, creds)
 }
 
-func readPassword(cmd *cobra.Command, passwordFile, keyFile string) ([]byte, error) {
+// emitJSONAndMaybeApply renders the JSON contract and optionally applies
+// credentials (to-server). Values in the emitted JSON are plaintext —
+// stdout MUST NOT be logged by programmatic consumers. The extension's
+// keepass-importer.ts enforces this invariant.
+func emitJSONAndMaybeApply(cmd *cobra.Command, creds []keepass.ServerCredentials, envFilePath string, toServer, dryRun bool) error {
+	mode := "dry-run"
+	switch {
+	case toServer:
+		mode = "to-server"
+	case envFilePath != "":
+		mode = "to-env-file"
+	}
+
+	out := credentialImportJSON{
+		Version: CredentialImportJSONVersion,
+		Mode:    mode,
+		Found:   len(creds),
+		Servers: make([]credentialImportServer, 0, len(creds)),
+	}
+	for _, sc := range creds {
+		out.Servers = append(out.Servers, credentialImportServer{
+			Name:    sc.ServerName,
+			EnvVars: copyMap(sc.EnvVars),
+			Headers: copyMap(sc.Headers),
+		})
+	}
+
+	if !dryRun {
+		switch {
+		case toServer:
+			out.Results = applyToServerJSON(cmd, creds)
+		case envFilePath != "":
+			if err := keepass.WriteEnvFile(envFilePath, creds); err != nil {
+				return writeJSONAndError(cmd, out, err)
+			}
+		}
+	}
+
+	// Use an Encoder with SetEscapeHTML(false) so Bearer tokens with `&`
+	// or `<` in SAP-generated secrets round-trip intact.
+	enc := json.NewEncoder(cmd.OutOrStdout())
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
+// writeJSONAndError writes the partial JSON to stdout then returns the
+// error. Keeps stdout a valid JSON object even on failure.
+func writeJSONAndError(cmd *cobra.Command, out credentialImportJSON, err error) error {
+	enc := json.NewEncoder(cmd.OutOrStdout())
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(out)
+	return err
+}
+
+func copyMap(src map[string]string) map[string]string {
+	if src == nil {
+		return map[string]string{}
+	}
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+// applyToServerJSON applies credentials via PATCH API and returns a
+// per-server result slice suitable for JSON serialization (no human
+// text output). Mirrors applyToServer but without tabwriter.
+func applyToServerJSON(cmd *cobra.Command, creds []keepass.ServerCredentials) []credentialImportResult {
+	client, err := getClient(cmd)
+	if err != nil {
+		// Connection-level failure — every server is unreachable.
+		results := make([]credentialImportResult, 0, len(creds))
+		for _, sc := range creds {
+			results = append(results, credentialImportResult{
+				Name:   sc.ServerName,
+				Status: "failed",
+				Detail: "no gateway connection: " + err.Error(),
+			})
+		}
+		return results
+	}
+
+	results := make([]credentialImportResult, 0, len(creds))
+	for _, sc := range creds {
+		if err := models.ValidateServerName(sc.ServerName); err != nil {
+			results = append(results, credentialImportResult{
+				Name:   sc.ServerName,
+				Status: "skipped",
+				Detail: "invalid server name: " + err.Error(),
+			})
+			continue
+		}
+
+		var addEnv []string
+		for k, v := range sc.EnvVars {
+			addEnv = append(addEnv, k+"="+v)
+		}
+
+		if err := client.PatchServerEnv(cmd.Context(), sc.ServerName, addEnv, nil); err != nil {
+			results = append(results, credentialImportResult{
+				Name: sc.ServerName, Status: "failed", Detail: err.Error(),
+			})
+			continue
+		}
+
+		if len(sc.Headers) > 0 {
+			if err := client.PatchServerHeaders(cmd.Context(), sc.ServerName, sc.Headers, nil); err != nil {
+				results = append(results, credentialImportResult{
+					Name: sc.ServerName, Status: "partial",
+					Detail: "env OK, headers failed: " + err.Error(),
+				})
+				continue
+			}
+		}
+
+		results = append(results, credentialImportResult{
+			Name: sc.ServerName, Status: "ok",
+		})
+	}
+	return results
+}
+
+func readPassword(cmd *cobra.Command, passwordFile string, passwordStdin bool, keyFile string) ([]byte, error) {
+	// T12B.2: --password-stdin enables non-TTY password supply. The
+	// extension pipes the master password into mcp-ctl's stdin so
+	// there is no TTY prompt when running as a child process. First
+	// line only, CR/LF trimmed, stdin closed on return.
+	if passwordStdin {
+		return readPasswordStdin(cmd.InOrStdin())
+	}
+
 	if passwordFile != "" {
 		return keepass.ReadPasswordFile(passwordFile)
 	}
@@ -132,7 +320,7 @@ func readPassword(cmd *cobra.Command, passwordFile, keyFile string) ([]byte, err
 
 	// Interactive prompt.
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return nil, fmt.Errorf("no --password-file and no --key-file provided, and stdin is not a terminal")
+		return nil, fmt.Errorf("no --password-file, --password-stdin, or --key-file provided, and stdin is not a terminal")
 	}
 
 	fmt.Fprint(cmd.OutOrStderr(), "Master password: ")
@@ -142,6 +330,26 @@ func readPassword(cmd *cobra.Command, passwordFile, keyFile string) ([]byte, err
 		return nil, fmt.Errorf("read password: %w", err)
 	}
 	return pw, nil
+}
+
+// readPasswordStdin reads a single line from stdin as the master
+// password. CR/LF are trimmed. The buffer is zeroed on any error path
+// before being returned so partially-read material is not leaked.
+func readPasswordStdin(r io.Reader) ([]byte, error) {
+	br := bufio.NewReader(r)
+	line, err := br.ReadBytes('\n')
+	// On EOF without newline, ReadBytes returns the data plus io.EOF.
+	if err != nil && err != io.EOF {
+		zeroBytes(line)
+		return nil, fmt.Errorf("read password from stdin: %w", err)
+	}
+	// Trim trailing \n and any bare \r (Windows piping).
+	trimmed := strings.TrimRight(string(line), "\r\n")
+	zeroBytes(line) // scrub the buffered copy
+	if trimmed == "" {
+		return nil, fmt.Errorf("--password-stdin provided but stdin was empty")
+	}
+	return []byte(trimmed), nil
 }
 
 func applyToEnvFile(cmd *cobra.Command, path string, creds []keepass.ServerCredentials) error {

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { GatewayClient } from './gateway-client';
 import { buildAuthHeader, resolveTokenPath, AuthTokenError } from './auth-header';
+import { runKeepassImport, applyImportedCredentials, KeepassImportError } from './keepass-importer';
 import { BackendTreeProvider } from './backend-tree-provider';
 import { BackendItem } from './backend-item';
 import { McpStatusBar } from './status-bar';
@@ -267,6 +268,51 @@ function registerCommands(
 			credentialStore,
 			() => { void cache.refresh(); },
 		);
+	}));
+
+	// T12B.5 — KeePass credential import via mcp-ctl child process.
+	push(vscode.commands.registerCommand('mcpGateway.importKeepassCredentials', async () => {
+		const cfg = vscode.workspace.getConfiguration('mcpGateway');
+		const kdbxPath = cfg.get<string>('keepassPath', '').trim();
+		if (!kdbxPath) {
+			vscode.window.showErrorMessage(
+				'MCP Gateway: set mcpGateway.keepassPath to your KDBX file path before importing.',
+			);
+			return;
+		}
+		const mcpCtlPath = cfg.get<string>('daemonPath', '').trim() || 'mcp-ctl';
+		const group = cfg.get<string>('keepassGroup', '').trim() || undefined;
+
+		const password = await vscode.window.showInputBox({
+			prompt: `KeePass master password for ${kdbxPath}`,
+			password: true,
+			ignoreFocusOut: true,
+		});
+		if (!password) { return; } // cancelled
+
+		try {
+			const payload = await runKeepassImport({
+				mcpCtlPath,
+				kdbxPath,
+				masterPassword: password,
+				group,
+			});
+			const results = await applyImportedCredentials(credentialStore, payload);
+
+			const stored = results.filter((r) => r.status === 'stored').length;
+			const failed = results.filter((r) => r.status === 'failed').length;
+			const summary = failed === 0
+				? `Imported ${stored} server(s) from KeePass. Credentials are in SecretStorage.`
+				: `Imported ${stored} server(s); ${failed} failed. See detail in logs.`;
+			vscode.window.showInformationMessage(summary);
+			void cache.refresh();
+		} catch (err) {
+			if (err instanceof KeepassImportError) {
+				vscode.window.showErrorMessage(`KeePass import failed: ${err.message}`);
+			} else {
+				vscode.window.showErrorMessage(`KeePass import failed: ${(err as Error).message}`);
+			}
+		}
 	}));
 
 	push(vscode.commands.registerCommand('mcpGateway.resetCircuit', async (item?: BackendItem) => {

@@ -124,6 +124,7 @@ describe('Commands', () => {
 			'mcpGateway.restartServer',
 			'mcpGateway.removeServer',
 			'mcpGateway.addServer',
+			'mcpGateway.importKeepassCredentials',
 			'mcpGateway.resetCircuit',
 			'mcpGateway.showLogs',
 			'mcpGateway.startDaemon',
