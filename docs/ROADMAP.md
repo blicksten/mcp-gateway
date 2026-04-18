@@ -31,7 +31,7 @@ Phases 1–10.5 implemented. Full history preserved locally in `full-history-bac
 
 ### Phase 12 — Auth + KeePass (v1.2.0)
 
-Detailed plan `docs/PLAN-main.md:115-354` (audited 2026-04-17, architect APPROVE_WITH_REFINEMENTS + dev-lead + lead-auditor 2 cycles + specialist-auditor 2 cycles, zero MEDIUM+ findings). ADR-0003 Bearer Token Auth to be drafted as task T12A.0.
+Detailed plan `docs/PLAN-main.md:115-354` (audited 2026-04-17, architect APPROVE_WITH_REFINEMENTS + dev-lead + lead-auditor 2 cycles + specialist-auditor 2 cycles, zero MEDIUM+ findings). **T12A.0 (ADR-0003) COMPLETE 2026-04-18** — `docs/ADR-0003-bearer-token-auth.md` 201 lines, 11 required sections, REVIEW-main.md APPROVE with zero MEDIUM+ and 3 LOW future-phase notes.
 
 **Phase 12.A — Bearer Token Auth (v1.2.0 Go daemon + mcp-ctl + GatewayClient + LogViewer)**
 

@@ -113,3 +113,55 @@ Two rounds of fixes applied. 13 code edits across 5 Go files. All Go tests pass 
 ### Verdict
 
 **APPROVE** — zero MEDIUM+ after 11E-H1 fix. 441 passing tests, 24 dedicated to slash-command-generator.
+
+---
+
+## Phase 12.A-A0 (T12A.0 — ADR-0003 draft) — 2026-04-18
+
+**Scope:** single new file `docs/ADR-0003-bearer-token-auth.md` (201 lines, pure markdown).
+**Review type:** doc-only (no code). Reviewed structure, completeness vs T12A.0 spec (PLAN-main.md:151-156), and consistency with Phase 12 dev-lead task bodies (PLAN-main.md:160-344).
+
+### Findings
+
+| ID | Severity | Description | Status |
+|----|----------|-------------|--------|
+| 12A0-L1 | LOW | ADR does not explicitly state a decision on which loopback addresses count for policy `loopback-only` (127.0.0.1, ::1, both? what about 127.0.0.0/8?). T12A.3c implementation will need to settle this. | Noted for T12A.3c; not a blocker for A0 — deliberate scoping deferral |
+| 12A0-L2 | LOW | §auth-header-fallback says "error with a clear message" but does not specify exit code or CLI behaviour on missing token. Implementation detail for T12A.6/T12A.7. | Noted for T12A.6/T12A.7 |
+| 12A0-L3 | LOW | Token rotation "deferred to Phase 15+" — no link to a tracking issue/plan entry. | Follow-up: add to Phase 15 roadmap when that phase is scoped |
+
+### Mandatory-phrase checkpoint (PLAN-main.md:156)
+
+- `§csrf-scope` present: 5 occurrences ✓
+- `§token-lifecycle` present: 3 occurrences ✓
+- `"no version field"` present: 1 occurrence ✓
+- `"format version was considered"` present: 1 occurrence ✓ (after Edit refinement)
+
+### Section-coverage check (vs T12A.0 spec)
+
+| Required section | ADR section |
+|------------------|-------------|
+| Policy matrix | §policy-matrix + §policy-matrix-mcp-modes |
+| Token lifecycle | §token-lifecycle |
+| DACL rationale | §dacl-rationale |
+| csrf-ordering (auth→csrf) + intentional non-coverage | §csrf-scope |
+| `MCP_GATEWAY_I_UNDERSTAND_NO_AUTH` | §no-auth-escape-hatch |
+| `MCP_GATEWAY_AUTH_TOKEN` env override | §token-lifecycle + §auth-header-fallback |
+| Authorization-header fallback | §auth-header-fallback |
+| Token rotation out-of-scope | §token-lifecycle (last paragraph) |
+| Bearer-without-TLS WARN | §no-auth-escape-hatch |
+| 401 response body hint | §401-hint |
+| Client compatibility (Claude Desktop / Code / Cursor) | §policy-matrix-mcp-modes (with issue #112 note) |
+
+All 11 required sections present. No scope creep: alternatives considered (OAuth, mTLS, Unix sockets, URL tokens, cookie-sessions) are each rejected with explicit rationale, not silently omitted.
+
+### Consistency check vs plan
+
+- Middleware ordering `auth→csrf` (§csrf-scope) matches T12A.3b PLAN text: "global r.Use + allow-list; CSRF scoped to /api/v1" and T12A.3b's auth-first comment.
+- Bearer-without-TLS warning wording (§no-auth-escape-hatch) matches L-1 text in T12A.4 line 210.
+- `no version field` + `format version was considered` match L-2 text in §token-lifecycle line 154.
+- §csrf-scope list (/mcp, /sse, /api/* redirect) matches T12A.3b/T12A.13 intentional non-coverage tests.
+- Tiered DACL test (CI structural + integration enforcement with LogonUser) matches M-1 resolution in T12A.2.
+
+### Verdict
+
+**APPROVE** — zero MEDIUM+ findings. 3 LOW items are genuine future-phase clarifications, not ADR defects. All mandatory PLAN-main.md:156 checkpoints satisfied. No scope creep. Consistent with dev-lead task bodies. Ready for commit.
