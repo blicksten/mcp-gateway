@@ -374,12 +374,12 @@ Phase 14 (community/CI) — after 11.C, 11.E, 12.A
 
 Single phase — documentation + CI + catalogs.
 
-- T14.1: `SECURITY.md` — responsible disclosure policy
-- T14.2-3: `.gitleaks.toml` + `gitleaks` job in `ci.yml`
-- T14.4-5: Server catalog + command catalog JSON files
-- T14.6-7: Catalog browse in Add Server webview; template enrichment in slash command generator
-- T14.8: README update (auth, TLS, slash commands, catalogs)
-- GATE: tests + codereview + thinkdeep — zero MEDIUM+
+- [x] T14.1: `SECURITY.md` — responsible disclosure policy (GH advisories preferred; 30-day target; explicit scope boundaries; links to ADR-0003).
+- [x] T14.2-3: `.gitleaks.toml` (extends default ruleset + project-specific allowlist for deliberately-fake test fixtures, dedicated rule for committed token file) + `gitleaks` job in `ci.yml` using `gitleaks/gitleaks-action@v2` with full-history fetch.
+- [ ] T14.4-5: Server catalog + command catalog JSON files — **DEFERRED to v1.5+**. Substantial UX work (catalog format, validation, registry hosting) that belongs in a dedicated plan; v1.4.0 ships auth/TLS/community hardening only.
+- [ ] T14.6-7: Catalog browse webview + template enrichment — deferred alongside T14.4-5.
+- [x] T14.8: README update — Security section expanded with Bearer auth (ADR-0003 link), TLS hard guard, log redaction coverage, POSIX process groups, KeePass import workflow, and SECURITY.md pointer.
+- GATE: PAL codereview on T14 deliverables — SECURITY.md, .gitleaks.toml, ci.yml, README.md — pending.
 
 **Rollback:** Delete new files; revert CI.
 

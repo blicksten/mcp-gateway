@@ -122,3 +122,20 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+  # T14.2-3: gitleaks scans the full history of each PR / push for
+  # accidentally committed secrets. Configuration lives in .gitleaks.toml
+  # at the repo root; test fixtures that deliberately contain token-
+  # shaped strings are allowlisted there.
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # required so gitleaks can scan the full history
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml

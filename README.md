@@ -272,13 +272,31 @@ Default config path: `~/.mcp-gateway/config.json` (auto-created on first run).
 
 ## Security
 
+- **Bearer token authentication (v1.2+):** Every mutating `/api/v1` endpoint, sensitive reads (`/logs`), and (optionally) MCP transports require `Authorization: Bearer <token>`. The daemon auto-generates a 32-byte base64url token at first start and persists it at `~/.mcp-gateway/auth.token` with POSIX `0600` / Windows DACL (current-user-only ALLOW ACE, deny-by-default). Override with `MCP_GATEWAY_AUTH_TOKEN` env var. Full policy matrix: [docs/ADR-0003](docs/ADR-0003-bearer-token-auth.md).
+- **TLS (v1.3+):** Optional TLS via `gateway.tls_cert_path` + `gateway.tls_key_path`. **Non-loopback bind with Bearer auth enabled refuses to start without TLS** — cleartext tokens on public networks are not possible by design.
 - **Localhost by default:** Binds to `127.0.0.1:8765`. Non-loopback requires `allow_remote: true`.
-- **CSRF protection:** `Sec-Fetch-Site` header validated on mutating requests.
-- **Rate limiting:** 100 concurrent requests, 200 backlog, 30s timeout.
+- **MCP transport policy:** `gateway.auth_mcp_transport=loopback-only` (default) rejects non-loopback MCP clients with 403 and denies cross-site browser-originated POSTs via `Sec-Fetch-Site`. `bearer-required` mode applies Bearer auth to `/mcp` and `/sse`.
+- **CSRF protection:** `Sec-Fetch-Site` header validated on mutating `/api/v1` requests (auth runs **before** csrf for cheap 401 short-circuits).
+- **Rate limiting:** 100 concurrent requests, 200 backlog, 30s timeout. SSE `/logs` has its own 20-connection throttle with auth-before-throttle so unauthenticated clients cannot exhaust the budget.
 - **Body size limit:** 1 MB max.
-- **SSE connection limit:** Max 20 concurrent log streams.
 - **Env key blocklist:** 25+ dangerous keys (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, etc.) rejected.
 - **Atomic config writes:** Temp file + rename to prevent corruption.
+- **Log redaction (v1.3+):** Child-process stderr streamed through a redaction pipeline before entering the log ring, SSE `/logs` stream, or on-disk log. Matches: Authorization Bearer headers, bare `Bearer X`, `api_key=/access_token=/secret_key=/password=`, AWS access keys (`AKIA*`), GitHub PATs (`ghp_/gho_/ghu_/ghs_/ghr_`), JWTs, and 32+ char base64url blobs. Context-bearing patterns preserve the field name (`Authorization: Bearer ***REDACTED***`) so operators retain diagnostic value.
+- **POSIX process groups (v1.3+):** Child processes run in their own process group; the daemon sends SIGTERM/SIGKILL to the group so grandchildren are reaped.
+
+### KeePass credential import (v1.2+)
+
+Operators can import credentials from a KDBX file directly into the extension's SecretStorage:
+
+1. Set `mcpGateway.keepassPath` (and optionally `mcpGateway.keepassGroup`) in VS Code settings.
+2. Run **MCP Gateway: Import KeePass Credentials** from the command palette.
+3. Enter the master password in the VS Code prompt.
+
+Behind the scenes, the extension spawns `mcp-ctl credential import --json --password-stdin` with an argv-array exec (no shell), pipes the password via stdin, and parses the stable JSON contract (`{version:1, servers:[...]}`). Credentials land in OS keychain via SecretStorage with partial-failure tolerance (one malformed entry does not block the rest).
+
+### Reporting security vulnerabilities
+
+See [SECURITY.md](SECURITY.md) — private reporting via GitHub Security Advisories is preferred.
 
 ## Building from Source
 

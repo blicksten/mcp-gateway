@@ -72,16 +72,23 @@ Detailed plan `docs/PLAN-main.md:115-354` (audited 2026-04-17, architect APPROVE
 | 12.B.6 | Extension E2E test | Full flow: KeePass → `mcp-ctl --json` → token (T12A.8) → PATCH authed → SecretStorage multi-window scenario |
 | 12.B.GATE | Per-Phase Gate | `go test ./...` + `go vet ./...` + `npm test` + PAL codereview+thinkdeep (zero MEDIUM+) + CHANGELOG.md v1.2.0 entry + `npm run deploy` + VSIX commit |
 
-### Phase 13 — Security Hardening (v1.3.0)
+### Phase 13 — Security Hardening (v1.3.0) ✅ COMPLETE
+
+Commits `a845a78` (initial) + `c242b35` (PAL gate fixes — 6 HIGH + 2 MEDIUM resolved: manager error-path process groups, Stop/session deadlock guard, watcher Rename/Remove + loop-var capture, IPv6 bind address, JWT redaction pattern, context-preserving redaction, comment accuracy).
 
 | # | Task | Description |
 |---|------|-------------|
-| 13.1 | POSIX process groups (F-5) | Create process groups for child processes on Linux/macOS to prevent orphans on daemon crash. |
-| 13.2 | Config watcher race (F-6) | Guard AfterFunc in watcher against concurrent invocations — no duplicate reconciles. |
-| 13.3 | TLS support (F-7) | Optional TLS for REST API on non-loopback binding to prevent cleartext traffic. |
-| 13.4 | Log redaction (F-9) | Mask secrets (API keys, passwords, tokens) in child process stderr before streaming. |
+| 13.1 | ✅ POSIX process groups (F-5) | `Setpgid=true` + group-aware SIGTERM/SIGKILL helpers, applied to Stop() and both error paths; Windows unchanged (Job Objects already handle grandchildren). |
+| 13.2 | ✅ Config watcher race (F-6) | `sync.Mutex` around `onChange` with double-checked `ctx.Err()`; also handles Rename/Remove for atomic-save editors; regression test asserts peak in-flight = 1. |
+| 13.3 | ✅ TLS support (F-7) | `GatewaySettings.TLSCert/KeyPath`; `ServeTLS` branch; **non-loopback + Bearer + no TLS refuses to start** (cleartext tokens impossible by design). IPv6 bind address now handled via `net.JoinHostPort`. |
+| 13.4 | ✅ Log redaction (F-9) | `internal/logbuf/redact.go` ordered-match pipeline: Authorization Bearer, bare Bearer, api/access/secret/auth keys, password, AWS AKIA, GitHub PAT (ghp/gho/ghu/ghs/ghr), JWTs (three-segment), generic 32+ char base64url. Context-bearing patterns preserve field name. Ring.Write scrubs on entry — SSE and history both sanitised. 10 regression tests. |
 
-### Phase 14 — Community & CI (v1.4.0)
+### Phase 14 — Community & CI (v1.4.0) — in progress
+
+Shipped: `SECURITY.md` (responsible disclosure, 30-day target, scope boundaries), `.gitleaks.toml` (project-specific allowlist + committed-token rule), `gitleaks` job in `.github/workflows/ci.yml`, README Security section updated for auth / TLS / redaction / KeePass import.
+
+Deferred to v1.5+: server catalog, command catalog, catalog browse in Add Server webview, slash-command template enrichment (T14.4-7). Substantial UX work that belongs in a dedicated plan.
+
 
 | # | Task | Description |
 |---|------|-------------|

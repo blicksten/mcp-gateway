@@ -1,0 +1,32 @@
+# gitleaks configuration for mcp-gateway.
+# Extends the default rule set; adds project-specific allowlist for
+# fixtures that intentionally contain token-shaped strings.
+#
+# Run locally: gitleaks detect --config .gitleaks.toml --redact
+# Run in CI: see .github/workflows/ci.yml (gitleaks job)
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Test fixtures and cassette-style recordings use deliberately fake tokens"
+paths = [
+	'''internal/auth/.*_test\.go''',
+	'''internal/api/auth_integration_test\.go''',
+	'''internal/logbuf/redact_test\.go''',
+	'''vscode/mcp-gateway-dashboard/src/test/.*\.test\.ts''',
+	'''cmd/mcp-ctl/credential_import_json_test\.go''',
+	'''_archive/.*''',
+]
+regexes = [
+	'''(?i)testpw''',
+	'''(?i)secret-pw''',
+	'''(?i)hunter2''',
+]
+
+[[rules]]
+id = "mcp-gateway-bearer-token"
+description = "Bearer token file content should never be committed"
+regex = '''^[A-Za-z0-9_\-]{43}$'''
+path = '''auth\.token$'''
+tags = ["key", "mcp-gateway"]
