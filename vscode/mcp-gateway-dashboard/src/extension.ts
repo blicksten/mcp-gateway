@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { GatewayClient } from './gateway-client';
+import { buildAuthHeader, resolveTokenPath, AuthTokenError } from './auth-header';
 import { BackendTreeProvider } from './backend-tree-provider';
 import { BackendItem } from './backend-item';
 import { McpStatusBar } from './status-bar';
@@ -48,7 +49,32 @@ export function activate(
 	const autoStart = config.get<boolean>('autoStart', true);
 	const daemonPath = config.get<string>('daemonPath', '');
 
-	const client: IGatewayClient = injectedClient ?? new GatewayClient(apiUrl);
+	// T12A.8/T12A.10: Bearer auth provider (env > file) shared by
+	// GatewayClient REST requests and LogViewer SSE connections.
+	// Resolved per request so rotating the token file takes effect
+	// without a VS Code reload.
+	const tokenPath = resolveTokenPath(config);
+	let authErrorNotified = false;
+	const authHeader = (): string | undefined => {
+		try {
+			return buildAuthHeader(tokenPath);
+		} catch (err) {
+			if (err instanceof AuthTokenError && !authErrorNotified) {
+				authErrorNotified = true;
+				void vscode.window.showWarningMessage(
+					'MCP Gateway: auth token not found. Start the daemon once to generate ~/.mcp-gateway/auth.token, or set MCP_GATEWAY_AUTH_TOKEN.',
+					'Reload token',
+				).then((pick) => {
+					if (pick === 'Reload token') {
+						authErrorNotified = false; // allow next attempt to show again on failure
+					}
+				});
+			}
+			throw err;
+		}
+	};
+
+	const client: IGatewayClient = injectedClient ?? new GatewayClient(apiUrl, 5000, authHeader);
 
 	// Phase 8.3: shared data cache — single listServers() call for all consumers.
 	const cache = new ServerDataCache(client);
@@ -78,7 +104,9 @@ export function activate(
 	context.subscriptions.push(daemon);
 
 	// Phase 2.7: log viewer — SSE-based live logs per backend.
-	const logViewer = new LogViewer(apiUrl);
+	// T12A.9: share the same authHeader provider with GatewayClient so
+	// rotating the token (via Reload token action) affects both.
+	const logViewer = new LogViewer(apiUrl, { authHeader });
 	context.subscriptions.push(logViewer);
 
 	// Phase 8.2: credential store — OS keychain via SecretStorage.

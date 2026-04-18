@@ -1,5 +1,6 @@
 import * as http from 'node:http';
 import * as vscode from 'vscode';
+import { AuthTokenError } from './auth-header';
 
 /** Maximum number of reconnect attempts before giving up. */
 const MAX_RETRIES = 10;
@@ -21,6 +22,13 @@ export interface LogViewerOptions {
 	initialBackoffMs?: number;
 	maxBackoffMs?: number;
 	connectTimeoutMs?: number;
+	/**
+	 * Provider that returns the "Authorization" header value on demand,
+	 * or undefined to skip auth. Throwing `AuthTokenError` surfaces as a
+	 * visible channel line and does NOT schedule a reconnect (since the
+	 * daemon will always respond 401 until the token is fixed).
+	 */
+	authHeader?: () => string | undefined;
 }
 
 /** Manages a single SSE log connection for one backend server. */
@@ -48,6 +56,7 @@ export class LogViewer implements vscode.Disposable {
 	private readonly initialBackoffMs: number;
 	private readonly maxBackoffMs: number;
 	private readonly connectTimeoutMs: number;
+	private readonly authHeader?: () => string | undefined;
 
 	constructor(baseUrl: string, opts?: LogViewerOptions) {
 		this.baseUrl = new URL(baseUrl);
@@ -57,6 +66,7 @@ export class LogViewer implements vscode.Disposable {
 		this.initialBackoffMs = opts?.initialBackoffMs ?? INITIAL_BACKOFF_MS;
 		this.maxBackoffMs = opts?.maxBackoffMs ?? MAX_BACKOFF_MS;
 		this.connectTimeoutMs = opts?.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;
+		this.authHeader = opts?.authHeader;
 	}
 
 	/** Show logs for a backend server. Creates or re-opens the output channel. */
@@ -125,12 +135,34 @@ export class LogViewer implements vscode.Disposable {
 
 		const url = new URL(`/api/v1/servers/${encodeURIComponent(serverName)}/logs`, this.baseUrl);
 
+		const headers: Record<string, string> = { 'Accept': 'text/event-stream' };
+		if (this.authHeader) {
+			try {
+				const hdr = this.authHeader();
+				if (hdr) { headers['Authorization'] = hdr; }
+			} catch (err) {
+				// AuthTokenError (or any error) surfaces as a channel line.
+				// We do NOT schedule a reconnect — the daemon will keep
+				// responding 401 until the operator fixes the token.
+				if (err instanceof AuthTokenError) {
+					conn.channel.appendLine(`[log-viewer] ${err.message}`);
+				} else {
+					conn.channel.appendLine(`[log-viewer] auth header resolution failed: ${(err as Error).message}`);
+				}
+				this.teardown(conn);
+				if (this.connections.get(serverName) === conn) {
+					this.connections.delete(serverName);
+				}
+				return;
+			}
+		}
+
 		const options: http.RequestOptions = {
 			method: 'GET',
 			hostname: url.hostname,
 			port: url.port,
 			path: url.pathname + url.search,
-			headers: { 'Accept': 'text/event-stream' },
+			headers,
 		};
 
 		const req = this.httpRequest(options, (res) => {
@@ -142,6 +174,19 @@ export class LogViewer implements vscode.Disposable {
 				conn.channel.appendLine('[log-viewer] Server not found — stream closed.');
 				this.teardown(conn);
 				// H-01 fix: only delete if this conn is still the current entry.
+				if (this.connections.get(serverName) === conn) {
+					this.connections.delete(serverName);
+				}
+				return;
+			}
+
+			// 401 — auth required/failed. Do NOT reconnect silently; the
+			// daemon will keep responding 401 until the token is fixed.
+			// Surface to the user with an actionable hint.
+			if (statusCode === 401) {
+				res.resume();
+				conn.channel.appendLine('[log-viewer] Unauthorized (HTTP 401) — check MCP_GATEWAY_AUTH_TOKEN or the token file. Stream closed.');
+				this.teardown(conn);
 				if (this.connections.get(serverName) === conn) {
 					this.connections.delete(serverName);
 				}

@@ -31,7 +31,7 @@ Phases 1–10.5 implemented. Full history preserved locally in `full-history-bac
 
 ### Phase 12 — Auth + KeePass (v1.2.0)
 
-Detailed plan `docs/PLAN-main.md:115-354` (audited 2026-04-17, architect APPROVE_WITH_REFINEMENTS + dev-lead + lead-auditor 2 cycles + specialist-auditor 2 cycles, zero MEDIUM+ findings). **T12A.0 (ADR-0003) COMPLETE 2026-04-18** — `docs/ADR-0003-bearer-token-auth.md` 201 lines, 11 required sections, REVIEW-main.md APPROVE with zero MEDIUM+ and 3 LOW future-phase notes.
+Detailed plan `docs/PLAN-main.md:115-354` (audited 2026-04-17, architect APPROVE_WITH_REFINEMENTS + dev-lead + lead-auditor 2 cycles + specialist-auditor 2 cycles, zero MEDIUM+ findings). **T12A.0 (ADR-0003) COMPLETE 2026-04-18** — `docs/ADR-0003-bearer-token-auth.md` 201 lines, 11 required sections, REVIEW-main.md APPROVE with zero MEDIUM+ and 3 LOW future-phase notes. **T12A.1–T12A.7 + T12A.13 daemon-side portion COMPLETE 2026-04-18** (commit `6686cd2`) — `internal/auth/{token,middleware,client}.go` + platform-split perms (Windows DACL via SDDL, POSIX 0600), server.go csrf narrowed to `/api/v1` authed group with auth-BEFORE-csrf ordering, `auth_mcp_transport` policy flag (loopback-only default + bearer-required mode), SSE `/logs` auth-before-Throttle, startup guards for `--no-auth + allow_remote + escape-hatch env` and Bearer-without-TLS WARN, ctlclient NewAuthed with per-request provider, 19-assertion auth integration test including 8-case MCP transport policy matrix. Extension auth (T12A.8–T12A.11) next.
 
 **Phase 12.A — Bearer Token Auth (v1.2.0 Go daemon + mcp-ctl + GatewayClient + LogViewer)**
 

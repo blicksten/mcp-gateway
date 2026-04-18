@@ -1,4 +1,5 @@
 import * as http from 'node:http';
+import { AuthTokenError } from './auth-header';
 import type {
 	ApiError,
 	CallToolRequest,
@@ -10,7 +11,14 @@ import type {
 	ToolInfo,
 } from './types';
 
-export type GatewayErrorKind = 'connection' | 'http' | 'parse' | 'timeout';
+export type GatewayErrorKind = 'connection' | 'http' | 'parse' | 'timeout' | 'auth';
+
+/**
+ * Function that returns the "Authorization" header value on demand, or
+ * undefined to skip auth (legacy path). Errors from the function are
+ * surfaced to the caller verbatim.
+ */
+export type AuthHeaderProvider = () => string | undefined;
 
 export class GatewayError extends Error {
 	constructor(
@@ -27,10 +35,16 @@ export class GatewayError extends Error {
 export class GatewayClient {
 	private readonly baseUrl: URL;
 	private readonly timeoutMs: number;
+	private readonly authHeader?: AuthHeaderProvider;
 
-	constructor(baseUrl = 'http://localhost:8765', timeoutMs = 5000) {
+	constructor(
+		baseUrl = 'http://localhost:8765',
+		timeoutMs = 5000,
+		authHeader?: AuthHeaderProvider,
+	) {
 		this.baseUrl = new URL(baseUrl);
 		this.timeoutMs = timeoutMs;
+		this.authHeader = authHeader;
 	}
 
 	// --- Health ---
@@ -106,6 +120,23 @@ export class GatewayClient {
 			const headers: Record<string, string> = {};
 			if (body !== undefined) {
 				headers['Content-Type'] = 'application/json';
+			}
+
+			// Attach Authorization header if the caller supplied a provider.
+			// Provider errors surface as GatewayError('auth', ...) so UI code
+			// can distinguish "no token" from network failures.
+			if (this.authHeader) {
+				try {
+					const hdr = this.authHeader();
+					if (hdr) { headers['Authorization'] = hdr; }
+				} catch (err) {
+					if (err instanceof AuthTokenError) {
+						reject(new GatewayError('auth', err.message));
+						return;
+					}
+					reject(err);
+					return;
+				}
 			}
 
 			const options: http.RequestOptions = {
