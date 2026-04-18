@@ -102,7 +102,14 @@ func (s *Server) UpdateConfig(cfg *models.Config) {
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.RealIP)
+	// middleware.RealIP is deliberately NOT applied at the router root.
+	// It trusts X-Forwarded-For / X-Real-IP unconditionally — without a
+	// trusted-proxy allowlist, a remote client can spoof
+	// `X-Forwarded-For: 127.0.0.1` and bypass the loopback-only MCP
+	// transport policy (PAL-2026-04-18 CRITICAL). If a future deployment
+	// ever sits behind a trusted proxy, reapply RealIP INSIDE the authed
+	// /api/v1 group (where RemoteAddr is not a security decision input)
+	// rather than at the root.
 
 	// Auth middleware — identity for --no-auth path so the same wiring
 	// compiles in both modes without branching every route.
@@ -183,14 +190,7 @@ func (s *Server) Handler() http.Handler {
 		func(r *http.Request) *mcp.Server { return mcpServer }, nil,
 	)
 
-	s.cfgMu.RLock()
-	transportMode := s.cfg.Gateway.AuthMCPTransport
-	s.cfgMu.RUnlock()
-	if transportMode == "" {
-		transportMode = models.AuthMCPTransportLoopbackOnly
-	}
-
-	mcpPolicy := s.mcpTransportPolicy(transportMode, authMW)
+	mcpPolicy := s.mcpTransportPolicy(authMW)
 
 	r.Handle("/mcp", mcpPolicy(streamableHandler))
 	r.Handle("/mcp/*", mcpPolicy(streamableHandler))
@@ -200,26 +200,45 @@ func (s *Server) Handler() http.Handler {
 	return r
 }
 
-// mcpTransportPolicy returns a handler wrapper enforcing the configured
-// MCP transport policy (loopback-only vs bearer-required). See
-// ADR-0003 §policy-matrix-mcp-modes.
-func (s *Server) mcpTransportPolicy(mode string, authMW func(http.Handler) http.Handler) func(http.Handler) http.Handler {
-	switch mode {
-	case models.AuthMCPTransportBearerRequired:
-		return func(next http.Handler) http.Handler {
-			// Bearer required. Auth is enforced even if --no-auth is set
-			// on the REST side: MCP tool calls are security-sensitive
-			// enough that bearer-required must actually require a bearer.
-			// Startup guards in main.go refuse bearer-required + --no-auth.
-			wrapped := authMW(next)
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// mcpTransportPolicy returns a handler wrapper that enforces the
+// configured MCP transport policy. The mode is read per-request from
+// s.cfg so live config reloads take effect without restarting the
+// daemon (PAL-2026-04-18 MEDIUM).
+//
+// Policies:
+//   - loopback-only (default / empty / unknown): refuse non-loopback
+//     RemoteAddr with 403 transport_policy_denied; also refuse
+//     cross-site browser-originated requests (Sec-Fetch-Site) to guard
+//     against browser-to-localhost CSRF on /mcp (PAL-2026-04-18 HIGH).
+//   - bearer-required: apply BearerAuthMiddleware on every request.
+//
+// See ADR-0003 §policy-matrix-mcp-modes.
+func (s *Server) mcpTransportPolicy(authMW func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		// Wrap once; reused for every request in bearer-required mode.
+		authedNext := authMW(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			s.cfgMu.RLock()
+			mode := s.cfg.Gateway.AuthMCPTransport
+			s.cfgMu.RUnlock()
+			if mode == "" {
+				mode = models.AuthMCPTransportLoopbackOnly
+			}
+
+			switch mode {
+			case models.AuthMCPTransportBearerRequired:
 				s.logMCPDecision(r, mode, "allow-if-bearer")
-				wrapped.ServeHTTP(w, r)
-			})
-		}
-	default: // loopback-only (default / empty / unknown)
-		return func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				authedNext.ServeHTTP(w, r)
+
+			default: // loopback-only
+				// Cross-site browser guard: reject non-same-origin/non-none
+				// fetch metadata so a malicious web page cannot drive MCP
+				// tool calls against the user's localhost daemon.
+				if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+					s.logMCPDecision(r, mode, "deny-cross-site-browser")
+					denyMCPTransport(w)
+					return
+				}
 				host, _, err := net.SplitHostPort(r.RemoteAddr)
 				if err != nil {
 					host = r.RemoteAddr
@@ -227,16 +246,21 @@ func (s *Server) mcpTransportPolicy(mode string, authMW func(http.Handler) http.
 				ip := net.ParseIP(host)
 				if ip == nil || !ip.IsLoopback() {
 					s.logMCPDecision(r, mode, "deny-non-loopback")
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusForbidden)
-					_, _ = w.Write([]byte(`{"error":"transport_policy_denied"}`))
+					denyMCPTransport(w)
 					return
 				}
 				s.logMCPDecision(r, mode, "allow-loopback")
 				next.ServeHTTP(w, r)
-			})
-		}
+			}
+		})
 	}
+}
+
+// denyMCPTransport writes the uniform 403 transport_policy_denied body.
+func denyMCPTransport(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte(`{"error":"transport_policy_denied"}`))
 }
 
 // logMCPDecision emits one structured line per MCP transport request.
@@ -282,11 +306,17 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	s.cfgMu.RUnlock()
 	if nonLoopback && !allowRemote {
 		return fmt.Errorf("bind_address %q is non-loopback but allow_remote is not set — "+
-			"refusing to start without authentication. Set gateway.allow_remote=true "+
-			"to override (DANGEROUS: REST API has no authentication)", bindAddr)
+			"refusing to start. Set gateway.allow_remote=true to override", bindAddr)
 	}
 	if nonLoopback {
-		s.logger.Warn("binding to non-loopback address with allow_remote=true — gateway is exposed to the network; authentication is NOT enforced", "addr", bindAddr)
+		// Log wording depends on whether Bearer auth will enforce
+		// credentials on the network. Misleading "NOT enforced" messages
+		// caused operators to assume auth was off even post-12.A.
+		if s.authEnabled {
+			s.logger.Warn("binding to non-loopback address — Bearer auth is enabled; configure TLS (Phase 13) to avoid cleartext token exposure", "addr", bindAddr)
+		} else {
+			s.logger.Warn("binding to non-loopback address with allow_remote=true — gateway is exposed and authentication is DISABLED (--no-auth)", "addr", bindAddr)
+		}
 	}
 
 	addr := fmt.Sprintf("%s:%d", bindAddr, port)

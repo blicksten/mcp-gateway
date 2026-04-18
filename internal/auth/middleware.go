@@ -72,6 +72,10 @@ func writeUnauthorized(w http.ResponseWriter, r *http.Request, logger *slog.Logg
 	logger.Debug("auth: rejected request", "path", r.URL.Path, "reason", reason)
 	w.Header().Set("WWW-Authenticate", "Bearer")
 	w.Header().Set("Content-Type", "application/json")
+	// RFC 6749 §5.1 advises no-store on auth-sensitive responses so
+	// intermediate proxies don't cache the 401 hint.
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	w.WriteHeader(http.StatusUnauthorized)
 	body := ErrorBody{
 		Error: "authentication required",

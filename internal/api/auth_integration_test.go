@@ -288,6 +288,72 @@ func TestAuth_LogsEndpoint_401WithMalformedBearer(t *testing.T) {
 	}
 }
 
+// ===== PAL-2026-04-18 regression — X-Forwarded-For spoof cannot bypass loopback-only =====
+//
+// Prior to removing middleware.RealIP from the router root, a remote
+// client could send `X-Forwarded-For: 127.0.0.1` and bypass the
+// loopback-only transport check. This test asserts the spoof is
+// ignored — r.RemoteAddr is the transport-level peer, not the header.
+
+func TestAuth_MCPTransport_XForwardedForSpoofRejected(t *testing.T) {
+	h, _ := newAuthedServer(t, models.AuthMCPTransportLoopbackOnly, true)
+
+	for _, header := range []string{"X-Forwarded-For", "X-Real-IP"} {
+		req := httptest.NewRequest("POST", "/mcp", bytes.NewBufferString(`{}`))
+		req.Header.Set(header, "127.0.0.1")
+		req.RemoteAddr = "198.51.100.7:54321" // non-loopback peer
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"non-loopback client must get 403 even with spoofed %s: 127.0.0.1", header)
+		assert.Contains(t, rec.Body.String(), "transport_policy_denied")
+	}
+}
+
+// ===== PAL-2026-04-18 HIGH — Sec-Fetch-Site cross-site deny on /mcp =====
+
+func TestAuth_MCPTransport_SecFetchSiteCrossSiteDeny(t *testing.T) {
+	h, _ := newAuthedServer(t, models.AuthMCPTransportLoopbackOnly, true)
+
+	// Cross-site browser page attempts to drive a tool call against the
+	// user's localhost daemon. RemoteAddr is loopback (the browser on
+	// the same machine) but Sec-Fetch-Site reveals the origin.
+	for _, site := range []string{"cross-site", "same-site"} {
+		req := httptest.NewRequest("POST", "/mcp", bytes.NewBufferString(`{}`))
+		req.Header.Set("Sec-Fetch-Site", site)
+		req.RemoteAddr = "127.0.0.1:54321"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"loopback browser POST with Sec-Fetch-Site=%s must be denied", site)
+		assert.Contains(t, rec.Body.String(), "transport_policy_denied")
+	}
+
+	// same-origin and none (curl, server-to-server) are allowed through.
+	for _, site := range []string{"same-origin", "none", ""} {
+		req := httptest.NewRequest("POST", "/mcp", bytes.NewBufferString(`{}`))
+		if site != "" {
+			req.Header.Set("Sec-Fetch-Site", site)
+		}
+		req.RemoteAddr = "127.0.0.1:54321"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		assert.NotEqual(t, http.StatusForbidden, rec.Code,
+			"loopback same-origin POST (Sec-Fetch-Site=%q) must reach /mcp handler", site)
+	}
+}
+
+// ===== PAL-2026-04-18 MEDIUM — Cache-Control no-store on 401 =====
+
+func TestAuth_401HasNoStoreCacheControl(t *testing.T) {
+	h, _ := newAuthedServer(t, models.AuthMCPTransportLoopbackOnly, true)
+
+	rec := doAuthRequest(t, h, "GET", "/api/v1/servers", "", "", nil)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+	assert.Equal(t, "no-cache", rec.Header().Get("Pragma"))
+}
+
 // ===== §401-hint — body shape on auth failure =====
 
 func TestAuth_401BodyShape(t *testing.T) {

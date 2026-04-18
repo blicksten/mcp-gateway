@@ -93,6 +93,16 @@ func tryReadToken(path string) (string, bool) {
 // writeTokenAtomic writes the token to path via a temp-file + rename
 // sequence so readers never observe a partial file. Permissions are set
 // per-platform (see applyTokenFilePerms in token_perms_*.go).
+//
+// Windows hardening (PAL-2026-04-18 HIGH):
+//   - applyTokenFilePerms runs BEFORE WriteString so the tiny window
+//     between CreateTemp and perms-applied contains an EMPTY file; any
+//     race-reader sees no token content.
+//   - On Windows, if os.Rename fails because the destination exists
+//     (MoveFileEx quirk on some filesystems), we explicitly remove the
+//     destination and retry. This matters when LoadOrCreate detects a
+//     corrupt token and needs to regenerate — naive rename would leave
+//     the daemon unable to replace the old file and crash on startup.
 func writeTokenAtomic(path, token string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -106,6 +116,15 @@ func writeTokenAtomic(path, token string) error {
 	tmpPath := tmp.Name()
 	// Belt-and-braces: remove the temp file if anything after this point fails.
 	cleanup := func() { _ = os.Remove(tmpPath) }
+
+	// Apply platform-correct permissions BEFORE writing the token content.
+	// On Windows this means the DACL is installed while the file is empty —
+	// no race-reader window sees the token under default (inherited) perms.
+	if err := applyTokenFilePerms(tmpPath); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("apply token file perms: %w", err)
+	}
 
 	if _, err := tmp.WriteString(token); err != nil {
 		_ = tmp.Close()
@@ -122,14 +141,18 @@ func writeTokenAtomic(path, token string) error {
 		return fmt.Errorf("close temp token file: %w", err)
 	}
 
-	// Set platform-correct permissions on the temp file BEFORE rename so
-	// the destination never exists with default (world-readable) perms.
-	if err := applyTokenFilePerms(tmpPath); err != nil {
-		cleanup()
-		return fmt.Errorf("apply token file perms: %w", err)
-	}
-
 	if err := os.Rename(tmpPath, path); err != nil {
+		// Windows can refuse to replace an existing file in some
+		// edge cases (non-NTFS paths, readonly bit set, etc). Try
+		// an explicit remove+rename before giving up so regenerating
+		// a malformed token does not permanently block startup.
+		if _, statErr := os.Stat(path); statErr == nil {
+			if rmErr := os.Remove(path); rmErr == nil {
+				if err2 := os.Rename(tmpPath, path); err2 == nil {
+					return nil
+				}
+			}
+		}
 		cleanup()
 		return fmt.Errorf("rename token file into place: %w", err)
 	}
