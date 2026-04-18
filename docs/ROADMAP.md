@@ -42,7 +42,7 @@ Detailed plan `docs/PLAN-main.md:115-354` (audited 2026-04-17, architect APPROVE
 | 12.A.2 | Windows DACL | Split `auth_file_windows.go` (DACL SID restrict, deny-by-default) + `auth_file_other.go` (Unix 0600); tiered CI+integration tests |
 | 12.A.3a | BearerAuthMiddleware | chi middleware, `crypto/subtle.ConstantTimeCompare`, 401 with `hint` field guidance |
 | 12.A.3b | Middleware wiring | Global `r.Use` → explicit `/api/v1` groups; auth first (cheap 401), then csrf; CSRF scope narrowed to `/api/v1` |
-| 12.A.3c | MCP transport policy | loopback-only default; Bearer when `allow_remote=true`; policy matrix (8 cases). **User escalation:** Claude Desktop/Cursor custom Authorization header support (T12A.3c:BRANCH-A vs BRANCH-B blocks implementation decision) |
+| 12.A.3c | MCP transport policy | loopback-only default; Bearer when `allow_remote=true`; 8-case policy matrix. Open question resolved 2026-04-18 — Claude Desktop/Code/Cursor all support custom `Authorization` headers via `mcpServers[].headers` in local config files (MCP spec 2025-03-26+). T12A.3c is single-path. |
 | 12.A.3d | `/logs` SSE auth | Wrap SSE group with `auth.Middleware` before `middleware.Throttle(20)` (auth-first DoS hardening) |
 | 12.A.4 | Startup guards | Refuse `--no-auth + allow_remote` without `MCP_GATEWAY_I_UNDERSTAND_NO_AUTH=1`; Bearer-without-TLS WARN |
 | 12.A.5 | Atomic token write ordering | `LoadOrCreate` before `http.Server.Serve`; token file mtime < first request |

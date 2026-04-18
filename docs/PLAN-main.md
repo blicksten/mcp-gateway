@@ -138,7 +138,7 @@ Phase 14 (community/CI) — after 11.C, 11.E, 12.A
 
 **PAL planner cross-validation (gpt-5.2-pro, 2026-04-17):** sub-phase split confirmed correct. Adjustments applied: `authTokenPath` setting moved to 12.A (auth infra, not KeePass-specific); `--json`/`--password-stdin` kept in 12.B (KeePass contract); explicit migration/backward-compat task group added to 12.A; logging/redaction tasks added (never log token/Authorization header); token rotation documented as out-of-scope in ADR-0003.
 
-**Open question (user-escalate before T12A.3c):** Does Claude Desktop / Cursor MCP HTTP client support custom `Authorization` headers on `/mcp` and `/sse`? Resolution blocks T12A.3c (two-branch task). Escalation due before 12.A implementation starts.
+**Open question — RESOLVED (2026-04-18):** Both Claude Desktop / Claude Code and Cursor support custom `Authorization` headers on HTTP MCP transports via `mcpServers[].headers` in the config file (`claude_desktop_config.json` / `.mcp.json` / `~/.cursor/mcp.json`), including `"Authorization": "Bearer ${env:TOKEN}"` env-var interpolation. CLI form: `claude mcp add --transport http <name> <url> --header "Authorization: Bearer $TOKEN"`. MCP spec 2025-03-26+ streamable HTTP transport officially supports the `Authorization` header per request. Known limitation: the claude.ai web-UI "advanced settings" dialog for remote connectors supports only OAuth client id/secret, not a flat Bearer ([issue #112](https://github.com/anthropics/claude-ai-mcp/issues/112)) — **this does not affect local Claude Desktop / Claude Code / Cursor**, which use file-based config. T12A.3c is therefore **single-path** (not two-branch).
 
 ### 12.A — Bearer Token Auth (Go daemon + 3 clients)
 
@@ -187,15 +187,16 @@ Phase 14 (community/CI) — after 11.C, 11.E, 12.A
   - **Tests:** `/api/v1/health` returns 200 without auth; every other endpoint returns 401 without auth and 200 with correct Bearer; `/logs` specifically returns 401 without auth (resolves 12A-5 test requirement).
   - **Checkpoint:** Integration test sweeps all routes and asserts the policy matrix exactly.
 
-- [ ] T12A.3c — MCP transport policy (`/mcp`, `/sse`) — two-branch conditional task (Size: L)
-  - **What:** New `gateway.auth_mcp_transport` config flag. Policy matrix: `loopback-only` (default; reject requests from non-loopback RemoteAddr with 403 `transport_policy_denied`) | `bearer-required` (apply BearerAuthMiddleware to `/mcp` and `/sse`; requires `allow_remote=true` in config). Resolves CRITICAL 12A-1.
-    - **BRANCH A (Claude Desktop/Cursor SUPPORT custom `Authorization` headers):** implement `bearer-required` mode; document config example; allow `allow_remote=true` + auth.
-    - **BRANCH B (clients do NOT support custom headers):** `bearer-required` mode is declared but documented as "daemon-to-daemon only" (not compatible with Claude Desktop/Cursor); `loopback-only` becomes the only supported mode for those clients. **Never** fall back to token-in-URL (resolves dev-lead recommendation #5).
-    - Decision logging: on request to `/mcp`/`/sse`, log one line `policy=<mode> remote=<ip> decision=<allow|deny>` (no secrets) — resolves dev-lead recommendation #3.
-  - **Files:** `internal/api/server.go`, `internal/config/types.go`, `docs/ADR-0003-bearer-token-auth.md` (update with chosen branch)
-  - **Tests:** loopback request in loopback-only mode → 200; non-loopback request in loopback-only mode → 403; (Branch A only) non-loopback + valid Bearer in bearer-required mode + allow_remote=true → 200; non-loopback + no Bearer in bearer-required mode → 401; decision log emitted for every request without leaking tokens.
-  - **Depends on:** open-question resolution (escalate to user BEFORE starting this task).
-  - **Checkpoint:** Policy matrix test exhaustively covers (loopback × non-loopback) × (loopback-only × bearer-required) × (auth-present × auth-absent) = 8 cases.
+- [ ] T12A.3c — MCP transport policy (`/mcp`, `/sse`) — single-path (open question resolved 2026-04-18) (Size: L)
+  - **What:** New `gateway.auth_mcp_transport` config flag. Two modes:
+    - `loopback-only` (**default**) — handler refuses requests whose `RemoteAddr` is not loopback with 403 `transport_policy_denied`. Works with every MCP client regardless of header support. Safe by construction.
+    - `bearer-required` — apply `BearerAuthMiddleware` to `/mcp` and `/sse`; requires `allow_remote=true` in config. Compatible with Claude Desktop / Claude Code / Cursor (all support `mcpServers[].headers` config; see README config-snippet examples for each client).
+  - **Client compatibility README section (T12A.11):** include three config snippets for Claude Code CLI (`claude mcp add --transport http ... --header "Authorization: Bearer ..."`), Claude Desktop / Cursor JSON (`"headers": {"Authorization": "Bearer ${env:MCP_GATEWAY_AUTH_TOKEN}"}`), and a curl smoke test (`curl -H "Authorization: Bearer $(cat ~/.mcp-gateway/auth-token)" ...`). **Never** suggest token-in-URL (resolves dev-lead recommendation #5).
+  - Decision logging: on request to `/mcp`/`/sse`, log one line `policy=<mode> remote=<ip> decision=<allow|deny>` (no secrets in log value) — resolves dev-lead recommendation #3.
+  - Resolves CRITICAL 12A-1.
+  - **Files:** `internal/api/server.go`, `internal/config/types.go`, `docs/ADR-0003-bearer-token-auth.md` (document policy matrix), `README.md` (client config snippets via T12A.11)
+  - **Tests:** 8-case policy matrix — (loopback vs non-loopback RemoteAddr) × (loopback-only vs bearer-required mode) × (auth-present vs auth-absent). All 8 outcomes asserted; decision log emitted for every request without leaking tokens.
+  - **Checkpoint:** `curl` from loopback in `loopback-only` mode → 200; non-loopback client in `loopback-only` → 403 with `transport_policy_denied` body; non-loopback + valid Bearer in `bearer-required` + `allow_remote=true` → 200; non-loopback + missing Bearer → 401. README has verified client config snippets for Claude Code, Claude Desktop, Cursor.
 
 - [ ] T12A.3d — Wire Bearer auth on SSE `/logs` group in `internal/api/server.go` (Size: S)
   - **What:** The SSE log stream is mounted in a **separate** `r.Group` at `server.go:105-108`, outside `r.Route("/api/v1", ...)`, with its own `middleware.Throttle(20)` (F-4 DoS fix). Without explicit wiring here, a literal T12A.3b implementation would leave `GET /api/v1/servers/{name}/logs` reachable at 200 without Bearer. Extend the existing SSE group to apply `auth.Middleware(token)` **before** the `middleware.Throttle(20)` decrement — auth-first rationale: cheap 401 rejection does not consume a throttle slot, so unauthenticated clients cannot exhaust the 20-connection budget (DoS hardening). Handler name: `handleServerLogs` (unchanged). Resolves HIGH 12A-5 (daemon side; extension side is T12A.9).
@@ -406,7 +407,7 @@ Each GATE step runs:
 | Phase | Title | Status | Goal |
 |-------|-------|--------|------|
 | 11 | Extension UX | ✅ COMPLETE | Eliminate flicker, inline buttons, webview forms, slash commands |
-| 12 | Auth + KeePass | 📝 DETAILED | Bearer token auth (17 tasks + GATE, 12.A: T12A.0–T12A.13 with 3a/3b/3c/3d sub-tasks) + extension-side KeePass import (6 tasks + GATE, 12.B: T12B.1–T12B.6). ADR-0003 required before implementation. Awaiting user answer on Claude Desktop/Cursor `Authorization` header support (blocks T12A.3c only). |
+| 12 | Auth + KeePass | 📝 DETAILED | Bearer token auth (17 tasks + GATE, 12.A: T12A.0–T12A.13 with 3a/3b/3c/3d sub-tasks) + extension-side KeePass import (6 tasks + GATE, 12.B: T12B.1–T12B.6). ADR-0003 required before implementation. Open question on Claude Desktop/Cursor Authorization header support RESOLVED 2026-04-18 (both clients support it via file config); T12A.3c is single-path. |
 | 13 | Security Hardening | 📋 PLANNED | POSIX process groups, TLS, log redaction |
 | 14 | Community & CI | 📋 PLANNED | SECURITY.md, gitleaks, server/command catalogs |
 
