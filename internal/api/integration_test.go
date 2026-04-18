@@ -55,7 +55,7 @@ func TestIntegration_FullCycle(t *testing.T) {
 	lm := lifecycle.NewManager(cfg, "test", logger)
 	gw := proxy.New(cfg, lm, "test", logger)
 	monitor := health.NewMonitor(lm, 30*time.Second, logger)
-	srv := NewServer(lm, gw, monitor, cfg, "", logger)
+	srv := NewServer(lm, gw, monitor, cfg, "", logger, AuthConfig{}, "test")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -152,7 +152,7 @@ func TestIntegration_AddRemoveServer(t *testing.T) {
 
 	lm := lifecycle.NewManager(cfg, "test", logger)
 	gw := proxy.New(cfg, lm, "test", logger)
-	srv := NewServer(lm, gw, nil, cfg, "", logger)
+	srv := NewServer(lm, gw, nil, cfg, "", logger, AuthConfig{}, "test")
 	handler := srv.Handler()
 
 	// Add a server via REST.
@@ -195,7 +195,7 @@ func TestIntegration_HotReload(t *testing.T) {
 
 	lm := lifecycle.NewManager(cfg, "test", logger)
 	gw := proxy.New(cfg, lm, "test", logger)
-	srv := NewServer(lm, gw, nil, cfg, configPath, logger)
+	srv := NewServer(lm, gw, nil, cfg, configPath, logger, AuthConfig{}, "test")
 	handler := srv.Handler()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

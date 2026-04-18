@@ -288,8 +288,19 @@ type GatewaySettings struct {
 	PingInterval    Duration    `json:"ping_interval,omitempty"`
 	ToolFilter      *ToolFilter `json:"tool_filter,omitempty"`
 	CompressSchemas bool        `json:"compress_schemas,omitempty"` // Truncate tool descriptions, strip schema examples
-	AllowRemote     bool        `json:"allow_remote,omitempty"`     // Allow non-loopback bind_address (no auth — DANGEROUS)
+	AllowRemote     bool        `json:"allow_remote,omitempty"`     // Allow non-loopback bind_address (requires auth unless --no-auth + escape hatch)
+	// AuthMCPTransport controls how MCP transports (/mcp, /sse) authenticate.
+	// See ADR-0003 §policy-matrix-mcp-modes.
+	//   "" | "loopback-only" — refuse non-loopback clients with 403 (default, safe).
+	//   "bearer-required"     — apply BearerAuthMiddleware; requires AllowRemote=true.
+	AuthMCPTransport string `json:"auth_mcp_transport,omitempty"`
 }
+
+// MCP transport policy mode constants (GatewaySettings.AuthMCPTransport).
+const (
+	AuthMCPTransportLoopbackOnly  = "loopback-only"
+	AuthMCPTransportBearerRequired = "bearer-required"
+)
 
 // ValidateBindAddress checks that BindAddress is a valid IP and returns
 // true if the address is non-loopback (a security warning should be logged).

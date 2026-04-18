@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
+	"mcp-gateway/internal/auth"
 	"mcp-gateway/internal/config"
 	"mcp-gateway/internal/ctlclient"
 
@@ -52,7 +54,28 @@ func newRootCmd() *cobra.Command {
 				return nil
 			}
 			apiURL, _ := cmd.Flags().GetString("api-url")
-			client := ctlclient.New(apiURL)
+
+			// Token path: --auth-token-file flag > default ~/.mcp-gateway/auth.token.
+			tokenPath, _ := cmd.Flags().GetString("auth-token-file")
+			if tokenPath == "" {
+				if dir, err := config.DefaultConfigDir(); err == nil {
+					tokenPath = filepath.Join(dir, "auth.token")
+				}
+			}
+			// Per-request provider: env wins over file; missing both → clear
+			// error with actionable message.
+			provider := func() (string, error) {
+				header, err := auth.BuildHeader(tokenPath)
+				if err != nil {
+					return "", fmt.Errorf(
+						"%w\n  hint: the daemon writes this file on first start; "+
+							"if you are running mcp-ctl against a remote daemon, "+
+							"copy the file or set the env var",
+						err)
+				}
+				return header, nil
+			}
+			client := ctlclient.NewAuthed(apiURL, provider)
 			ctx := setClient(cmd.Context(), client)
 
 			// Load env file for ${VAR} expansion in CLI values.
@@ -80,6 +103,7 @@ func newRootCmd() *cobra.Command {
 	}
 	root.PersistentFlags().String("api-url", def, "Gateway API URL (env: MCP_GATEWAY_URL)")
 	root.PersistentFlags().String("env-file", "", "Path to .env file for variable expansion (env: MCP_GATEWAY_ENV_FILE)")
+	root.PersistentFlags().String("auth-token-file", "", "Path to Bearer auth token file (default ~/.mcp-gateway/auth.token; env: "+auth.EnvVarName+" overrides)")
 
 	// Register subcommands.
 	root.AddCommand(newHealthCmd())

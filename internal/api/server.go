@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"mcp-gateway/internal/auth"
 	"mcp-gateway/internal/config"
 	"mcp-gateway/internal/health"
 	"mcp-gateway/internal/lifecycle"
@@ -40,6 +41,18 @@ type Server struct {
 	configPath string
 	logger     *slog.Logger
 	httpServer *http.Server
+
+	// Auth wiring — set by NewServer, consumed by Handler. See ADR-0003.
+	authToken   string // empty ⇔ authEnabled=false
+	authEnabled bool   // false only when --no-auth is set on the daemon CLI
+	version     string // populated for /api/v1/version (public endpoint)
+}
+
+// AuthConfig bundles Bearer auth parameters for the HTTP server.
+// token is empty when enabled=false (--no-auth path).
+type AuthConfig struct {
+	Enabled bool
+	Token   string
 }
 
 // NewServer creates a new API server.
@@ -50,17 +63,22 @@ func NewServer(
 	cfg *models.Config,
 	configPath string,
 	logger *slog.Logger,
+	authCfg AuthConfig,
+	version string,
 ) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Server{
-		lm:         lm,
-		gw:         gw,
-		monitor:    monitor,
-		cfg:        cfg,
-		configPath: configPath,
-		logger:     logger,
+		lm:          lm,
+		gw:          gw,
+		monitor:     monitor,
+		cfg:         cfg,
+		configPath:  configPath,
+		logger:      logger,
+		authToken:   authCfg.Token,
+		authEnabled: authCfg.Enabled,
+		version:     version,
 	}
 }
 
@@ -72,11 +90,26 @@ func (s *Server) UpdateConfig(cfg *models.Config) {
 }
 
 // Handler returns the chi router with all routes mounted.
+//
+// Middleware policy (ADR-0003 §policy-matrix):
+//   Public     GET /api/v1/health, /api/v1/version — no auth, no csrf
+//   Authed REST  all other /api/v1/* — auth THEN csrf (cheap 401 first)
+//   SSE /logs  separate group; auth BEFORE Throttle(20) so unauthed
+//              clients cannot exhaust the throttle budget (T12A.3d)
+//   MCP transports /mcp, /sse — policy from GatewaySettings.AuthMCPTransport
+//                 (loopback-only default; bearer-required when remote)
+//   /api/* redirect — 307 to /api/v1; csrf/auth applied at destination
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RealIP)
-	r.Use(csrfProtect) // F-3 fix: block cross-origin browser requests
+
+	// Auth middleware — identity for --no-auth path so the same wiring
+	// compiles in both modes without branching every route.
+	authMW := func(next http.Handler) http.Handler { return next }
+	if s.authEnabled {
+		authMW = auth.Middleware(s.authToken, s.logger)
+	}
 
 	// REST API v1 — throttled and body-size-limited routes (T5.1).
 	r.Route("/api/v1", func(r chi.Router) {
@@ -86,29 +119,52 @@ func (s *Server) Handler() http.Handler {
 		// are typically nil and pass through with zero overhead.
 		r.Use(maxBodySize(1 << 20))
 
-		r.Get("/health", s.handleHealth)
-		r.Get("/servers", s.handleListServers)
-		r.Get("/servers/{name}", s.handleGetServer)
-		r.Post("/servers", s.handleAddServer)
-		r.Delete("/servers/{name}", s.handleRemoveServer)
-		r.Patch("/servers/{name}", s.handlePatchServer)
-		r.Post("/servers/{name}/restart", s.handleRestartServer)
-		r.Post("/servers/{name}/reset-circuit", s.handleResetCircuit)
-		r.Post("/servers/{name}/call", s.handleCallTool)
-		r.Get("/tools", s.handleListTools)
-		r.Get("/metrics", s.handleMetrics)
+		// Public group — health/version endpoints. No auth, no csrf.
+		// Monitoring probes and the extension's first-start handshake
+		// depend on reaching these without credentials.
+		r.Group(func(r chi.Router) {
+			r.Get("/health", s.handleHealth)
+			r.Get("/version", s.handleVersion)
+		})
+
+		// Authed group — every mutating endpoint AND sensitive reads.
+		// Auth runs BEFORE csrf: cheap constant-time 401 short-circuits
+		// unauthenticated traffic so csrf only examines authenticated
+		// browser-bearing requests (ADR-0003 §csrf-scope).
+		r.Group(func(r chi.Router) {
+			r.Use(authMW)
+			r.Use(csrfProtect) // F-3 fix, now scoped to /api/v1 authed routes
+
+			r.Get("/servers", s.handleListServers)
+			r.Get("/servers/{name}", s.handleGetServer)
+			r.Post("/servers", s.handleAddServer)
+			r.Delete("/servers/{name}", s.handleRemoveServer)
+			r.Patch("/servers/{name}", s.handlePatchServer)
+			r.Post("/servers/{name}/restart", s.handleRestartServer)
+			r.Post("/servers/{name}/reset-circuit", s.handleResetCircuit)
+			r.Post("/servers/{name}/call", s.handleCallTool)
+			r.Get("/tools", s.handleListTools)
+			r.Get("/metrics", s.handleMetrics)
+		})
 	})
 
 	// SSE log streaming — outside the REST throttle group so long-lived
 	// connections don't consume rate-limit tokens and starve REST (F4 fix).
-	// Separate concurrency limit: max 20 concurrent SSE connections (F-4 DoS fix).
+	// Separate concurrency limit: max 20 concurrent SSE connections (F-4 DoS).
+	// T12A.3d: auth runs BEFORE Throttle so unauthed clients don't consume
+	// a throttle slot (DoS hardening). csrf does not apply to SSE (daemon-
+	// to-daemon / extension-to-daemon, no cookie session).
 	r.Group(func(r chi.Router) {
+		r.Use(authMW)
 		r.Use(middleware.Throttle(20))
 		r.Get("/api/v1/servers/{name}/logs", s.handleServerLogs)
 	})
 
 	// Backward-compat redirect: /api/* → /api/v1/* (T5.1).
 	// Uses 307 Temporary Redirect to preserve HTTP method (POST stays POST).
+	// Per ADR-0003 §csrf-scope: csrfProtect does NOT apply here — the
+	// destination /api/v1 group enforces it on arrival. Applying it here
+	// would block legitimate method-preserving clients for no security gain.
 	r.HandleFunc("/api/*", func(w http.ResponseWriter, r *http.Request) {
 		suffix := path.Clean("/" + chi.URLParam(r, "*"))
 		target := "/api/v1" + suffix // suffix starts with / after Clean
@@ -118,7 +174,7 @@ func (s *Server) Handler() http.Handler {
 		http.Redirect(w, r, target, http.StatusTemporaryRedirect)
 	})
 
-	// MCP transports.
+	// MCP transports. Policy per ADR-0003 §policy-matrix-mcp-modes.
 	mcpServer := s.gw.Server()
 	streamableHandler := mcp.NewStreamableHTTPHandler(
 		func(r *http.Request) *mcp.Server { return mcpServer }, nil,
@@ -127,12 +183,83 @@ func (s *Server) Handler() http.Handler {
 		func(r *http.Request) *mcp.Server { return mcpServer }, nil,
 	)
 
-	r.Handle("/mcp", streamableHandler)
-	r.Handle("/mcp/*", streamableHandler)
-	r.Handle("/sse", sseHandler)
-	r.Handle("/sse/*", sseHandler)
+	s.cfgMu.RLock()
+	transportMode := s.cfg.Gateway.AuthMCPTransport
+	s.cfgMu.RUnlock()
+	if transportMode == "" {
+		transportMode = models.AuthMCPTransportLoopbackOnly
+	}
+
+	mcpPolicy := s.mcpTransportPolicy(transportMode, authMW)
+
+	r.Handle("/mcp", mcpPolicy(streamableHandler))
+	r.Handle("/mcp/*", mcpPolicy(streamableHandler))
+	r.Handle("/sse", mcpPolicy(sseHandler))
+	r.Handle("/sse/*", mcpPolicy(sseHandler))
 
 	return r
+}
+
+// mcpTransportPolicy returns a handler wrapper enforcing the configured
+// MCP transport policy (loopback-only vs bearer-required). See
+// ADR-0003 §policy-matrix-mcp-modes.
+func (s *Server) mcpTransportPolicy(mode string, authMW func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	switch mode {
+	case models.AuthMCPTransportBearerRequired:
+		return func(next http.Handler) http.Handler {
+			// Bearer required. Auth is enforced even if --no-auth is set
+			// on the REST side: MCP tool calls are security-sensitive
+			// enough that bearer-required must actually require a bearer.
+			// Startup guards in main.go refuse bearer-required + --no-auth.
+			wrapped := authMW(next)
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				s.logMCPDecision(r, mode, "allow-if-bearer")
+				wrapped.ServeHTTP(w, r)
+			})
+		}
+	default: // loopback-only (default / empty / unknown)
+		return func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				host, _, err := net.SplitHostPort(r.RemoteAddr)
+				if err != nil {
+					host = r.RemoteAddr
+				}
+				ip := net.ParseIP(host)
+				if ip == nil || !ip.IsLoopback() {
+					s.logMCPDecision(r, mode, "deny-non-loopback")
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte(`{"error":"transport_policy_denied"}`))
+					return
+				}
+				s.logMCPDecision(r, mode, "allow-loopback")
+				next.ServeHTTP(w, r)
+			})
+		}
+	}
+}
+
+// logMCPDecision emits one structured line per MCP transport request.
+// Never logs the received Authorization header value — only the path
+// the policy decision took.
+func (s *Server) logMCPDecision(r *http.Request, mode, decision string) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	s.logger.Info("mcp transport request",
+		"policy", mode,
+		"remote", host,
+		"decision", decision,
+		"path", r.URL.Path,
+	)
+}
+
+// handleVersion reports the daemon build metadata. Public endpoint.
+func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"version": s.version,
+	})
 }
 
 // ListenAndServe starts the HTTP server. Blocks until context is cancelled.
@@ -237,10 +364,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			running++
 		}
 	}
+	authState := "enabled"
+	if !s.authEnabled {
+		authState = "disabled"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "ok",
 		"servers": total,
 		"running": running,
+		"auth":    authState,
 	})
 }
 

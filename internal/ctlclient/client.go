@@ -18,14 +18,21 @@ import (
 // Default timeout for HTTP requests.
 const defaultTimeout = 10 * time.Second
 
+// authHeaderProvider returns the Authorization header value, or "" to
+// skip auth (legacy / unauthenticated daemon). Errors propagate to
+// callers verbatim — CLI code surfaces them with guidance.
+type authHeaderProvider func() (string, error)
+
 // Client communicates with the MCP Gateway REST API.
 type Client struct {
 	baseURL      string
 	httpClient   *http.Client
 	streamClient *http.Client // no timeout — for long-lived SSE connections
+	auth         authHeaderProvider
 }
 
 // New creates a Client for the given base URL (e.g. "http://127.0.0.1:8765").
+// Authentication is disabled — use NewAuthed when a Bearer token is required.
 func New(baseURL string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
@@ -34,6 +41,33 @@ func New(baseURL string) *Client {
 		},
 		streamClient: &http.Client{},
 	}
+}
+
+// NewAuthed returns a client that prefixes every request with an
+// `Authorization: Bearer <token>` header resolved from authHeader.
+// The provider is consulted per request so token file rotations are
+// picked up without recreating the client.
+func NewAuthed(baseURL string, authHeader func() (string, error)) *Client {
+	c := New(baseURL)
+	c.auth = authHeader
+	return c
+}
+
+// attachAuthHeader injects the Authorization header using the provider,
+// if one is configured. A provider returning "" means auth is off and
+// the request is sent unchanged.
+func (c *Client) attachAuthHeader(req *http.Request) error {
+	if c.auth == nil {
+		return nil
+	}
+	header, err := c.auth()
+	if err != nil {
+		return err
+	}
+	if header != "" {
+		req.Header.Set("Authorization", header)
+	}
+	return nil
 }
 
 // --- API response types (mirrors api.ServerView) ---
@@ -244,6 +278,9 @@ func (c *Client) streamLogsOnce(ctx context.Context, name string, callback func(
 		return err
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	if err := c.attachAuthHeader(req); err != nil {
+		return err
+	}
 
 	resp, err := c.streamClient.Do(req)
 	if err != nil {
@@ -393,6 +430,9 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, o
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if err := c.attachAuthHeader(req); err != nil {
+		return err
 	}
 
 	resp, err := c.httpClient.Do(req)

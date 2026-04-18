@@ -22,6 +22,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// envNoAuthUnderstood is the environment variable an operator must set
+// alongside --no-auth + allow_remote to proceed. See ADR-0003
+// §no-auth-escape-hatch.
+const envNoAuthUnderstood = "MCP_GATEWAY_I_UNDERSTAND_NO_AUTH"
+
 // Overridden by ldflags at link time; source values are dev-build fallbacks.
 var (
 	version = "dev"
@@ -34,10 +39,12 @@ func main() {
 		configPath string
 		envFile    string
 		showVer    bool
+		noAuth     bool
 	)
 	flag.StringVar(&configPath, "config", "", "path to config.json (default ~/.mcp-gateway/config.json)")
 	flag.StringVar(&envFile, "env-file", "", "path to .env file for variable expansion (env: MCP_GATEWAY_ENV_FILE)")
 	flag.BoolVar(&showVer, "version", false, "print version and exit")
+	flag.BoolVar(&noAuth, "no-auth", false, "disable Bearer authentication (DANGEROUS: combined with allow_remote requires "+envNoAuthUnderstood+"=1)")
 	flag.Parse()
 
 	// Env var fallback for --env-file (flag overrides env var).
@@ -54,13 +61,13 @@ func main() {
 		Level: slog.LevelInfo,
 	}))
 
-	if err := run(configPath, envFile, logger); err != nil {
+	if err := run(configPath, envFile, logger, noAuth); err != nil {
 		logger.Error("fatal", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(configPath, envFile string, logger *slog.Logger) error {
+func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 	// Resolve config path.
 	if configPath == "" {
 		dir, err := config.DefaultConfigDir()
@@ -102,11 +109,20 @@ func run(configPath, envFile string, logger *slog.Logger) error {
 		"transports", cfg.Gateway.Transports,
 	)
 
+	// Auth bootstrap — T12A.4 + T12A.5.
+	// Run startup guards (--no-auth + allow_remote, bearer-required + --no-auth),
+	// then load/generate the Bearer token BEFORE http.Server.Serve binds the
+	// listener so clients never race with an absent file.
+	authCfg, err := setupAuth(cfg, configPath, noAuth, logger)
+	if err != nil {
+		return err
+	}
+
 	// Create components.
 	lm := lifecycle.NewManager(cfg, version, logger)
 	gw := proxy.New(cfg, lm, version, logger)
 	monitor := health.NewMonitor(lm, time.Duration(cfg.Gateway.PingInterval), logger)
-	apiServer := api.NewServer(lm, gw, monitor, cfg, configPath, logger)
+	apiServer := api.NewServer(lm, gw, monitor, cfg, configPath, logger, authCfg, version)
 
 	// Context with signal handling.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

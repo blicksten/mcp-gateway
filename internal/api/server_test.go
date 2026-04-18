@@ -37,7 +37,7 @@ func setupTestServer(t *testing.T) (*Server, *lifecycle.Manager) {
 	lm := lifecycle.NewManager(cfg, "test", testLogger())
 	gw := proxy.New(cfg, lm, "test", testLogger())
 
-	srv := NewServer(lm, gw, nil, cfg, "", testLogger())
+	srv := NewServer(lm, gw, nil, cfg, "", testLogger(), AuthConfig{}, "test")
 	return srv, lm
 }
 
@@ -597,7 +597,7 @@ func setupTestServerWithMonitor(t *testing.T) (*Server, *lifecycle.Manager) {
 	gw := proxy.New(cfg, lm, "test", testLogger())
 	mon := health.NewMonitor(lm, 1*time.Second, testLogger())
 
-	srv := NewServer(lm, gw, mon, cfg, "", testLogger())
+	srv := NewServer(lm, gw, mon, cfg, "", testLogger(), AuthConfig{}, "test")
 	return srv, lm
 }
 

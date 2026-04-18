@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"runtime"
+	"strings"
 	"testing"
+
+	"mcp-gateway/internal/auth"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,6 +21,17 @@ import (
 var mockServerBinary string
 
 func TestMain(m *testing.M) {
+	// Seed a valid Bearer token so PersistentPreRunE does not fail in CLI
+	// tests that target httptest servers with no auth enforcement.
+	// Per-test overrides use t.Setenv. (T12A.7)
+	if os.Getenv(auth.EnvVarName) == "" {
+		tok, err := auth.GenerateToken()
+		if err != nil {
+			panic("generate test token: " + err.Error())
+		}
+		_ = os.Setenv(auth.EnvVarName, tok)
+	}
+
 	// Build the mock server binary into a temp directory.
 	tmpDir, err := os.MkdirTemp("", "mcp-ctl-validate-test")
 	if err != nil {
