@@ -83,11 +83,23 @@ Commits `a845a78` (initial) + `c242b35` (PAL gate fixes — 6 HIGH + 2 MEDIUM re
 | 13.3 | ✅ TLS support (F-7) | `GatewaySettings.TLSCert/KeyPath`; `ServeTLS` branch; **non-loopback + Bearer + no TLS refuses to start** (cleartext tokens impossible by design). IPv6 bind address now handled via `net.JoinHostPort`. |
 | 13.4 | ✅ Log redaction (F-9) | `internal/logbuf/redact.go` ordered-match pipeline: Authorization Bearer, bare Bearer, api/access/secret/auth keys, password, AWS AKIA, GitHub PAT (ghp/gho/ghu/ghs/ghr), JWTs (three-segment), generic 32+ char base64url. Context-bearing patterns preserve field name. Ring.Write scrubs on entry — SSE and history both sanitised. 10 regression tests. |
 
-### Phase 14 — Community & CI (v1.4.0) — in progress
+### Phase 14 — Community & CI (v1.4.0) ✅ COMPLETE
 
-Shipped: `SECURITY.md` (responsible disclosure, 30-day target, scope boundaries), `.gitleaks.toml` (project-specific allowlist + committed-token rule), `gitleaks` job in `.github/workflows/ci.yml`, README Security section updated for auth / TLS / redaction / KeePass import.
+Shipped in commit `29e6fc2`: `SECURITY.md` (responsible disclosure, 30-day target, scope boundaries), `.gitleaks.toml` (project-specific allowlist + committed-token rule), `gitleaks` job in `.github/workflows/ci.yml`, README Security section updated for auth / TLS / redaction / KeePass import.
 
-Deferred to v1.5+: server catalog, command catalog, catalog browse in Add Server webview, slash-command template enrichment (T14.4-7). Substantial UX work that belongs in a dedicated plan.
+Deferred work split into dedicated plans:
+- `docs/PLAN-catalogs.md` (v1.5.0) — server catalog, command catalog, catalog browse in Add Server webview, slash-command template enrichment.
+- `docs/PLAN-v15.md` (v1.5.0 tail) — LOW findings from 12.A / 13 PAL reviews (ConstantTimeCompare length, Scanner 64KB limit) + TLS self-signed integration test + Windows DACL enforcement-tier runner.
+
+---
+
+## Roadmap — v1.4.0 shipped
+
+PLAN-main.md is complete as of commit `29e6fc2`. v1.4.0 delivers Bearer auth (12.A), KeePass credential push (12.B), security hardening (13), and community/CI foundations (14).
+
+Next plans:
+- `docs/PLAN-catalogs.md` — v1.5.0 catalog UX
+- `docs/PLAN-v15.md` — v1.5.0 tail items (LOW fixes + integration-test tiers)
 
 
 | # | Task | Description |
