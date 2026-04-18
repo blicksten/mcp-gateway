@@ -294,6 +294,13 @@ type GatewaySettings struct {
 	//   "" | "loopback-only" — refuse non-loopback clients with 403 (default, safe).
 	//   "bearer-required"     — apply BearerAuthMiddleware; requires AllowRemote=true.
 	AuthMCPTransport string `json:"auth_mcp_transport,omitempty"`
+	// TLSCertPath is the filesystem path to a PEM-encoded TLS
+	// certificate chain. When set alongside TLSKeyPath, the HTTP
+	// server listens with TLS. Phase 13.B (F-7).
+	TLSCertPath string `json:"tls_cert_path,omitempty"`
+	// TLSKeyPath is the filesystem path to the PEM-encoded TLS
+	// private key matching TLSCertPath.
+	TLSKeyPath string `json:"tls_key_path,omitempty"`
 }
 
 // MCP transport policy mode constants (GatewaySettings.AuthMCPTransport).

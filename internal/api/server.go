@@ -303,18 +303,34 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}
 	s.cfgMu.RLock()
 	allowRemote := s.cfg.Gateway.AllowRemote
+	tlsCertPath := s.cfg.Gateway.TLSCertPath
+	tlsKeyPath := s.cfg.Gateway.TLSKeyPath
 	s.cfgMu.RUnlock()
+	tlsEnabled := tlsCertPath != "" && tlsKeyPath != ""
+
 	if nonLoopback && !allowRemote {
 		return fmt.Errorf("bind_address %q is non-loopback but allow_remote is not set — "+
 			"refusing to start. Set gateway.allow_remote=true to override", bindAddr)
 	}
+	// T13B/F-7: when binding non-loopback with auth enabled, require TLS.
+	// --no-auth paths have already navigated the combo guard in setupAuth
+	// and explicit WARN lines; we don't re-enforce TLS there (the
+	// operator has signed the "no auth" blood pact). But when auth IS
+	// enabled, cleartext Bearer tokens on the wire are unacceptable.
+	if nonLoopback && s.authEnabled && !tlsEnabled {
+		return fmt.Errorf("bind_address %q is non-loopback and Bearer auth is enabled — "+
+			"refusing to start without TLS. Set gateway.tls_cert_path and gateway.tls_key_path, "+
+			"or bind to a loopback address, or run with --no-auth (DANGEROUS)", bindAddr)
+	}
 	if nonLoopback {
-		// Log wording depends on whether Bearer auth will enforce
-		// credentials on the network. Misleading "NOT enforced" messages
-		// caused operators to assume auth was off even post-12.A.
-		if s.authEnabled {
-			s.logger.Warn("binding to non-loopback address — Bearer auth is enabled; configure TLS (Phase 13) to avoid cleartext token exposure", "addr", bindAddr)
-		} else {
+		switch {
+		case s.authEnabled && tlsEnabled:
+			s.logger.Info("binding to non-loopback address with TLS + Bearer auth", "addr", bindAddr)
+		case s.authEnabled:
+			// Unreachable — guard above refuses to start. Kept for clarity
+			// if someone relaxes the guard in the future.
+			s.logger.Warn("binding to non-loopback address — Bearer auth is enabled without TLS (cleartext token exposure)", "addr", bindAddr)
+		default:
 			s.logger.Warn("binding to non-loopback address with allow_remote=true — gateway is exposed and authentication is DISABLED (--no-auth)", "addr", bindAddr)
 		}
 	}
@@ -341,6 +357,16 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		_ = s.httpServer.Shutdown(shutdownCtx)
 	}()
 
+	// Branch on TLS — one path uses ServeTLS, the other Serve. The
+	// listener is created the same way because the TLS handshake happens
+	// per-connection inside http.Server.
+	if tlsEnabled {
+		s.logger.Info("HTTPS server listening", "addr", addr, "cert", tlsCertPath)
+		if err := s.httpServer.ServeTLS(listener, tlsCertPath, tlsKeyPath); err != nil && err != http.ErrServerClosed {
+			return err
+		}
+		return nil
+	}
 	s.logger.Info("HTTP server listening", "addr", addr)
 	if err := s.httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
 		return err

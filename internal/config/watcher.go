@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -46,6 +47,13 @@ func Watch(ctx context.Context, mainPath string, localPath string, envFilePath s
 
 	const debounce = 500 * time.Millisecond
 	var timer *time.Timer
+	// F-6 / T13A.3-4 fix: serialize onChange invocations. AfterFunc runs
+	// the callback on its own goroutine; if two rapid bursts of fsnotify
+	// events fire AfterFuncs whose callbacks overlap, onChange could be
+	// entered concurrently and produce duplicate reconcile work. Mutex
+	// guarantees at-most-one in-flight reconcile; a ctx.Err() check at
+	// entry avoids running after shutdown has started.
+	var onChangeMu sync.Mutex
 
 	for {
 		select {
@@ -65,13 +73,19 @@ func Watch(ctx context.Context, mainPath string, localPath string, envFilePath s
 			}
 
 			// Debounce: reset timer on each event.
-			// Note: AfterFunc runs onChange in a new goroutine. Concurrent
-			// onChange calls are safe — downstream callers hold their own mutexes.
 			if timer != nil {
 				timer.Stop()
 			}
 			timer = time.AfterFunc(debounce, func() {
-				// CR-5 fix: check context before calling onChange.
+				// Exit early if shutdown has begun between timer arm
+				// and this callback firing.
+				if ctx.Err() != nil {
+					return
+				}
+				onChangeMu.Lock()
+				defer onChangeMu.Unlock()
+				// Re-check context under the lock — another invocation
+				// may have held the mutex through shutdown.
 				if ctx.Err() != nil {
 					return
 				}

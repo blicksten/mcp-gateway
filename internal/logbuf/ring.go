@@ -40,8 +40,12 @@ func New(capacity int) *Ring {
 }
 
 // Write appends a line to the buffer and notifies all subscribers.
+// F-9 (Phase 13.B): every incoming line is passed through Redact so
+// secret-shaped tokens are scrubbed before they enter the ring buffer,
+// the SSE stream, or the on-disk log. The Redacted constant is fixed
+// so operators can grep for evidence of redaction.
 func (r *Ring) Write(text string) {
-	line := Line{Timestamp: time.Now(), Text: text}
+	line := Line{Timestamp: time.Now(), Text: Redact(text)}
 
 	r.mu.Lock()
 	r.lines[r.head] = line

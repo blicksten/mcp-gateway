@@ -135,6 +135,64 @@ func TestWatch_NonexistentEnvFile_NotFatal(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
+// TestWatch_OnChangeSerialization (T13A.3-4 / F-6) verifies that
+// concurrent debounce firings never invoke onChange concurrently.
+// Without the mutex, two rapid bursts could fire AfterFunc callbacks
+// that overlap and produce duplicate reconcile work.
+func TestWatch_OnChangeSerialization(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{}`), 0o640))
+
+	var inFlight atomic.Int32
+	var peak atomic.Int32
+	var totalCalls atomic.Int32
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Watch(ctx, path, "", "", func() {
+			cur := inFlight.Add(1)
+			// Record the peak concurrency observed.
+			for {
+				pv := peak.Load()
+				if cur <= pv {
+					break
+				}
+				if peak.CompareAndSwap(pv, cur) {
+					break
+				}
+			}
+			totalCalls.Add(1)
+			// Sleep slightly longer than the debounce so a second
+			// burst would overlap absent the mutex.
+			time.Sleep(800 * time.Millisecond)
+			inFlight.Add(-1)
+		}, nil)
+	}()
+
+	time.Sleep(200 * time.Millisecond) // watcher boot
+
+	// Fire a burst, wait for debounce to schedule, then fire another
+	// burst while the first onChange is still sleeping.
+	require.NoError(t, os.WriteFile(path, []byte(`{"a":1}`), 0o640))
+	time.Sleep(600 * time.Millisecond) // > debounce(500ms), onChange running
+	require.NoError(t, os.WriteFile(path, []byte(`{"a":2}`), 0o640))
+	// Wait long enough for the second debounce + second onChange to run
+	// to completion if serialized.
+	time.Sleep(3 * time.Second)
+
+	assert.Equal(t, int32(1), peak.Load(),
+		"onChange must never be entered concurrently (peak in-flight must be 1)")
+	assert.GreaterOrEqual(t, totalCalls.Load(), int32(1),
+		"at least the first burst must have invoked onChange")
+
+	cancel()
+	<-errCh
+}
+
 func TestWatch_InvalidPath(t *testing.T) {
 	ctx := context.Background()
 	err := Watch(ctx, "/nonexistent/path/config.json", "", "", func() {}, nil)

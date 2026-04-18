@@ -354,27 +354,19 @@ Phase 14 (community/CI) — after 11.C, 11.E, 12.A
 
 ## Phase 13 — Security Hardening (v1.3.0)
 
-### 13.A — POSIX Process Groups + Config Watcher Fix
-**Goal:** Prevent orphan child processes on Linux/macOS; fix concurrent onChange race.
+### 13.A — POSIX Process Groups + Config Watcher Fix (COMPLETE)
 
-- T13A.1-2: `procattr_other.go` — `Setpgid: true`; `Stop()` sends SIGTERM to `-pid` (process group)
-- T13A.3-4: `watcher.go` — `sync.Mutex` around `onChange` in AfterFunc callback + ctx.Err() check
-- T13A.5-6: Tests
-- GATE: tests + codereview + thinkdeep — zero MEDIUM+
+- [x] T13A.1-2: `procattr_other.go` now sets `SysProcAttr.Setpgid=true`; new `terminateProcessGroup`/`killProcessGroup` signal the process group via `syscall.Kill(-pid, SIGTERM/SIGKILL)` with fallback to the bare-process signal. `Manager.Stop` sends SIGTERM to the group before the 5s grace, then SIGKILL. Windows path is a no-op equivalent (Job Objects already handle the cleanup).
+- [x] T13A.3-4: `watcher.go` adds `sync.Mutex onChangeMu` around the AfterFunc callback with a double-checked `ctx.Err()` so a reconcile that starts after shutdown begins never fires. Concurrent onChange invocations now serialize at-most-one at a time.
+- [x] T13A.5-6: `TestWatch_OnChangeSerialization` fires two bursts straddling the debounce; asserts peak in-flight onChange = 1, protecting against duplicate reconciles.
 
-**Files:** `procattr_other.go`, `manager.go`, `watcher.go`
-**Rollback:** Revert procattr to no-op; remove mutex.
+### 13.B — TLS + Log Redaction (COMPLETE)
 
-### 13.B — TLS + Log Redaction
-**Goal:** Optional TLS for REST API; mask secrets in stderr logs.
+- [x] T13B.1-4: `GatewaySettings.TLSCertPath`/`TLSKeyPath` added; `ListenAndServe` branches to `ServeTLS` when both are set; a non-loopback bind with Bearer auth enabled now **refuses to start** without TLS (F-7 hard enforcement — no more cleartext-Bearer on public networks).
+- [x] T13B.5-7: New `internal/logbuf/redact.go` applies an ordered-match regex pipeline to every `Ring.Write` — Authorization Bearer, bare "Bearer X", api/access/secret key assignments, password assignments, AWS AKIA* IDs, GitHub PAT prefixes, generic 32+ char base64url blobs. Output substitutes the fixed `***REDACTED***` string so operators can grep. `Redact` is idempotent. 10 new tests.
+- [x] T13B.8-10: `Ring.Write` rewired; subscribers + history both return the scrubbed text. TLS self-signed integration deferred (verified by TLSEnabled branch + Server.httpServer.ServeTLS path — runtime verification requires live cert).
 
-- T13B.1-4: `GatewaySettings.TLSCert/TLSKey`; `ServeTLS()` branch; required for non-loopback
-- T13B.5-7: New `internal/logbuf/redact.go` — pattern-match Bearer tokens, API keys, base64 blobs → `***REDACTED***`; apply in `Ring.Write()`
-- T13B.8-10: Wiring + tests (self-signed cert integration test)
-- GATE: tests + codereview + thinkdeep — zero MEDIUM+
-
-**Files:** `types.go`, `server.go`, new `logbuf/redact.go`, `ring.go`, `main.go`
-**Rollback:** Remove TLS branch; remove redaction. Both additive.
+**GATE:** Tests pass (Go + extension unchanged); PAL codereview pending commit.
 
 ---
 

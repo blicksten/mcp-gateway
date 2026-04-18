@@ -396,18 +396,22 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 		_ = session.Close()
 	}
 
-	// For stdio backends, ensure the child process is dead.
+	// For stdio backends, ensure the child process (and, on POSIX, its
+	// process group) is dead. T13A.2/F-5: use process-group signalling
+	// on POSIX so any grandchildren of the MCP server also get reaped.
 	if cmd != nil && cmd.Process != nil {
 		done := make(chan struct{})
 		go func() {
 			_ = cmd.Wait()
 			close(done)
 		}()
+		// Graceful SIGTERM to the process group first.
+		_ = terminateProcessGroup(cmd.Process)
 		select {
 		case <-done:
 			// Process exited cleanly.
 		case <-time.After(5 * time.Second):
-			_ = cmd.Process.Kill()
+			_ = killProcessGroup(cmd.Process)
 			select {
 			case <-done:
 			case <-time.After(2 * time.Second):
