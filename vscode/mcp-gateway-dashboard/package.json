@@ -305,16 +305,22 @@
     "build": "npm run compile",
     "watch": "tsc -watch -p ./",
     "lint": "tsc --noEmit -p ./",
+    "lint:catalog": "ajv validate --spec=draft7 --strict=true -c ajv-formats -s docs/catalog/schema.server.json -d docs/catalog/servers.json && ajv validate --spec=draft7 --strict=true -c ajv-formats -s docs/catalog/schema.command.json -d docs/catalog/commands.json && node scripts/check-catalog-refs.js",
     "test": "mocha --require ts-node/register --file 'src/test/setup.ts' 'src/test/**/*.test.ts'",
     "package": "vsce package --allow-missing-repository --out mcp-gateway-dashboard-latest.vsix",
     "deploy": "npm run compile && npm run package && code --install-extension mcp-gateway-dashboard-latest.vsix --force",
     "vscode:prepublish": "npm run compile"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.0",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.0.0",
+    "ajv-cli": "^5.0.0",
     "mocha": "^10.0.0",
     "ts-node": "^10.0.0",
     "typescript": "^5.3.0"

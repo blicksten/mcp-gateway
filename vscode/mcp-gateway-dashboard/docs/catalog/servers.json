@@ -1,0 +1,52 @@
+[
+  {
+    "name": "context7",
+    "display_name": "Context7 Documentation",
+    "transport": "http",
+    "description": "Up-to-date library documentation lookup. Use to fetch current docs for any library, framework, SDK, API, or CLI tool.",
+    "url": "https://mcp.context7.com/mcp",
+    "header_keys": ["Authorization"],
+    "homepage": "https://context7.com",
+    "tags": ["docs", "research"]
+  },
+  {
+    "name": "pdap-docs",
+    "display_name": "PDAP Documentation Search",
+    "transport": "http",
+    "description": "Semantic search across internal PDAP product documentation. Resolves doc IDs and pulls full sections with citations.",
+    "url": "http://localhost:8780/mcp",
+    "env_keys": ["PDAP_API_TOKEN"],
+    "tags": ["docs", "internal"]
+  },
+  {
+    "name": "orchestrator",
+    "display_name": "Claude Orchestrator",
+    "transport": "stdio",
+    "command": "uv",
+    "args": ["run", "--", "orchestrator-mcp"],
+    "description": "Pipeline routing, plan tracking, PAL review queueing, and session resolution. Required for /run, /phase, /finish skills.",
+    "env_keys": ["ORCHESTRATOR_DB_PATH"],
+    "homepage": "https://github.com/anthropics/orchestrator",
+    "tags": ["dev-loop", "pipelines"]
+  },
+  {
+    "name": "pal-mcp",
+    "display_name": "PAL Cross-Validation",
+    "transport": "stdio",
+    "command": "uv",
+    "args": ["run", "--", "pal-mcp"],
+    "description": "Multi-model code review, deep analysis, consensus, and pre-commit gate. OpenAI / Anthropic cross-validation backbone.",
+    "env_keys": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
+    "tags": ["code-review", "pal"]
+  },
+  {
+    "name": "sap-gui-control",
+    "display_name": "SAP GUI Control",
+    "transport": "stdio",
+    "command": "python",
+    "args": ["-m", "sap_gui_control.mcp_server"],
+    "description": "Drive SAP GUI scripting sessions from Claude. Reads transactions, navigates screens, captures field values.",
+    "env_keys": ["SAP_GUI_USER", "SAP_GUI_PASSWORD"],
+    "tags": ["sap", "automation"]
+  }
+]

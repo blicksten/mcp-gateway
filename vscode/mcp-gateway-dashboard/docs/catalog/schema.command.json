@@ -1,0 +1,59 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mcp-gateway.dev/schema/catalog/command.v1.json",
+  "title": "MCP Gateway — Command Catalog (v1)",
+  "description": "Array of slash-command templates surfaced in .claude/commands/<server>.md when the matching server is running. Cross-references to servers.json are enforced by scripts/check-catalog-refs.js, not by this schema (JSON Schema cannot express cross-document refs cleanly). $id is documentation only; the extension never resolves it over the network.",
+  "type": "array",
+  "items": {
+    "$ref": "#/definitions/commandEntry"
+  },
+  "definitions": {
+    "commandEntry": {
+      "type": "object",
+      "required": ["server_name", "command_name", "description", "template_md"],
+      "additionalProperties": false,
+      "properties": {
+        "server_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Must match a server.name in servers.json. Cross-referenced by check-catalog-refs.js."
+        },
+        "command_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Slash command suffix. Final command emitted as /<server_name>-<command_name>."
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "template_md": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Markdown template body. Allow-list variables ${server_name} and ${server_url} are substituted at write time; unknown ${var} tokens are left literal."
+        },
+        "required_vars": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "description": "Documentation only — names of variables the operator must supply when invoking the command."
+        },
+        "suggested_vars": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "description": "Documentation only — optional variables the operator may supply."
+        }
+      }
+    }
+  }
+}

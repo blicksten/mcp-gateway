@@ -1,0 +1,37 @@
+[
+  {
+    "server_name": "context7",
+    "command_name": "docs",
+    "description": "Look up current documentation for a library or API via ${server_name}.",
+    "template_md": "# /${server_name}-docs <library>\n\nFetch up-to-date documentation for the named library from ${server_url}.\n\n## When to use\n\n- Before recommending an external API or pattern.\n- When user asks about a specific framework, SDK, CLI tool, or cloud service.\n\n## Usage\n\n1. Call `mcp__context7__resolve-library-id` with the library name.\n2. Call `mcp__context7__query-docs` with the resolved id and the question.\n\n_Server: ${server_name} — ${server_url}_\n",
+    "suggested_vars": ["library", "topic"]
+  },
+  {
+    "server_name": "pdap-docs",
+    "command_name": "search",
+    "description": "Semantic search across internal PDAP product documentation via ${server_name}.",
+    "template_md": "# /${server_name}-search <query>\n\nQuery internal PDAP product docs at ${server_url}.\n\n## When to use\n\n- Internal-only product knowledge questions.\n- TFS bug research and RSPDN context lookup.\n\n## Usage\n\n1. `mcp__pdap-docs__search` with the user query.\n2. Cite returned doc IDs verbatim — do not paraphrase IDs.\n\n_Server: ${server_name} — ${server_url}_\n",
+    "required_vars": ["query"]
+  },
+  {
+    "server_name": "orchestrator",
+    "command_name": "route",
+    "description": "Route an implementation task to the correct pipeline via ${server_name}.",
+    "template_md": "# /${server_name}-route <description>\n\nRoute the described task through the orchestrator pipeline classifier.\n\n## When to use\n\n- Before any non-trivial implementation (>3 files or any architecture change).\n- Before /run, /phase, /finish skill invocations.\n\n## Usage\n\n1. `mcp__orchestrator__route_task(description=...)`.\n2. Follow the returned `pipeline_type` assignment exactly — do not improvise.\n\n_Server: ${server_name}_\n",
+    "required_vars": ["description"]
+  },
+  {
+    "server_name": "pal-mcp",
+    "command_name": "review",
+    "description": "Cross-validate code changes via ${server_name} (OpenAI + Claude).",
+    "template_md": "# /${server_name}-review <files>\n\nRun cross-model code review on the listed files.\n\n## When to use\n\n- After writing or modifying non-trivial code.\n- Before any commit that touches >3 files.\n\n## Usage\n\n1. `mcp__pal__codereview` with the file list and review focus.\n2. Inspect findings; HALT on any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY.\n3. Use `mcp__pal__challenge` to dispute false positives — never silently downgrade.\n\n_Server: ${server_name}_\n",
+    "suggested_vars": ["files", "focus"]
+  },
+  {
+    "server_name": "sap-gui-control",
+    "command_name": "tx",
+    "description": "Drive an SAP transaction code from ${server_name}.",
+    "template_md": "# /${server_name}-tx <code>\n\nNavigate the active SAP GUI session to the named transaction code.\n\n## When to use\n\n- Reading SE80 / SE16N / SE38 / SM37 screens during ABAP investigation.\n- Capturing field values from SAP master data screens.\n\n## Usage\n\n1. `mcp__sap-gui-control__navigate` with the transaction code.\n2. `mcp__sap-gui-control__snapshot` to capture screen state.\n\n_Server: ${server_name}_\n",
+    "required_vars": ["code"]
+  }
+]

@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mcp-gateway.dev/schema/catalog/server.v1.json",
+  "title": "MCP Gateway — Server Catalog (v1)",
+  "description": "Array of first-party MCP server catalog entries surfaced in the Add Server webview. $id is documentation only; the extension never resolves it over the network.",
+  "type": "array",
+  "items": {
+    "$ref": "#/definitions/serverEntry"
+  },
+  "definitions": {
+    "serverEntry": {
+      "type": "object",
+      "required": ["name", "display_name", "transport", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Machine-friendly server identifier. Must match the validator in vscode/mcp-gateway-dashboard/src/validation.ts."
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96,
+          "description": "Human-readable label shown in the dropdown."
+        },
+        "transport": {
+          "type": "string",
+          "enum": ["http", "stdio"],
+          "description": "Wire transport used to reach this server."
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Required when transport is 'http'."
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required when transport is 'stdio'."
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Required when transport is 'stdio'. May be an empty array."
+        },
+        "env_keys": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "description": "Environment variable names the operator must fill in. Only keys are declared — values never appear in catalog data."
+        },
+        "header_keys": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "description": "HTTP header names the operator must fill in. Only keys are declared — values never appear in catalog data."
+        },
+        "homepage": {
+          "type": "string",
+          "format": "uri"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "default_config": {
+          "type": "object",
+          "description": "Opaque default configuration passed to the daemon verbatim. No schema is enforced here."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "transport": { "const": "http" } },
+            "required": ["transport"]
+          },
+          "then": {
+            "properties": {
+              "url": { "type": "string", "format": "uri" }
+            },
+            "required": ["url"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "transport": { "const": "stdio" } },
+            "required": ["transport"]
+          },
+          "then": {
+            "properties": {
+              "command": { "type": "string", "minLength": 1 },
+              "args": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["command", "args"]
+          }
+        }
+      ]
+    }
+  }
+}

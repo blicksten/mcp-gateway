@@ -88,7 +88,7 @@ Commits `a845a78` (initial) + `c242b35` (PAL gate fixes — 6 HIGH + 2 MEDIUM re
 Shipped in commit `29e6fc2`: `SECURITY.md` (responsible disclosure, 30-day target, scope boundaries), `.gitleaks.toml` (project-specific allowlist + committed-token rule), `gitleaks` job in `.github/workflows/ci.yml`, README Security section updated for auth / TLS / redaction / KeePass import.
 
 Deferred work split into dedicated plans:
-- `docs/PLAN-catalogs.md` (v1.5.0) — server catalog, command catalog, catalog browse in Add Server webview, slash-command template enrichment.
+- `docs/PLAN-catalogs.md` (v1.5.0) — server catalog, command catalog, catalog browse in Add Server webview, slash-command template enrichment. **Phase CA complete 2026-04-19** — schemas (server + command, draft-07, $id v1), 5+5 seed entries, ajv strict-mode loader (TOCTOU-safe via `fs.promises.open` + bounded read, never throws, 1 MiB cap), 17 mocha tests, plain-JS cross-ref script, `lint:catalog` script, CI step (lint + VSIX-contents check), `.vscodeignore` negations for ajv runtime deps. Gate [thinkdeep PASS / codereview fallback to Sonnet → 0 blocking after fixes]. Remaining: CB (Add Server browse webview), CC (slash-command template enrichment), CD (release).
 - `docs/PLAN-v15.md` (v1.5.0 tail) — LOW findings from 12.A / 13 PAL reviews (ConstantTimeCompare length, Scanner 64KB limit) + TLS self-signed integration test + Windows DACL enforcement-tier runner. **Phase 15.A complete 2026-04-19** — T15A.1 ConstantTimeCompare hygiene refactor + T15A.2a/b scanner 1MB cap (atomic pair, F-11 closed). Gate [C+O] PASS, 0 blocking findings, 446 tests pass (+3 new). Remaining: 15.B (TLS integration tests + half-configured refusal), 15.C (Windows DACL enforcement tier), 15.D (release + docs).
 
 ---

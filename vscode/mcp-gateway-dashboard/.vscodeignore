@@ -8,3 +8,15 @@ package-lock.json
 out/**/*.js.map
 out/**/*.d.ts
 out/test/**
+.pipeline-status
+
+# Runtime npm dependencies for the catalog loader (Phase catalog.A, v1.5.0).
+# Negations whitelist ajv + ajv-formats and their transitive runtime deps so
+# the packaged VSIX can `require()` them at extension activation. Without
+# these, `node_modules/**` above would strip every dependency from the bundle.
+!node_modules/ajv/**
+!node_modules/ajv-formats/**
+!node_modules/fast-deep-equal/**
+!node_modules/fast-uri/**
+!node_modules/json-schema-traverse/**
+!node_modules/require-from-string/**

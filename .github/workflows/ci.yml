@@ -123,6 +123,32 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Lint catalog (ajv schema validation + cross-ref check)
+        run: npm run lint:catalog
+
+      - name: Verify catalog files + runtime deps are packaged in the VSIX
+        # CA.7 acceptance + CA gate fix: docs/catalog/* must be reachable at
+        # runtime via extensionPath/docs/catalog/, AND the ajv runtime
+        # dependencies must survive the .vscodeignore filter (the project
+        # excludes node_modules/** wholesale and re-includes only the catalog
+        # loader's deps via negation entries). `vsce ls` enumerates exactly
+        # what `vsce package` would include.
+        run: |
+          listing=$(npx -y @vscode/vsce ls 2>/dev/null)
+          catalog_count=$(echo "$listing" | grep -c '^docs/catalog/' || true)
+          if [ "$catalog_count" -ne 4 ]; then
+            echo "Expected 4 docs/catalog/* files in VSIX, got $catalog_count"
+            echo "$listing"
+            exit 1
+          fi
+          for dep in ajv ajv-formats fast-deep-equal fast-uri json-schema-traverse require-from-string; do
+            if ! echo "$listing" | grep -q "^node_modules/$dep/package.json$"; then
+              echo "Runtime dependency '$dep' missing from VSIX (.vscodeignore negation entry needed)"
+              exit 1
+            fi
+          done
+          echo "VSIX contains $catalog_count docs/catalog/* files + 6 ajv runtime deps (OK)"
+
   # T14.2-3: gitleaks scans the full history of each PR / push for
   # accidentally committed secrets. Configuration lives in .gitleaks.toml
   # at the repo root; test fixtures that deliberately contain token-
