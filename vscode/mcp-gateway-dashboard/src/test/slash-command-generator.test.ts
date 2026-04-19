@@ -3,7 +3,8 @@ import { strict as assert } from 'node:assert';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createTmpDir, cleanupTmpDir } from './helpers/tmpdir';
-import { mockVscode, mockConfigValues, resetMockState } from './mock-vscode';
+import { fireConfigChange, mockVscode, mockConfigValues, resetMockState } from './mock-vscode';
+import { _resetSchemaCacheForTests } from '../catalog';
 import { ServerDataCache, type CacheRefreshPayload } from '../server-data-cache';
 import { SlashCommandGenerator, MARKER } from '../slash-command-generator';
 import type { ServerView } from '../types';
@@ -363,6 +364,296 @@ describe('SlashCommandGenerator', () => {
 
 			assert.ok(!fs.existsSync(path.join(tmpDir, 'srv.md')),
 				're-enabled generator should seed first');
+		});
+	});
+
+	// Catalog enrichment tests — CC.1 (catalog lookup), CC.2 (variable
+	// substitution), CC.3 (marker semantics). These run alongside the 25
+	// pre-CC tests above: the pre-CC tests do NOT set mcpGateway.catalogPath,
+	// so the generator falls through to the skeleton path and their
+	// assertions are unaffected by catalog-enrichment behaviour.
+	describe('catalog enrichment (CC.1 / CC.2 / CC.3)', () => {
+		let catalogDir: string;
+
+		beforeEach(() => {
+			catalogDir = createTmpDir();
+			// Schema validator state is process-global (see catalog.ts
+			// schemaCache). Reset so a prior test-file's schema-error state
+			// cannot leak into CC tests.
+			_resetSchemaCacheForTests();
+		});
+
+		afterEach(() => {
+			cleanupTmpDir(catalogDir);
+		});
+
+		function writeCatalog(
+			servers: Array<Record<string, unknown>>,
+			commands: Array<Record<string, unknown>>,
+		): void {
+			fs.writeFileSync(
+				path.join(catalogDir, 'servers.json'),
+				JSON.stringify(servers),
+				'utf8',
+			);
+			fs.writeFileSync(
+				path.join(catalogDir, 'commands.json'),
+				JSON.stringify(commands),
+				'utf8',
+			);
+			mockConfigValues['mcpGateway.catalogPath'] = catalogDir;
+		}
+
+		it('CC.1: enriched template is written when the commands catalog has a matching entry', async () => {
+			writeCatalog(
+				[{
+					name: 'alpha',
+					display_name: 'Alpha',
+					transport: 'http',
+					description: 'alpha server',
+					url: 'http://localhost:9901',
+				}],
+				[{
+					server_name: 'alpha',
+					command_name: 'cmd',
+					description: 'alpha cmd',
+					template_md: '# /alpha-cmd\n\nServer: ${server_name} at ${server_url}\n',
+				}],
+			);
+
+			gen.enable();
+			fireRefresh(makePayload([makeServer('alpha', 'stopped')]));
+			fireRefresh(makePayload([makeServer('alpha', 'running')]));
+			await drain();
+
+			const content = fs.readFileSync(path.join(tmpDir, 'alpha.md'), 'utf8');
+			assert.equal(content.split('\n')[0], MARKER, 'marker must remain on line 1');
+			assert.ok(content.includes('# /alpha-cmd'), 'enriched heading expected');
+			assert.ok(
+				content.includes('Server: alpha at http://localhost:9901'),
+				'both allow-list variables must be substituted',
+			);
+			assert.ok(!content.includes('**Status:**'), 'skeleton fields must not appear on enriched write');
+		});
+
+		it('CC.1: skeleton fallback when the commands catalog has no entry for the server', async () => {
+			// Catalog loads successfully but contains no entry for "beta" —
+			// loader warnings-free, schema-valid, just no match.
+			writeCatalog(
+				[{
+					name: 'other',
+					display_name: 'Other',
+					transport: 'http',
+					description: 'unrelated',
+					url: 'http://localhost:9999',
+				}],
+				[{
+					server_name: 'other',
+					command_name: 'misc',
+					description: 'unrelated',
+					template_md: 'nothing\n',
+				}],
+			);
+
+			gen.enable();
+			fireRefresh(makePayload([makeServer('beta', 'stopped')]));
+			fireRefresh(makePayload([makeServer('beta', 'running', [{ name: 'probe' }])]));
+			await drain();
+
+			const content = fs.readFileSync(path.join(tmpDir, 'beta.md'), 'utf8');
+			assert.equal(content.split('\n')[0], MARKER);
+			assert.ok(content.includes('# beta'), 'skeleton heading expected');
+			assert.ok(content.includes('**Status:** running'));
+			assert.ok(content.includes('**Transport:** stdio'));
+			assert.ok(content.includes('- probe'), 'tools list from skeleton expected');
+		});
+
+		it('CC.2: allow-list substitution — only ${server_name} and ${server_url} replaced, unknown tokens literal', async () => {
+			writeCatalog(
+				[{
+					name: 'gamma',
+					display_name: 'Gamma',
+					transport: 'http',
+					description: 'gamma',
+					url: 'http://localhost:9090',
+				}],
+				[{
+					server_name: 'gamma',
+					command_name: 'cmd',
+					description: 'gamma cmd',
+					template_md: 'Name: ${server_name}\nURL: ${server_url}\nOther: ${unknown_var}\nRepeat: ${server_name}/${server_name}\n',
+				}],
+			);
+
+			gen.enable();
+			fireRefresh(makePayload([makeServer('gamma', 'stopped')]));
+			fireRefresh(makePayload([makeServer('gamma', 'running')]));
+			await drain();
+
+			const content = fs.readFileSync(path.join(tmpDir, 'gamma.md'), 'utf8');
+			assert.ok(content.includes('Name: gamma'), 'known var server_name must be substituted');
+			assert.ok(content.includes('URL: http://localhost:9090'), 'known var server_url must be substituted');
+			assert.ok(content.includes('Other: ${unknown_var}'), 'unknown var must survive verbatim');
+			assert.ok(content.includes('Repeat: gamma/gamma'), 'replaceAll must substitute every occurrence');
+		});
+
+		it('CC.3: user-authored file without marker is preserved even when the catalog has an entry for that server', async () => {
+			writeCatalog(
+				[{
+					name: 'delta',
+					display_name: 'Delta',
+					transport: 'http',
+					description: 'delta',
+					url: 'http://localhost:9',
+				}],
+				[{
+					server_name: 'delta',
+					command_name: 'cmd',
+					description: 'd',
+					template_md: '# ENRICHED — should never appear\n',
+				}],
+			);
+
+			const filePath = path.join(tmpDir, 'delta.md');
+			fs.writeFileSync(filePath, '# User-authored\nDo not overwrite.\n', 'utf8');
+
+			gen.enable();
+			fireRefresh(makePayload([makeServer('delta', 'stopped')]));
+			fireRefresh(makePayload([makeServer('delta', 'running')]));
+			await drain();
+
+			const content = fs.readFileSync(filePath, 'utf8');
+			assert.ok(content.includes('User-authored'),
+				'user file must be preserved — marker gate must run BEFORE catalog lookup');
+			assert.ok(!content.includes('ENRICHED'),
+				'enriched template must not leak past the isOwnedFile gate');
+		});
+
+		it('CC.1: entry removed from catalog + cache invalidated → next regeneration falls back to skeleton', async () => {
+			writeCatalog(
+				[{
+					name: 'epsilon',
+					display_name: 'Epsilon',
+					transport: 'http',
+					description: 'epsilon',
+					url: 'http://localhost:9091',
+				}],
+				[{
+					server_name: 'epsilon',
+					command_name: 'cmd',
+					description: 'e cmd',
+					template_md: '# /epsilon-cmd\nFirst write — enriched.\n',
+				}],
+			);
+
+			gen.enable();
+			fireRefresh(makePayload([makeServer('epsilon', 'stopped')]));
+			fireRefresh(makePayload([makeServer('epsilon', 'running')]));
+			await drain();
+
+			const filePath = path.join(tmpDir, 'epsilon.md');
+			assert.ok(
+				fs.readFileSync(filePath, 'utf8').includes('/epsilon-cmd'),
+				'first write must be enriched from the catalog entry',
+			);
+
+			// Operator removes the entry from the catalog and (in real life)
+			// the config-change watcher invalidates the cache. We simulate
+			// both sides here: rewrite commands.json, then explicitly
+			// invalidate so the next transition sees fresh state.
+			fs.writeFileSync(path.join(catalogDir, 'commands.json'), JSON.stringify([]), 'utf8');
+			gen.invalidateCatalogCache();
+
+			fireRefresh(makePayload([makeServer('epsilon', 'stopped')]));
+			fireRefresh(makePayload([makeServer('epsilon', 'running', [{ name: 'probe' }])]));
+			await drain();
+
+			const second = fs.readFileSync(filePath, 'utf8');
+			assert.ok(
+				second.includes('**Status:** running'),
+				'skeleton must be emitted on regeneration once the catalog entry is gone',
+			);
+			assert.ok(!second.includes('/epsilon-cmd'),
+				'enriched body must be replaced, not appended to');
+		});
+
+		it('CC.1: onDidChangeConfiguration(mcpGateway.catalogPath) invalidates the catalog cache', async () => {
+			writeCatalog(
+				[{
+					name: 'zeta',
+					display_name: 'Zeta',
+					transport: 'http',
+					description: 'zeta',
+					url: 'http://localhost:9092',
+				}],
+				[{
+					server_name: 'zeta',
+					command_name: 'cmd',
+					description: 'zeta cmd',
+					template_md: '# /first-body\n',
+				}],
+			);
+
+			gen.enable();
+			fireRefresh(makePayload([makeServer('zeta', 'stopped')]));
+			fireRefresh(makePayload([makeServer('zeta', 'running')]));
+			await drain();
+
+			const filePath = path.join(tmpDir, 'zeta.md');
+			assert.ok(fs.readFileSync(filePath, 'utf8').includes('/first-body'));
+
+			// Swap the catalog body and fire the config-change event. The
+			// watcher registered in enable() must call
+			// invalidateCatalogCache() so the next regeneration sees the new
+			// template.
+			fs.writeFileSync(
+				path.join(catalogDir, 'commands.json'),
+				JSON.stringify([{
+					server_name: 'zeta',
+					command_name: 'cmd',
+					description: 'zeta cmd',
+					template_md: '# /second-body\n',
+				}]),
+				'utf8',
+			);
+			fireConfigChange('mcpGateway.catalogPath');
+
+			fireRefresh(makePayload([makeServer('zeta', 'stopped')]));
+			fireRefresh(makePayload([makeServer('zeta', 'running')]));
+			await drain();
+
+			const after = fs.readFileSync(filePath, 'utf8');
+			assert.ok(after.includes('/second-body'),
+				'regeneration after config-change must pick up the new catalog body');
+			assert.ok(!after.includes('/first-body'),
+				'old catalog body must be replaced, not appended');
+		});
+
+		it('CC.2: empty ${server_url} for servers without a matching servers.json entry', async () => {
+			// Commands catalog has an entry for "eta" but servers catalog
+			// doesn't — loader drift that the cross-ref script would catch
+			// in CI. The generator must not crash; ${server_url} substitutes
+			// to the empty string so the rendered file is still valid
+			// Markdown, while ${server_name} still resolves.
+			writeCatalog(
+				[],
+				[{
+					server_name: 'eta',
+					command_name: 'cmd',
+					description: 'eta cmd',
+					template_md: 'Name: ${server_name}\nURL: [${server_url}]\n',
+				}],
+			);
+
+			gen.enable();
+			fireRefresh(makePayload([makeServer('eta', 'stopped')]));
+			fireRefresh(makePayload([makeServer('eta', 'running')]));
+			await drain();
+
+			const content = fs.readFileSync(path.join(tmpDir, 'eta.md'), 'utf8');
+			assert.ok(content.includes('Name: eta'));
+			assert.ok(content.includes('URL: []'),
+				'missing servers.json entry should substitute server_url to empty string, not leave literal token');
 		});
 	});
 });

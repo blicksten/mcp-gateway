@@ -170,7 +170,10 @@ export function activate(
 	context.subscriptions.push(sapStatusBar);
 
 	// Phase 11.E: slash command auto-generation.
-	const slashGen = new SlashCommandGenerator(cache);
+	// catalog.C: pass extensionUri so the generator can resolve the bundled
+	// catalog dir (or operator override via mcpGateway.catalogPath) at write
+	// time for ${server_name}/${server_url} substitution.
+	const slashGen = new SlashCommandGenerator(cache, context.extensionUri);
 	context.subscriptions.push(slashGen);
 	if (config.get<boolean>('slashCommandsEnabled', false)) {
 		slashGen.enable();

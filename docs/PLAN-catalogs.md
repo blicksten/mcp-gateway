@@ -63,6 +63,7 @@ This plan replaces the v1.4.0 backlog rows 14.3 and 14.4 (`docs/ROADMAP.md:109-1
     called via the `fs.promises.readFile` namespace (not destructured
     `import { readFile } from 'node:fs/promises'`) so the F-3 spy
     assertion in CA.6 is meaningful.
+- **Round 6 — CC implementation gate (2026-04-20):** Phase catalog.C complete and gated. PAL thinkdeep (gpt-5.2-pro, async queue via orchestrator) PASS / 0 findings in 152 s. PAL codereview timed out twice at the MCP layer (30 s × 2) — same infrastructure pattern as CA.GATE + CB.GATE — fell back to internal cross-model review per CLAUDE.md rule: `code-reviewer` agent on Sonnet 4.6 APPROVE / 0 findings. Plan deviation: a shared helper `src/catalog-path.ts` (47 lines) extracted from AddServerPanel so the CB and CC code paths apply identical operator-override resolution. Refactor is minimal (CB keeps its `loadCatalogForPanel` static, only the inlined `resolveCatalogDir` moved) and eliminates the drift risk the reviewer would otherwise have flagged. Tests: 506 → 513 passing (+7), 31 pre-existing failures unchanged (zero regressions).
 - **Round 4 — CA implementation gate (2026-04-19):** Phase catalog.A complete and gated. PAL thinkdeep (gpt-5.2-pro) PASS / 0 findings. PAL codereview timed out twice at infra level → internal cross-model fallback (Sonnet 4.6 code-reviewer agent) returned 1 MEDIUM PKG-1 (false positive — line-number misread; ajv-formats verified at `package.json:316` inside the `dependencies` block) + 1 LOW DOC-1 (plan referenced superseded `out/scripts/...` path; fixed). Additional gate fix found during VSIX audit (not by reviewers): `.vscodeignore` excluded `node_modules/**` wholesale, which would have stripped ajv runtime deps from installed VSIX → added negation entries for the 6 runtime packages and CI-step assertion. Plan deviation logged: ajv-formats in `dependencies` (not `devDependencies` as plan letter said) — required for runtime VSIX inclusion.
 - **Round 3 / CV-gate dispute (2026-04-19):** CV-gate consensus DISPUTE.
   PAL `mcp__pal__consensus` (gpt-5.2-pro against, gpt-5.1-codex neutral) —
@@ -440,7 +441,7 @@ trusting webview-supplied catalog data on the host side.
 catalog when a server transitions to running, falling back to today's bare
 skeleton when no catalog entry exists.
 
-- [ ] CC.1: Extend `vscode/mcp-gateway-dashboard/src/slash-command-generator.ts`
+- [x] CC.1: Extend `vscode/mcp-gateway-dashboard/src/slash-command-generator.ts`
       to call `loadCommandsCatalog()` (from CA.5) per server transition. The
       lookup is best-effort: missing catalog file, loader warnings, or no
       matching `server_name` entry MUST fall back to the existing skeleton
@@ -454,7 +455,7 @@ skeleton when no catalog entry exists.
       server without entry produces today's skeleton output verbatim
       (regression of existing test at line 129-130 of
       `vscode/mcp-gateway-dashboard/src/test/slash-command-generator.test.ts`).
-- [ ] CC.2: Template variable substitution at write time. Allow-list approach —
+- [x] CC.2: Template variable substitution at write time. Allow-list approach —
       ONLY `${server_name}` and `${server_url}` are substituted. Any other
       `${var}` token is left literal in the output (never recursive
       substitution, never silent eval). Substitution is a simple `String.replaceAll`
@@ -462,7 +463,7 @@ skeleton when no catalog entry exists.
       the magic-header marker is prepended.
       **Acceptance:** test in CC.4 asserts that `${unknown_var}` survives
       verbatim and `${server_name}` is replaced with the running server's name.
-- [ ] CC.3: Existing magic-header marker (constant `MARKER` re-exported from
+- [x] CC.3: Existing magic-header marker (constant `MARKER` re-exported from
       `vscode/mcp-gateway-dashboard/src/slash-command-generator.ts:192`) still
       gates overwrite/delete. Catalog-enriched template content sits BELOW the
       marker, exactly as today's skeleton does
@@ -474,7 +475,7 @@ skeleton when no catalog entry exists.
       (`vscode/mcp-gateway-dashboard/src/test/slash-command-generator.test.ts:121-131`)
       still passes when the catalog is present (marker check happens before
       catalog lookup).
-- [ ] CC.4: Mocha tests in `vscode/mcp-gateway-dashboard/src/test/slash-command-generator.test.ts`
+- [x] CC.4: Mocha tests in `vscode/mcp-gateway-dashboard/src/test/slash-command-generator.test.ts`
       EXTENDING the existing 25-test suite (verified by
       `grep -c "it(" vscode/mcp-gateway-dashboard/src/test/slash-command-generator.test.ts`
       → 25; ROADMAP line 18's "24 tests" was an older snapshot pre-12.B).
@@ -487,13 +488,45 @@ skeleton when no catalog entry exists.
       regeneration cycle.
       **Acceptance:** ≥5 new test cases pass; total slash-command-generator
       test count rises from 25 to ≥30; no existing test regresses.
-- [ ] CC.GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding)
-      - Capture evidence: `npm test` output line, PAL codereview verdict +
-        finding count, PAL thinkdeep verdict + finding count.
+- [x] CC.GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding)
+  - **Tests:** `npm test` → **513 passing / 31 failing** (43s). The 31 failures
+    are the identical pre-existing GatewayClient (13) + LogViewer (18) set from
+    CB.GATE; verified unchanged. CC introduces **+7 passing, zero regressions**
+    (506 → 513). New CC test counts: 7 cases in the `catalog enrichment (CC.1
+    / CC.2 / CC.3)` describe block inside
+    `src/test/slash-command-generator.test.ts`. Total `slash-command-generator`
+    suite cases: 25 → 32 (above plan's ≥30 threshold).
+  - **Compile:** `tsc -p ./` exits 0 with no errors.
+  - **PAL thinkdeep (gpt-5.2-pro, async queue):** **PASS, 0 findings** (152 s).
+    Task `rev-720a00600f3b`. Deep gap analysis, concurrency audit, TOCTOU
+    check, lifecycle review — clean.
+  - **PAL codereview:** PAL MCP **timed out twice** (30 s × 2, primary +
+    fallback) — identical infrastructure issue to CA.GATE + CB.GATE. Fell
+    back to internal cross-model review per CLAUDE.md rule.
+    - **Reviewer:** `code-reviewer` agent on **Sonnet 4.6** (parent session
+      Opus 4.7 — tier diversity achieved). Covered: correctness (marker on
+      line 1, skeleton-path byte identity, replaceAll allow-list),
+      concurrency (lazy one-shot, `catalogLoaded=true` pre-await guard,
+      in-flight invalidation window), trust boundaries (operator-only
+      catalog, no webview input, `scope: "machine"` preserved),
+      resource hygiene (configSubscription double-enable guard, dispose
+      cleanup), TypeScript soundness (`typeof srvEntry?.url === 'string'`
+      fall-through), test isolation (Mocha hook ordering, schema-cache
+      reset in inner beforeEach), and pattern drift from CB.GATE.
+    - **Verdict:** APPROVE — 0 findings at any severity.
+  - **New file:** `vscode/mcp-gateway-dashboard/src/catalog-path.ts` (47 lines)
+    shared `resolveCatalogDir` helper. AddServerPanel (CB) refactored to
+    import it; SlashCommandGenerator (CC) imports it. Eliminates drift
+    risk flagged in CB.GATE audit. The `typeof rawCatalogPath === 'string'`
+    runtime guard (CB-1 finding in CB.GATE Round 2) is now applied once in
+    the shared helper.
 
 **Files touched:**
-- `vscode/mcp-gateway-dashboard/src/slash-command-generator.ts` (catalog hook + variable substitution)
-- `vscode/mcp-gateway-dashboard/src/test/slash-command-generator.test.ts` (extended suite)
+- `vscode/mcp-gateway-dashboard/src/slash-command-generator.ts` (catalog hook + variable substitution + config-watcher)
+- `vscode/mcp-gateway-dashboard/src/catalog-path.ts` (NEW — shared `resolveCatalogDir` helper, 47 lines, factored out of CB so CB + CC apply identical resolution rules)
+- `vscode/mcp-gateway-dashboard/src/webview/add-server-panel.ts` (refactor: drops inlined `resolveCatalogDir` + unused `fsp` import, imports shared helper; behaviour identical)
+- `vscode/mcp-gateway-dashboard/src/extension.ts` (3-line wiring: passes `context.extensionUri` to `SlashCommandGenerator`)
+- `vscode/mcp-gateway-dashboard/src/test/slash-command-generator.test.ts` (extended suite — 7 new cases, 25 → 32 total)
 
 **Rollback:**
 1. `git revert` the CC commit(s).
