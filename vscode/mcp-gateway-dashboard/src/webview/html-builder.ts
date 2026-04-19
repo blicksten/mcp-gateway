@@ -230,6 +230,9 @@ export function buildAddServerHtml(nonce: string, cspSource: string): string {
 	const serverNameRe = jsonForScript(SERVER_NAME_RE.source);
 	const envKeyRe = jsonForScript(ENV_KEY_RE.source);
 	const headerNameRe = jsonForScript(HEADER_NAME_RE.source);
+	// CB.1: catalog entries are NEVER embedded in HTML via interpolation — they
+	// arrive via a host→webview `init` postMessage and are rendered through
+	// textContent / .value (never innerHTML). See add-server-panel.ts#render().
 
 	return `<!DOCTYPE html>
 <html lang="en">
@@ -264,6 +267,15 @@ button:disabled { opacity: 0.5; cursor: default; }
 <h1>Add MCP Server</h1>
 <div id="banner" class="banner err" role="alert"></div>
 <form id="addForm" novalidate>
+  <label>
+    Choose from catalog
+    <select id="catalog" name="catalog" autocomplete="off">
+      <option value="">(Custom server)</option>
+    </select>
+    <span class="hint">Optional — pick a known server to auto-fill name, URL/command, and credential key placeholders.</span>
+    <span class="error" id="catalog-err"></span>
+  </label>
+
   <label>
     Name
     <input type="text" id="name" name="name" autocomplete="off" spellcheck="false" placeholder="my-mcp-server" required>
@@ -396,6 +408,86 @@ function showBanner(msg) {
   b.style.display = msg ? 'block' : 'none';
 }
 
+// CB.1 + CB.2 — catalog entries, keyed by entry.name, and pre-fill logic.
+// Entries arrive via an init postMessage and are NEVER embedded in HTML via
+// interpolation — the dropdown is populated with createElement + textContent so
+// a malicious display_name cannot inject script regardless of content.
+const catalogEntries = new Map();
+
+// buildEnvKeyLines / buildHeaderKeyLines assume schema.server.json has already
+// rejected env_keys / header_keys entries containing '=' or ':' — the loader's
+// ajv pass guarantees bare key names (LOW-1, Sonnet 4.6 review). This
+// pre-fill is purely UX and the host-side validateEnvEntry / validateHeaderEntry
+// re-checks every submitted line before it ever reaches client.addServer.
+function buildEnvKeyLines(keys) {
+  if (!keys || keys.length === 0) { return ''; }
+  // One line per declared env key with empty VALUE — operator fills in VALUE.
+  return keys.map(function (k) { return String(k) + '='; }).join('\\n');
+}
+
+function buildHeaderKeyLines(keys) {
+  if (!keys || keys.length === 0) { return ''; }
+  return keys.map(function (k) { return String(k) + ': '; }).join('\\n');
+}
+
+function applyCatalogSelection(entryName) {
+  // Synchronous — no await chain — CB.1 acceptance (b).
+  if (!entryName) {
+    // (Custom server) restore to empty defaults.
+    $('name').value = '';
+    $('target').value = '';
+    $('env').value = '';
+    $('headers').value = '';
+    updateDetected();
+    return;
+  }
+  const entry = catalogEntries.get(entryName);
+  if (!entry) { return; }
+  // Defensive reset first — so if a future transport variant ever reaches this
+  // path without a matching branch below, the target field cannot retain a
+  // value from a previously-selected entry (Round 2, Sonnet 4.6 CB-2 finding).
+  $('name').value = '';
+  $('target').value = '';
+  $('env').value = '';
+  $('headers').value = '';
+  $('name').value = String(entry.name || '');
+  if (entry.transport === 'http') {
+    $('target').value = String(entry.url || '');
+  } else if (entry.transport === 'stdio') {
+    // stdio target = command (args are out of scope for v1.5 form — operator can
+    // edit the target string directly if needed).
+    $('target').value = String(entry.command || '');
+  }
+  $('env').value = buildEnvKeyLines(entry.env_keys);
+  $('headers').value = buildHeaderKeyLines(entry.header_keys);
+  updateDetected();
+}
+
+function populateCatalogDropdown(entries) {
+  const select = $('catalog');
+  // Clear any existing options except the (Custom server) placeholder at index 0.
+  while (select.options.length > 1) { select.remove(1); }
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') { continue; }
+    if (typeof entry.name !== 'string' || !entry.name) { continue; }
+    catalogEntries.set(entry.name, entry);
+    const opt = document.createElement('option');
+    opt.value = entry.name;
+    // textContent is auto-escaped by the DOM — no innerHTML used anywhere on
+    // catalog-derived strings, so a script-laden display_name renders
+    // literally (CB.5 XSS regression).
+    opt.textContent = typeof entry.display_name === 'string' && entry.display_name
+      ? entry.display_name
+      : entry.name;
+    select.appendChild(opt);
+  }
+}
+
+$('catalog').addEventListener('change', (e) => {
+  const val = (e.target && typeof e.target.value === 'string') ? e.target.value : '';
+  applyCatalogSelection(val);
+});
+
 $('target').addEventListener('input', updateDetected);
 $('cancel').addEventListener('click', () => vscode.postMessage({ type: 'cancel' }));
 
@@ -417,6 +509,11 @@ $('addForm').addEventListener('submit', (e) => {
   setError('headers', headersErr || '');
   if (nameErr || targetErr || envErr || headersErr) { return; }
 
+  // catalogId is the dropdown value when an entry is selected (empty string for
+  // (Custom server)). Sent as-is; the host re-validates against its own catalog
+  // copy — webview-supplied id is never trusted (CB.3).
+  const catalogId = $('catalog').value || '';
+
   $('submit').disabled = true;
   vscode.postMessage({
     type: 'submit',
@@ -426,6 +523,7 @@ $('addForm').addEventListener('submit', (e) => {
       transport: detectTransport(target),
       env: parseEnv(envRaw),
       headers: parseHeaders(headersRaw),
+      catalogId: catalogId,
     },
   });
 });
@@ -436,6 +534,18 @@ window.addEventListener('message', (event) => {
   if (msg.type === 'nack') {
     showBanner(typeof msg.error === 'string' ? msg.error : 'Failed to add server.');
     $('submit').disabled = false;
+  } else if (msg.type === 'init') {
+    const entries = Array.isArray(msg.entries) ? msg.entries : [];
+    populateCatalogDropdown(entries);
+    // Filter warnings to strings only — showBanner uses textContent (safe
+    // without escapeHtml), but type-filtering keeps non-string values
+    // (undefined / objects) out of the rendered banner text.
+    const warnings = (Array.isArray(msg.warnings) ? msg.warnings : [])
+      .filter(function (w) { return typeof w === 'string'; });
+    if (warnings.length > 0) {
+      // Non-blocking — panel stays functional with free-form entry per CB.5.
+      showBanner('Catalog loaded with warnings: ' + warnings.join('; '));
+    }
   }
 });
 

@@ -10,6 +10,12 @@ out/**/*.d.ts
 out/test/**
 .pipeline-status
 
+# docs/catalog/**: deliberately NOT excluded. The catalog loader
+# (src/catalog.ts) resolves schemas and seed JSON from
+# <extensionPath>/docs/catalog at runtime — if you add a `docs/**` exclusion
+# above, also add `!docs/catalog/**` here or the AddServerPanel dropdown will
+# silently show zero entries in every installed VSIX (Round 2 CB-6 finding).
+
 # Runtime npm dependencies for the catalog loader (Phase catalog.A, v1.5.0).
 # Negations whitelist ajv + ajv-formats and their transitive runtime deps so
 # the packaged VSIX can `require()` them at extension activation. Without

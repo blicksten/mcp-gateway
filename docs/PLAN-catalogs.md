@@ -274,7 +274,7 @@ schema validation.
 `AddServerPanel`; the form pre-fills transport/url/command/env_keys without ever
 trusting webview-supplied catalog data on the host side.
 
-- [ ] CB.0: Extend the **existing** harness at
+- [x] CB.0: Extend the **existing** harness at
       `vscode/mcp-gateway-dashboard/src/test/webview/add-server-panel.test.ts`
       (41 `it()` blocks today, 473 lines, mock-vscode + `simulateSubmit` /
       `latestPanel` / `createTrackingClient` helpers already in place — see
@@ -286,7 +286,7 @@ trusting webview-supplied catalog data on the host side.
       foundation without touching the 41 pre-existing tests.
       **Acceptance:** ≥3 new cases pass against unmodified `add-server-panel.ts`;
       existing 41 cases still pass; total test count rises from 41 to ≥44.
-- [ ] CB.1: "Choose from catalog" dropdown + pre-fill behaviour. Edit
+- [x] CB.1: "Choose from catalog" dropdown + pre-fill behaviour. Edit
       `vscode/mcp-gateway-dashboard/src/webview/html-builder.ts` to add a
       `<select>` element above the Name field; default option label
       `(Custom server)` keeps today's free-form behaviour. The catalog payload
@@ -303,13 +303,13 @@ trusting webview-supplied catalog data on the host side.
       (`vscode/mcp-gateway-dashboard/src/webview/html-builder.ts:6-13`); (d)
       manual smoke note: dropdown should feel instantaneous to the operator
       (sub-50 ms perceptible latency).
-- [ ] CB.2: Pre-population of `env_keys` and `header_keys`. When a catalog
+- [x] CB.2: Pre-population of `env_keys` and `header_keys`. When a catalog
       entry is selected, render one empty input row per declared env key /
       header key so the operator fills only the secret VALUE, never the key
       structure. **Acceptance:** selecting an entry with N env_keys produces
       exactly N empty inputs; switching back to `(Custom server)` clears those
       inputs and restores the empty default state.
-- [ ] CB.3: Extension-host re-validation of catalog selection. When the
+- [x] CB.3: Extension-host re-validation of catalog selection. When the
       submit payload contains a `catalogId`, `AddServerPanel.handleSubmit`
       re-loads the catalog via `loadServersCatalog()` (CA.5), looks up the
       entry by `name`, and re-validates EVERY resolved field through the
@@ -320,7 +320,7 @@ trusting webview-supplied catalog data on the host side.
       **Acceptance:** CB.5 includes a test asserting that a forged catalogId
       payload (entry not present in loader output) is rejected and never
       reaches `client.addServer()`.
-- [ ] CB.4: Register `mcpGateway.catalogPath` in
+- [x] CB.4: Register `mcpGateway.catalogPath` in
       `vscode/mcp-gateway-dashboard/package.json` `contributes.configuration`
       block. Properties: `"type": "string"`, `"default": ""`,
       `"scope": "machine"`,
@@ -339,7 +339,7 @@ trusting webview-supplied catalog data on the host side.
       operator path falls back to bundled; (c) manual smoke — open VS Code
       Settings UI, search `mcpGateway.catalogPath`, verify visible under
       "MCP Gateway" group with machine-scope indicator.
-- [ ] CB.5: Mocha tests in `add-server-panel.test.ts` (built on the CB.0
+- [x] CB.5: Mocha tests in `add-server-panel.test.ts` (built on the CB.0
       harness) covering: catalog selection pre-fills name/url/env_keys
       correctly; malformed catalog (loader returns warnings) shows non-blocking
       warning toast and keeps the panel functional; host re-validation rejects
@@ -350,10 +350,64 @@ trusting webview-supplied catalog data on the host side.
       operator switches catalog selection mid-submit.
       **Acceptance:** ≥5 new Mocha cases pass; total `npm test` count
       increases by ≥5 + the CB.0 baseline cases.
-- [ ] CB.GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding)
-      - Capture evidence: `npm test` output line, PAL codereview verdict +
-        finding count, PAL thinkdeep verdict + finding count, all pasted into
-        this section as a sub-bullet at gate completion.
+- [x] CB.GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding)
+  - **Tests:** `npm test` → **506 passing / 31 failing** (37s). All 31 failures
+    are pre-existing GatewayClient + LogViewer issues documented in CA.GATE
+    (verified by stashing CB changes and re-running — identical 31 failures,
+    same tests). CB introduces **zero regressions** in the AddServerPanel
+    suite. New CB-group test counts: 3 CB.0 baseline + 7 CB.5 + 1 CB.4
+    manifest = 11 new passing cases (52 total in `add-server-panel.test.ts`,
+    up from 41 pre-CB).
+  - **Compile:** `tsc -p ./` exits 0 with zero errors after every fix.
+  - **PAL codereview:** PAL MCP unavailable — fell back to internal
+    cross-model review per CLAUDE.md rule. **Agent:** code-reviewer on
+    **Sonnet 4.6** (parent session is Opus 4.7). Round 1 returned:
+    0 CRITICAL, 0 HIGH, **2 MEDIUM (MEDIUM-1 + MEDIUM-2)**, **3 LOW (LOW-1,
+    LOW-2, LOW-3)**. All 5 findings fixed in-cycle:
+    - MEDIUM-1 (html-builder.ts:528): filter warnings array to strings only
+      before `showBanner` concat — fixed.
+    - MEDIUM-2 (add-server-panel.ts:157-160): silent `?? ''` fallback in
+      `resolveCatalogDir` could return a relative `docs/catalog` path under
+      a non-standard URI; changed to return `null` + explicit warning via
+      loader — fixed.
+    - LOW-1 (html-builder.ts:417-425): added comment documenting that ajv
+      schema enforcement rejects `=` / `:` in env/header keys — fixed.
+    - LOW-2 (test helper): `waitForPostedMessage` now throws on timeout
+      instead of silently returning — fixed.
+    - LOW-3 (XSS test comment): clarified what the assertions actually
+      verify (architectural invariant + static source text, not runtime
+      DOM behaviour) — fixed.
+  - **PAL thinkdeep:** PAL MCP unavailable — fell back to general-purpose
+    Sonnet 4.6 agent with deep-analysis + combinatoric-gap prompt. Round 2
+    returned: 0 CRITICAL, 0 HIGH, **2 MEDIUM (CB-1 + CB-2)**, **5 LOW
+    (CB-3..CB-6, CB-11)**, 4 INFO (D1/D3/D4/D5 compliance confirmed). Fixes:
+    - CB-1 (add-server-panel.ts:148): `get<string>` TypeScript generic is
+      type-cast-only; a non-string config value (null / number from a
+      corrupted settings.json) would crash `.trim()` as an unhandled promise
+      rejection. Added explicit `typeof rawCatalogPath === 'string'`
+      runtime guard — fixed.
+    - CB-2 (html-builder.ts:433-457): `applyCatalogSelection` now resets all
+      four form fields to empty before populating from the new entry. This
+      closes a latent stale-field risk if future transport types ever miss
+      a branch — fixed defensively.
+    - CB-3 (add-server-panel.ts:208): added a long clarifying comment
+      explaining that CB.3 checks catalogId EXISTENCE, not field equality
+      — by design per plan. No code change, doc only — fixed.
+    - CB-4 (UX): no reachable UX scenario (dropdown with zero entries
+      cannot produce a non-empty catalogId), no code change needed.
+    - CB-5: confirmed correct concurrency behaviour, no code change needed.
+    - CB-6 (.vscodeignore): added a long comment warning future maintainers
+      that adding `docs/**` exclusion requires `!docs/catalog/**` negation
+      — fixed.
+    - CB-11 (PLAN acceptance matrix): CB row's superseded "within one
+      event-loop tick" phrasing (N-1 fix updated CB.1 body but not the
+      matrix) replaced with observable criteria (post-reveal `init`
+      + synchronous change handler + textContent/.value render) — fixed.
+  - **Post-fix re-test:** `npm test` → 506 passing / 31 failing (identical
+    baseline; zero regressions from any of the 7 review fixes).
+  - **Reviewers / fallback models:** code-reviewer (Sonnet 4.6) +
+    general-purpose (Sonnet 4.6). Parent session ran on Opus 4.7 — tier
+    diversity achieved.
 
 **Files touched:**
 - `vscode/mcp-gateway-dashboard/src/test/webview/add-server-panel.test.ts` (extended — new catalog regression group + CB.5 catalog cases)
@@ -515,7 +569,7 @@ codereview across the catalog surface.
 | CA | Both seed files validate against bundled schemas via ajv-cli | `npm run lint:catalog` exits 0 in CI | CA.6 |
 | CA | Loader never throws and never reads >1 MiB | Mocha test cases for each error class pass | CA.5, CA.6 |
 | CA | `$id` v2 schemas are rejected | Mocha test with v2 fixture passes | CA.6 |
-| CB | Host emits `init` message with full catalog within one event-loop tick of `panel.reveal()`; `<select>` change handler synchronous (no await chain); every catalog string passes through `escapeHtml` | Mocha assertions in CB.5 | CB.1, CB.5 |
+| CB | Host posts `init` message with full catalog after `panel.reveal()` (observable via `panel._postedMessages`, typical latency &lt;100ms); `<select>` change handler synchronous (no await chain); every catalog-derived DOM write uses `textContent` / `.value` (never `innerHTML`) | Mocha assertions in CB.5 | CB.1, CB.5 |
 | CB | Sub-50 ms perceptible pre-fill latency | Manual smoke test (per F-5 fix — not an automated criterion) | CB.1 manual |
 | CB | Forged `catalogId` from webview never reaches `client.addServer()` | Mocha test in CB.5 | CB.3, CB.5 |
 | CB | `mcpGateway.catalogPath` honoured when non-empty; falls back to bundled path otherwise | Loader unit test + integration test | CB.4, CB.5 |

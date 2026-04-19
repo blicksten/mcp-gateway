@@ -296,6 +296,12 @@
           "default": "",
           "description": "Path to the mcp-ctl executable used by the KeePass import command (default: looked up on PATH).",
           "scope": "machine"
+        },
+        "mcpGateway.catalogPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Optional override path to a catalog directory containing servers.json and commands.json. When empty, the bundled catalog under the extension's installation directory is used."
         }
       }
     }

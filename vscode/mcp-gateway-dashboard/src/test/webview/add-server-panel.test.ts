@@ -1,17 +1,22 @@
 import '../mock-vscode';
 import { strict as assert } from 'node:assert';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { describe, it, beforeEach, afterEach } from 'mocha';
 import {
 	resetMockState,
 	mockWebviewPanels,
 	mockCalls,
+	mockConfigValues,
 	MockSecretStorage,
 	MockMemento,
 	type MockWebviewPanel,
 } from '../mock-vscode';
 import { AddServerPanel } from '../../webview/add-server-panel';
+import { _resetSchemaCacheForTests } from '../../catalog';
 import { CredentialStore } from '../../credential-store';
 import type { IGatewayClient } from '../../extension';
+import { createTmpDir, cleanupTmpDir } from '../helpers/tmpdir';
 
 interface TrackedCall { method: string; args: unknown[] }
 
@@ -37,13 +42,38 @@ function createTrackingClient(opts: { fail?: boolean; failMessage?: string } = {
 	return client as IGatewayClient & { calls: TrackedCall[] };
 }
 
-function createMockContext() {
+function createMockContext(fsPath: string = '/test') {
 	return {
 		secrets: new MockSecretStorage(),
 		globalState: new MockMemento(),
 		subscriptions: [] as Array<{ dispose(): void }>,
-		extensionUri: { scheme: 'file', path: '/test', with: () => ({}), toString: () => 'file:///test' },
+		// fsPath is consumed by AddServerPanel.resolveCatalogDir (CB.1/CB.4).
+		// Default '/test' is a non-existent path so loadServersCatalog returns an
+		// empty result with warnings — the panel renders fine without a catalog.
+		extensionUri: { scheme: 'file', path: fsPath, fsPath, with: () => ({}), toString: () => `file://${fsPath}` },
 	};
+}
+
+/**
+ * CB.1/CB.4 fixture helper — stage a catalog directory under
+ * `<root>/docs/catalog/servers.json` and return the root path so callers can
+ * point `extensionUri.fsPath` at it (bundled fallback) or feed it directly into
+ * `mcpGateway.catalogPath` (operator override).
+ */
+function stageCatalogFixture(root: string, entries: unknown[]): string {
+	const dir = path.join(root, 'docs', 'catalog');
+	fs.mkdirSync(dir, { recursive: true });
+	fs.writeFileSync(path.join(dir, 'servers.json'), JSON.stringify(entries), 'utf8');
+	return dir;
+}
+
+function collectPosted<T = Record<string, unknown>>(
+	panel: MockWebviewPanel,
+	type: string,
+): T[] {
+	return panel._postedMessages.filter(
+		(m) => (m as { type?: string }).type === type,
+	) as T[];
 }
 
 function latestPanel(): MockWebviewPanel {
@@ -68,6 +98,32 @@ function simulateSubmit(panel: MockWebviewPanel, payload: unknown): void {
 async function flush(): Promise<void> {
 	await new Promise((r) => setImmediate(r));
 	await new Promise((r) => setImmediate(r));
+}
+
+/**
+ * Poll until a posted message of the given `type` appears on the panel, or the
+ * deadline is hit. The init message dispatches after an async catalog load
+ * (fs.open + stat + read + close), which needs more than two setImmediate
+ * ticks on Windows. Default 500 ms — generous enough for the fs round-trip
+ * even on a busy CI box, well under Mocha's 2 s per-test timeout.
+ *
+ * Throws on timeout — see code-review finding LOW-2 (Round 1, Sonnet 4.6). A
+ * silent return turns a missing message into a confusing "0 === 1" assertion
+ * far from the root cause; the throw surfaces the wait-site as the failure.
+ */
+async function waitForPostedMessage(
+	panel: MockWebviewPanel,
+	type: string,
+	maxMs: number = 500,
+): Promise<void> {
+	const deadline = Date.now() + maxMs;
+	while (Date.now() < deadline) {
+		if (panel._postedMessages.some((m) => (m as { type?: string }).type === type)) {
+			return;
+		}
+		await new Promise((r) => setTimeout(r, 5));
+	}
+	throw new Error(`waitForPostedMessage: timed out waiting for "${type}" after ${maxMs}ms`);
 }
 
 describe('AddServerPanel', () => {
@@ -388,6 +444,63 @@ describe('AddServerPanel', () => {
 		});
 	});
 
+	// CB.0 — baseline regression group (3 cases): covers the pre-catalog free-form
+	// flow (no catalogId in payload) so the catalog additions in CB.1–CB.5 can
+	// layer on without re-asserting the same pre-existing behaviour elsewhere.
+	describe('catalog regression (no catalog selection)', () => {
+		it('free-form stdio submit without catalogId still creates server', async () => {
+			const client = createTrackingClient();
+			const panel = await openPanel(client, credStore);
+			const command = process.platform === 'win32' ? 'C:\\bin\\cat-regression.exe' : '/usr/bin/cat-regression';
+			simulateSubmit(panel, {
+				name: 'regression-stdio',
+				target: command,
+				env: [],
+				headers: [],
+				// catalogId intentionally omitted — simulates the Phase 11.C free-form path.
+			});
+			await flush();
+			assert.equal(client.calls.length, 1);
+			assert.deepEqual(client.calls[0].args, ['regression-stdio', { command }]);
+			assert.ok(panel.disposed);
+		});
+
+		it('free-form http submit without catalogId still creates server', async () => {
+			const client = createTrackingClient();
+			const panel = await openPanel(client, credStore);
+			simulateSubmit(panel, {
+				name: 'regression-http',
+				target: 'https://example.test/mcp',
+				env: [],
+				headers: [],
+			});
+			await flush();
+			assert.equal(client.calls.length, 1);
+			assert.deepEqual(
+				client.calls[0].args,
+				['regression-http', { url: 'https://example.test/mcp' }],
+			);
+			assert.ok(panel.disposed);
+		});
+
+		it('free-form submit with invalid name still rejects via server-side re-validation', async () => {
+			const client = createTrackingClient();
+			const panel = await openPanel(client, credStore);
+			simulateSubmit(panel, {
+				name: '../evil',
+				target: '/usr/bin/regression',
+				env: [],
+				headers: [],
+			});
+			await flush();
+			assert.equal(client.calls.length, 0);
+			const nacks = panel._postedMessages.filter(
+				(m) => (m as { type?: string }).type === 'nack');
+			assert.equal(nacks.length, 1);
+			assert.ok(!panel.disposed);
+		});
+	});
+
 	describe('concurrency and lifecycle (HIGH fixes from cross-review)', () => {
 		it('drops a second submit while the first is in-flight (F-01 guard)', async () => {
 			// Slow client — we control when addServer resolves.
@@ -468,6 +581,315 @@ describe('AddServerPanel', () => {
 			assert.equal(client.calls.length, 1, 'server must be created before callback runs');
 			assert.ok(panel.disposed, 'panel must be disposed even when callback throws');
 			assert.ok(mockCalls.errorMessages.some((m) => m.includes('callback boom')));
+		});
+	});
+
+	// CB.5 — catalog features: init message, pre-fill via catalogId, host
+	// re-validation of forged ids, XSS safety, operator-path override, and the
+	// 11.C in-flight guard across a catalog switch.
+	describe('catalog browse (CB.1–CB.3, CB.5)', () => {
+		let tmpDir: string;
+
+		beforeEach(() => {
+			// Reset the module-level catalog schema cache — CA catalog.test.ts
+			// may leave it in either a populated or errored state depending on
+			// its last assertion, which would make our loadServersCatalog return
+			// empty entries on the first attempt here (the cache's schemaCacheError
+			// short-circuits compilation).
+			_resetSchemaCacheForTests();
+			tmpDir = createTmpDir();
+		});
+
+		afterEach(() => {
+			cleanupTmpDir(tmpDir);
+		});
+
+		it('posts an init message with catalog entries after panel creation (CB.1 a)', async () => {
+			stageCatalogFixture(tmpDir, [
+				{
+					name: 'context7',
+					display_name: 'Context7 Documentation',
+					transport: 'http',
+					description: 'Docs lookup.',
+					url: 'https://mcp.context7.com/mcp',
+					header_keys: ['Authorization'],
+				},
+				{
+					name: 'orchestrator',
+					display_name: 'Claude Orchestrator',
+					transport: 'stdio',
+					description: 'Pipeline routing.',
+					command: 'uv',
+					args: ['run', '--', 'orchestrator-mcp'],
+				},
+			]);
+			const client = createTrackingClient();
+			const ctx = createMockContext(tmpDir);
+			await AddServerPanel.createOrShow(ctx.extensionUri as any, client, credStore, () => {});
+			const panel = latestPanel();
+			await waitForPostedMessage(panel, 'init');
+			const inits = collectPosted<{ entries: unknown[]; warnings: string[] }>(panel, 'init');
+			assert.equal(inits.length, 1, 'exactly one init message must be posted');
+			assert.equal(
+				inits[0].warnings.length, 0,
+				`unexpected warnings: ${inits[0].warnings.join(' | ')}`);
+			assert.equal(inits[0].entries.length, 2);
+			const names = (inits[0].entries as Array<{ name: string }>).map((e) => e.name);
+			assert.deepEqual(names.sort(), ['context7', 'orchestrator']);
+		});
+
+		it('catalog selection pre-fill: submit with valid catalogId routes through addServer (CB.1/CB.3)', async () => {
+			stageCatalogFixture(tmpDir, [
+				{
+					name: 'context7',
+					display_name: 'Context7 Documentation',
+					transport: 'http',
+					description: 'Docs lookup.',
+					url: 'https://mcp.context7.com/mcp',
+					header_keys: ['Authorization'],
+				},
+			]);
+			const client = createTrackingClient();
+			const ctx = createMockContext(tmpDir);
+			await AddServerPanel.createOrShow(ctx.extensionUri as any, client, credStore, () => {});
+			const panel = latestPanel();
+			await waitForPostedMessage(panel, 'init');
+			// Simulate the webview pre-filling, then submitting — operator kept
+			// the pre-filled url and added a secret value for the Authorization
+			// header. catalogId flows through to host; host re-validates.
+			simulateSubmit(panel, {
+				name: 'context7',
+				target: 'https://mcp.context7.com/mcp',
+				env: [],
+				headers: ['Authorization: Bearer secret'],
+				catalogId: 'context7',
+			});
+			// handleSubmit re-loads the catalog (async fs I/O) before reaching
+			// client.addServer, so two setImmediate flushes aren't enough on
+			// Windows — poll the tracked calls list until the call lands.
+			const deadline = Date.now() + 500;
+			while (client.calls.length === 0 && Date.now() < deadline) {
+				await new Promise((r) => setTimeout(r, 5));
+			}
+			assert.equal(client.calls.length, 1, 'valid catalogId must not block addServer');
+			const [, config] = client.calls[0].args as [string, Record<string, unknown>];
+			assert.equal(config.url, 'https://mcp.context7.com/mcp');
+			assert.deepEqual(config.headers, { Authorization: 'Bearer secret' });
+		});
+
+		it('host re-validation rejects forged catalogId — never reaches client.addServer (CB.3)', async () => {
+			stageCatalogFixture(tmpDir, [
+				{
+					name: 'real-entry',
+					display_name: 'Real',
+					transport: 'stdio',
+					description: 'real',
+					command: '/usr/bin/real',
+					args: [],
+				},
+			]);
+			const client = createTrackingClient();
+			const ctx = createMockContext(tmpDir);
+			await AddServerPanel.createOrShow(ctx.extensionUri as any, client, credStore, () => {});
+			const panel = latestPanel();
+			await waitForPostedMessage(panel, 'init');
+			simulateSubmit(panel, {
+				name: 'evil',
+				target: '/usr/bin/evil',
+				env: [],
+				headers: [],
+				catalogId: 'forged-ghost',
+			});
+			await waitForPostedMessage(panel, 'nack');
+			assert.equal(client.calls.length, 0, 'forged catalogId must be rejected before addServer');
+			const nacks = collectPosted<{ error?: string }>(panel, 'nack');
+			assert.equal(nacks.length, 1);
+			assert.ok(
+				nacks[0].error && nacks[0].error.includes('Unknown catalog entry'),
+				`expected forged-id rejection, got: ${nacks[0].error}`);
+			assert.ok(!panel.disposed, 'panel stays open so operator can correct');
+		});
+
+		it('malformed catalog file: init warnings fire but panel stays functional (CB.5)', async () => {
+			// Stage malformed JSON — loader returns warnings, never throws.
+			const dir = path.join(tmpDir, 'docs', 'catalog');
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(path.join(dir, 'servers.json'), '{ not valid json ', 'utf8');
+			const client = createTrackingClient();
+			const ctx = createMockContext(tmpDir);
+			await AddServerPanel.createOrShow(ctx.extensionUri as any, client, credStore, () => {});
+			const panel = latestPanel();
+			await waitForPostedMessage(panel, 'init');
+			const inits = collectPosted<{ entries: unknown[]; warnings: string[] }>(panel, 'init');
+			assert.equal(inits.length, 1);
+			assert.equal(inits[0].entries.length, 0);
+			assert.ok(inits[0].warnings.length > 0, 'loader must surface warnings for malformed JSON');
+			// Panel is still usable — a free-form submit still goes through.
+			simulateSubmit(panel, {
+				name: 'still-works',
+				target: '/usr/bin/fallback',
+				env: [],
+				headers: [],
+			});
+			await flush();
+			assert.equal(client.calls.length, 1, 'malformed catalog must not break the submit path');
+		});
+
+		// LOW-3 (Sonnet 4.6 review): assertions below verify the architectural
+		// invariant (catalog strings never embed in HTML at build time) and the
+		// static source text (textContent — not innerHTML — is what the script
+		// uses). The runtime DOM defence itself cannot be unit-tested without a
+		// real browser; these two checks are grep-level regression guards.
+		it('XSS safety: <script>-laden display_name passes through init and HTML uses textContent (CB.5)', async () => {
+			stageCatalogFixture(tmpDir, [
+				{
+					name: 'evil',
+					display_name: '<script>alert(1)</script>',
+					transport: 'stdio',
+					description: '<img src=x onerror=alert(1)>',
+					command: '/usr/bin/e',
+					args: [],
+				},
+			]);
+			const client = createTrackingClient();
+			const ctx = createMockContext(tmpDir);
+			await AddServerPanel.createOrShow(ctx.extensionUri as any, client, credStore, () => {});
+			const panel = latestPanel();
+			await waitForPostedMessage(panel, 'init');
+			// The init message carries the raw entries — XSS defence is at render
+			// time via textContent (verified statically below).
+			const inits = collectPosted<{ entries: Array<{ display_name: string }> }>(panel, 'init');
+			assert.equal(inits.length, 1);
+			assert.equal(inits[0].entries[0].display_name, '<script>alert(1)</script>');
+			// The HTML template must NEVER interpolate catalog strings directly,
+			// and the dropdown script must use textContent (auto-escaped) rather
+			// than innerHTML on catalog-derived values.
+			assert.ok(
+				panel.webview.html.includes('opt.textContent'),
+				'dropdown build must use textContent, not innerHTML');
+			assert.ok(
+				!panel.webview.html.includes('<script>alert(1)</script>'),
+				'malicious display_name must not reach the HTML template — entries arrive via init postMessage');
+		});
+
+		it('operator mcpGateway.catalogPath override wins when non-empty and directory exists (CB.4)', async () => {
+			const operatorRoot = createTmpDir();
+			try {
+				stageCatalogFixture(operatorRoot, [
+					{
+						name: 'operator-only',
+						display_name: 'Operator Only',
+						transport: 'stdio',
+						description: 'Only in the operator catalog.',
+						command: '/opt/operator',
+						args: [],
+					},
+				]);
+				// Bundled path (extensionUri.fsPath + /docs/catalog) holds a different
+				// entry — the operator override must win.
+				stageCatalogFixture(tmpDir, [
+					{
+						name: 'bundled-only',
+						display_name: 'Bundled Only',
+						transport: 'stdio',
+						description: 'Only in the bundled catalog.',
+						command: '/opt/bundled',
+						args: [],
+					},
+				]);
+				mockConfigValues['mcpGateway.catalogPath'] = path.join(operatorRoot, 'docs', 'catalog');
+
+				const client = createTrackingClient();
+				const ctx = createMockContext(tmpDir);
+				await AddServerPanel.createOrShow(ctx.extensionUri as any, client, credStore, () => {});
+				const panel = latestPanel();
+				await waitForPostedMessage(panel, 'init');
+				const inits = collectPosted<{ entries: Array<{ name: string }> }>(panel, 'init');
+				assert.equal(inits.length, 1);
+				const names = inits[0].entries.map((e) => e.name);
+				assert.deepEqual(names, ['operator-only'], 'operator override must win over bundled');
+			} finally {
+				cleanupTmpDir(operatorRoot);
+			}
+		});
+
+		it('in-flight submit guard holds even when catalog is staged (11.C preserved under catalog flow)', async () => {
+			stageCatalogFixture(tmpDir, [
+				{
+					name: 'slow-entry',
+					display_name: 'Slow',
+					transport: 'stdio',
+					description: 's',
+					command: '/usr/bin/slow',
+					args: [],
+				},
+			]);
+			let resolve!: () => void;
+			const gate = new Promise<void>((r) => { resolve = r; });
+			const calls: Array<{ method: string; args: unknown[] }> = [];
+			const slowClient = {
+				calls,
+				listServers: async () => [],
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async (name: string, config: unknown) => {
+					calls.push({ method: 'addServer', args: [name, config] });
+					await gate;
+					return { status: 'ok' };
+				},
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			} as IGatewayClient & { calls: Array<{ method: string; args: unknown[] }> };
+
+			const ctx = createMockContext(tmpDir);
+			await AddServerPanel.createOrShow(ctx.extensionUri as any, slowClient, credStore, () => {});
+			const panel = latestPanel();
+			await waitForPostedMessage(panel, 'init');
+			const payload = {
+				name: 'slow-entry', target: '/usr/bin/slow',
+				env: [], headers: [], catalogId: 'slow-entry',
+			};
+			simulateSubmit(panel, payload);
+			// Wait until the first submit has actually reached client.addServer
+			// (which requires re-loading the catalog first — async). Only then
+			// is dispatching the second submit a meaningful "in-flight" test.
+			while (slowClient.calls.length === 0) {
+				await new Promise((r) => setTimeout(r, 5));
+			}
+			simulateSubmit(panel, payload);
+			// Give the second submit a full event-loop chance to reach handleSubmit.
+			await new Promise((r) => setTimeout(r, 20));
+			assert.equal(slowClient.calls.length, 1, 'second submit must be dropped across catalog switch too');
+			resolve();
+			await flush();
+			assert.equal(slowClient.calls.length, 1, 'still one after gate resolves');
+		});
+	});
+
+	// CB.4 — manifest registration. Asserts package.json contributes the
+	// mcpGateway.catalogPath setting with the exact contract promised by the
+	// plan (string, default "", machine scope). This check lives in CB (not CA)
+	// because it tests CB-introduced state — see CV-gate D-1.
+	describe('manifest registration (CB.4)', () => {
+		it('package.json contributes mcpGateway.catalogPath with machine scope', () => {
+			const manifestPath = path.join(__dirname, '..', '..', '..', 'package.json');
+			const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
+				contributes?: { configuration?: { properties?: Record<string, unknown> } };
+			};
+			const props = manifest.contributes?.configuration?.properties;
+			assert.ok(props, 'package.json must declare contributes.configuration.properties');
+			const entry = props['mcpGateway.catalogPath'] as Record<string, unknown> | undefined;
+			assert.ok(entry, 'mcpGateway.catalogPath must be registered');
+			assert.equal(entry.type, 'string');
+			assert.equal(entry.default, '');
+			assert.equal(entry.scope, 'machine');
+			assert.ok(
+				typeof entry.description === 'string' && entry.description.length > 0,
+				'catalogPath must carry a description for the Settings UI');
 		});
 	});
 });
