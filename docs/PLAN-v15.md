@@ -147,8 +147,15 @@ CHANGELOG note added in T15D.1.
 
 ## Phase 15.C — Windows DACL enforcement-tier integration test
 
-- [ ] T15C.0 — **Spike (throwaway branch, no merge): windows-latest
-  `LogonUser` + `ImpersonateLoggedOnUser` feasibility.** Create a throwaway
+- [x] T15C.0 — **Spike (throwaway branch, no merge): windows-latest
+  `LogonUser` + `ImpersonateLoggedOnUser` feasibility.** DEFERRED — spike
+  branch prepared locally (`spike/windows-impersonate`) and cross-compiles
+  clean, but CI push blocked by `.git/hooks/pre-push` (anti-leak for
+  `full-history-backup`). Per branching rule below, DEFERRED → FAIL branch
+  for v1.5.0. See `docs/spikes/2026-04-19-windows-latest-impersonate.md`
+  for decision + re-attempt follow-up (including a note on the latent
+  `runtime.LockOSThread` bug in the spike binary that was fixed in the
+  T15C.1 landing). Create a throwaway
   branch with a minimal `.github/workflows/spike-windows-impersonate.yml`
   that: (a) provisions a non-elevated test user via `net user testuser
   Pass123! /add`, (b) calls `LogonUser(testuser, ..., LOGON32_LOGON_INTERACTIVE,
@@ -174,7 +181,7 @@ CHANGELOG note added in T15D.1.
 
   T15C.2 reads this file to decide which branch to execute. The spike
   branch itself is discarded; only the spike report is kept on main.
-- [ ] T15C.1 — `internal/auth/token_perms_integration_windows_test.go`
+- [x] T15C.1 — `internal/auth/token_perms_integration_windows_test.go`
   (build tag `integration`). Uses `LogonUser` + `ImpersonateLoggedOnUser`
   to attempt `os.Open` on the token file as a second local account. Expect
   `ACCESS_DENIED`. Requires a dedicated Windows test account
@@ -184,7 +191,11 @@ CHANGELOG note added in T15D.1.
   promised in its header comment
   (`token_perms_windows_test.go:19-28`: "Real enforcement... is tested in
   token_perms_integration_windows_test.go under the integration build tag").
-- [ ] T15C.2 — **Gated by T15C.0 spike outcome.**
+- [x] T15C.2 — **Gated by T15C.0 spike outcome.** Spike DEFERRED → took
+  manual-protocol branch. Landed: new `Makefile` with `test-integration-windows`
+  target (fail-fast env-var guard), README.md §Testing tiers section with
+  three-tier table + PowerShell operator protocol. No `.github/workflows/ci.yml`
+  change.
   - If spike succeeds: new `test-integration-windows` job on `windows-latest`
     GitHub-hosted runner with the provisioning step inline in
     `.github/workflows/ci.yml`. Runs only on `push: [main]` (not every PR)
@@ -196,7 +207,7 @@ CHANGELOG note added in T15D.1.
     on a local Windows machine).
   The plan intentionally splits the decision so v1.5.0 does not block on
   runner infra.
-- [ ] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding)
+- [x] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding) — PASSED 2026-04-19. Tests: `go test ./...` green. Codereview (PAL gpt-5.1-codex): 3 findings — HIGH missing `runtime.LockOSThread` around impersonation (fixed in-cycle, mirrors x/sys/windows syscall_windows_test.go:137 pattern), MEDIUM silent-skip when `MCPGW_TEST_USER/PASSWORD` absent (fixed in-cycle — Makefile now fails fast), LOW shell-syntax mixing in Makefile comment (fixed — protocol deduped to README). Thinkdeep (PAL gpt-5.2): PASS, 0 findings. Precommit (PAL gpt-5.1-codex): 1 extra MEDIUM — RevertToSelf teardown could release impersonated thread back to scheduler on revert failure; fixed in-cycle by merging RevertToSelf + UnlockOSThread into one defer where revert failure t.Fatalf's without unlocking, so Go runtime terminates the locked OS thread and drops impersonation with it.
 
 **Files:** new
 `internal/auth/token_perms_integration_windows_test.go`,

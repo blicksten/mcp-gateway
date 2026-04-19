@@ -319,6 +319,44 @@ cd vscode/mcp-gateway-dashboard
 npm install && npm run compile
 ```
 
+### Testing tiers
+
+The project has three tiers of automated tests, separated by what they prove
+and what they need to run:
+
+| Tier | Command | Scope |
+|------|---------|-------|
+| **Unit + structural** | `go test ./...` | Default path. Covers all platforms. On Windows, verifies the token-file DACL shape (Protected, single ALLOW ACE for current user). No external prereqs. |
+| **TLS integration** | `go test ./...` (subset) | Runs as part of the default path. Generates a self-signed cert in `t.TempDir()`, drives `ListenAndServeTLS`, asserts half-configured TLS refuses to start. |
+| **Windows DACL enforcement** | `make test-integration-windows` | Requires Windows + a pre-provisioned local test account (`net user /add`). Uses `LogonUser` + `ImpersonateLoggedOnUser` to confirm the token file is OS-denied to a second account, not just structurally correct. |
+
+Operator protocol for the Windows enforcement tier (elevated PowerShell
+required for `net user /add`; run the commands below in a single elevated
+PowerShell session):
+
+```powershell
+net user mcpgwtestuser 'Pass1234!MCPGW' /add
+$env:MCPGW_TEST_USER = 'mcpgwtestuser'
+$env:MCPGW_TEST_PASSWORD = 'Pass1234!MCPGW'
+make test-integration-windows
+net user mcpgwtestuser /delete
+```
+
+Behavior when `MCPGW_TEST_USER` / `MCPGW_TEST_PASSWORD` are absent:
+
+- `go test ./...` — unaffected. The enforcement test file is behind the
+  `integration` build tag and is not compiled in this path.
+- `go test -tags integration ./...` — the enforcement test calls `t.Skip`
+  with a pointer back to this section. The rest of the integration-tagged
+  tests still run.
+- `make test-integration-windows` — fails fast with a non-zero exit code
+  before invoking `go test`. This is deliberate: an operator explicitly
+  running the manual protocol shouldn't get a silent pass when the
+  credentials aren't set.
+
+See `docs/spikes/2026-04-19-windows-latest-impersonate.md` for why this
+tier is operator-driven rather than wired into GitHub Actions in v1.5.0.
+
 ## Contributing
 
 1. Fork the repository
