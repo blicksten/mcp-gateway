@@ -47,6 +47,20 @@ type Server struct {
 	authToken   string // empty ⇔ authEnabled=false
 	authEnabled bool   // false only when --no-auth is set on the daemon CLI
 	version     string // populated for /api/v1/version (public endpoint)
+
+	// listenerAddr records the bound listener address once ListenAndServe
+	// has successfully called net.Listen. Nil before that point. Used by
+	// tests to reach a random-port (":0") listener.
+	listenerMu   sync.Mutex
+	listenerAddr net.Addr
+}
+
+// Addr returns the bound listener address, or nil if ListenAndServe has
+// not yet reached net.Listen. Safe to call from any goroutine.
+func (s *Server) Addr() net.Addr {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+	return s.listenerAddr
 }
 
 // AuthConfig bundles Bearer auth parameters for the HTTP server.
@@ -307,6 +321,20 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	tlsCertPath := s.cfg.Gateway.TLSCertPath
 	tlsKeyPath := s.cfg.Gateway.TLSKeyPath
 	s.cfgMu.RUnlock()
+	// T15B.3 (v1.5.0): refuse half-configured TLS. Prior behavior silently
+	// fell back to plain HTTP when only one of the two paths was set — an
+	// operator who edited gateway.tls_cert_path but forgot tls_key_path
+	// would see no warning, assume TLS, actually run cleartext. Wording is
+	// deliberate and names BOTH paths — tests grep for it, and the
+	// CHANGELOG entry quotes it verbatim (same pattern as middleware.go:16).
+	if tlsCertPath != "" && tlsKeyPath == "" {
+		return fmt.Errorf("TLS is half-configured: gateway.tls_cert_path is set but gateway.tls_key_path is empty — " +
+			"both must be set to enable TLS, or both must be empty for plain HTTP")
+	}
+	if tlsKeyPath != "" && tlsCertPath == "" {
+		return fmt.Errorf("TLS is half-configured: gateway.tls_key_path is set but gateway.tls_cert_path is empty — " +
+			"both must be set to enable TLS, or both must be empty for plain HTTP")
+	}
 	tlsEnabled := tlsCertPath != "" && tlsKeyPath != ""
 
 	if nonLoopback && !allowRemote {
@@ -360,6 +388,14 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		defer cancel()
 		_ = s.httpServer.Shutdown(shutdownCtx)
 	}()
+
+	// Publish Addr() last. When observers see Addr() != nil, s.httpServer
+	// is already initialized and the shutdown goroutine is wired up, so
+	// the invariant "Addr() non-nil ⇒ ready to serve" holds without any
+	// half-initialized window on s.httpServer.
+	s.listenerMu.Lock()
+	s.listenerAddr = listener.Addr()
+	s.listenerMu.Unlock()
 
 	// Branch on TLS — one path uses ServeTLS, the other Serve. The
 	// listener is created the same way because the TLS handshake happens

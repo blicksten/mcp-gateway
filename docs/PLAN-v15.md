@@ -90,7 +90,7 @@ are independent. No data migration, no config change.
 
 ## Phase 15.B — TLS self-signed integration test + half-configured TLS refusal
 
-- [ ] T15B.1 — `internal/api/tls_integration_test.go` — generate a
+- [x] T15B.1 — `internal/api/tls_integration_test.go` — generate a
   self-signed cert in `t.TempDir()`, configure `GatewaySettings.TLSCertPath`
   + `TLSKeyPath`, start the server via `ListenAndServeTLS`, probe with
   `http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: ...}}}`,
@@ -106,11 +106,11 @@ are independent. No data migration, no config change.
   `t.TempDir()`. Client config: `&tls.Config{RootCAs: certPool}` where
   `certPool.AppendCertsFromPEM(certPEM)`. Reference shape:
   `crypto/tls/generate_cert.go` in the Go source tree.
-- [ ] T15B.2 — Negative: non-loopback bind + `authEnabled` + no TLS files →
+- [x] T15B.2 — Negative: non-loopback bind + `authEnabled` + no TLS files →
   startup refusal. Current code at `server.go:321` already does this; test
   pins the deliberate error wording (same pattern as
   `middleware.go:16` wording comment) so future refactors don't regress it.
-- [ ] T15B.3 — **Defect fix + negative test.** Currently, only
+- [x] T15B.3 — **Defect fix + negative test.** Currently, only
   `TLSCertPath` set (no key) or only `TLSKeyPath` set (no cert) silently
   drops back to plain HTTP via the `tlsEnabled := certPath != "" && keyPath != ""`
   gate at `server.go:310`. No warning, no refusal — operator edits config,
@@ -129,7 +129,7 @@ are independent. No data migration, no config change.
   T15D.1 CHANGELOG must quote this exact string (not a paraphrase).
   T15B.3 test `TestServer_HalfConfiguredTLS_RefusesToStart` pins both
   orderings (cert-only, key-only).
-- [ ] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding)
+- [x] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding) — PASSED 2026-04-19, see docs/REVIEW-v15.md §"Phase 15.B GATE". Cross-validation: sonnet sub-agent fallback (PAL MCP timed out); 3 findings (M-01, M-02, L-01) addressed in-cycle before gate close.
 
 **Files:** new `internal/api/tls_integration_test.go`, `internal/api/server.go`
 (half-configured refusal).
