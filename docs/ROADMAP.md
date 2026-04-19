@@ -89,7 +89,7 @@ Shipped in commit `29e6fc2`: `SECURITY.md` (responsible disclosure, 30-day targe
 
 Deferred work split into dedicated plans:
 - `docs/PLAN-catalogs.md` (v1.5.0) — server catalog, command catalog, catalog browse in Add Server webview, slash-command template enrichment.
-- `docs/PLAN-v15.md` (v1.5.0 tail) — LOW findings from 12.A / 13 PAL reviews (ConstantTimeCompare length, Scanner 64KB limit) + TLS self-signed integration test + Windows DACL enforcement-tier runner.
+- `docs/PLAN-v15.md` (v1.5.0 tail) — LOW findings from 12.A / 13 PAL reviews (ConstantTimeCompare length, Scanner 64KB limit) + TLS self-signed integration test + Windows DACL enforcement-tier runner. **Phase 15.A complete 2026-04-19** — T15A.1 ConstantTimeCompare hygiene refactor + T15A.2a/b scanner 1MB cap (atomic pair, F-11 closed). Gate [C+O] PASS, 0 blocking findings, 446 tests pass (+3 new). Remaining: 15.B (TLS integration tests + half-configured refusal), 15.C (Windows DACL enforcement tier), 15.D (release + docs).
 
 ---
 
@@ -127,5 +127,5 @@ Full codebase audit: `docs/REVIEW-main.md` (audited [C+O] 2026-04-14, 13 finding
 | ID | Description |
 |----|-------------|
 | F-10 | KeePass master password in Go string cannot be zeroed due to GC — acceptable for localhost. |
-| F-11 | bufio.Scanner 64KB line limit for stderr — sufficient for any realistic log output. |
+| F-11 | ~~bufio.Scanner 64KB line limit for stderr~~ — CLOSED 2026-04-19 in Phase 15.A (T15A.2a + T15A.2b). Both scanner sites (SSE client + stderr producer) raised to 1MB atomically; regression tests pin the cap. End-to-end log-line ceiling is now 1MB. |
 | RF-3 | Gateway crash = all MCP servers lost — HA/clustering not planned (localhost daemon). |

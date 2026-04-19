@@ -147,6 +147,22 @@ func TestMiddleware_ConstantTimeOnDifferentLengths(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
+func TestMiddleware_ConstantTimeOnLongerToken(t *testing.T) {
+	// Timing-shape smoke: a token LONGER than expected must still return 401.
+	// Exercises the pad-to-expected-length path: copy() truncates the longer
+	// received token into the padded buffer, ConstantTimeCompare runs on
+	// equal-length inputs, and the separate ConstantTimeEq length check
+	// rejects the mismatch. Guards the refactor against accidental
+	// early-return reintroduction.
+	logger, _ := captureLogger()
+	token, _ := GenerateToken()
+
+	// Append extra bytes — same prefix, longer overall.
+	resp := runRequest(t, Middleware(token, logger), "Bearer "+token+"extra-padding-bytes")
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+}
+
 func TestMiddleware_NilLoggerFallback(t *testing.T) {
 	// Middleware must not panic when logger is nil.
 	token, _ := GenerateToken()

@@ -56,7 +56,18 @@ func Middleware(expected string, logger *slog.Logger) func(http.Handler) http.Ha
 				writeUnauthorized(w, r, logger, "empty_token")
 				return
 			}
-			if subtle.ConstantTimeCompare([]byte(received), expectedBytes) != 1 {
+			// Pad-to-expected buffer so ConstantTimeCompare always runs on
+			// equal-length inputs. copy() truncates if received > expected;
+			// length equality is verified in a separate ConstantTimeEq call.
+			// Code hygiene, not a security fix: the fixed 43-char token
+			// leaks at most 1 bit (length match) out of 256; see
+			// TestMiddleware_ConstantTimeOnDifferentLengths.
+			receivedBytes := []byte(received)
+			padded := make([]byte, len(expectedBytes))
+			copy(padded, receivedBytes)
+			compareEq := subtle.ConstantTimeCompare(padded, expectedBytes)
+			lengthEq := subtle.ConstantTimeEq(int32(len(receivedBytes)), int32(len(expectedBytes)))
+			if compareEq&lengthEq != 1 {
 				writeUnauthorized(w, r, logger, "mismatch")
 				return
 			}

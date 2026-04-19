@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -224,6 +225,33 @@ func TestStreamLogs(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"line one", "line two"}, lines)
+}
+
+// TestStreamLogs_AcceptsLineOver64KB pins the 1MB SSE scanner cap added
+// in T15A.2a. Before v1.5.0 the default 64KB bufio.Scanner limit caused
+// streamLogsOnce to exit with bufio.ErrTooLong on long MCP server log
+// lines (tracebacks, JSON traces), truncating the stream. Regression
+// would silently drop the remainder of any line over 64KB.
+func TestStreamLogs_AcceptsLineOver64KB(t *testing.T) {
+	// 250KB single log line — well above old 64KB cap, well under new 1MB ceiling.
+	bigLine := strings.Repeat("abc ", 64*1024)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		fmt.Fprint(w, "data: "+bigLine+"\n\n")
+		w.(http.Flusher).Flush()
+	}))
+	defer ts.Close()
+
+	c := newTestClient(ts)
+	var got []string
+	err := c.StreamLogs(ctx, "srv", func(line string) {
+		got = append(got, line)
+	}, nil)
+	require.NoError(t, err, "scanner must not error on 250KB line with raised 1MB cap")
+	require.Len(t, got, 1, "big SSE line must deliver exactly one callback (no truncation)")
+	assert.Equal(t, len(bigLine), len(got[0]), "delivered line must match sent length")
 }
 
 func TestStreamLogs_ContextCancellation(t *testing.T) {

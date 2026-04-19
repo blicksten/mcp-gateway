@@ -299,6 +299,12 @@ func (c *Client) streamLogsOnce(ctx context.Context, name string, callback func(
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
+	// Raise SSE scanner line cap from default 64KB to 1MB. MCP server log
+	// lines (long tracebacks, JSON traces) can exceed 64KB and were
+	// truncating the stream with bufio.ErrTooLong. Paired with the
+	// producer-side cap in lifecycle.scanStderr; both must agree for the
+	// end-to-end cap to hold. 1MB bounds DoS risk for a localhost tool.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for scanner.Scan() {
 		line := scanner.Text()
 		// Normalize bare \r (defensive against proxies).

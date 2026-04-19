@@ -27,7 +27,7 @@ cross-validation). Key refinements applied here:
 
 ## Phase 15.A — LOW findings from prior PAL reviews
 
-- [ ] T15A.1 — **Code hygiene (not a security fix).** `internal/auth/middleware.go`
+- [x] T15A.1 — **Code hygiene (not a security fix).** `internal/auth/middleware.go`
   currently calls `subtle.ConstantTimeCompare([]byte(received), expectedBytes)`,
   which the Go stdlib documents as returning 0 immediately on length mismatch.
   Practical leakage for the fixed 43-char token is 1 bit out of 256 — PAL
@@ -54,18 +54,18 @@ cross-validation). Key refinements applied here:
 
   Existing `TestMiddleware_ConstantTimeOnDifferentLengths` (middleware_test.go:130+)
   must still pass unchanged after the refactor — it pins the coverage shape.
-- [ ] T15A.2a — `internal/ctlclient/client.go:301` (`streamLogsOnce`) — SSE
+- [x] T15A.2a — `internal/ctlclient/client.go:301` (`streamLogsOnce`) — SSE
   client-side scanner. Replace `bufio.NewScanner(resp.Body)` with an explicit
   `scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)` (1MB cap) + comment
   explaining the 64KB→1MB trade-off.
-- [ ] T15A.2b — `internal/lifecycle/manager.go:302` (`scanStderr`) — producer-side
+- [x] T15A.2b — `internal/lifecycle/manager.go:302` (`scanStderr`) — producer-side
   stderr scanner feeding the ring buffer. Same 1MB cap + comment. This is the
   upstream twin of T15A.2a; fixing only T15A.2a leaves the effective
   end-to-end cap at 64KB because the producer truncates first. Architect
   recommends covering both in the same phase so the CHANGELOG entry ("raised
   log line cap to 1MB") is accurate rather than true-but-misleading. Closes
   ROADMAP F-11.
-- [ ] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding)
+- [x] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding) — PASSED 2026-04-19, see docs/REVIEW-v15.md §"Phase 15.A GATE"
 
 **Files:** `internal/auth/middleware.go`, `internal/auth/middleware_test.go`,
 `internal/ctlclient/client.go`, `internal/lifecycle/manager.go`, existing

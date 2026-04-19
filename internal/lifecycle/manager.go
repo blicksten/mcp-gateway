@@ -300,6 +300,12 @@ func (m *Manager) connectStdio(ctx context.Context, name string, client *mcp.Cli
 // scanStderr reads lines from a child process stderr and writes them to the ring buffer.
 func scanStderr(ring *logbuf.Ring, r io.Reader, name string, logger *slog.Logger) {
 	scanner := bufio.NewScanner(r)
+	// Raise stderr scanner line cap from default 64KB to 1MB. Producer-side
+	// twin of the SSE client-side cap in ctlclient.streamLogsOnce; the
+	// end-to-end cap is the minimum of the two scanner limits, so both
+	// must agree. Child processes emitting long stack traces or JSON traces
+	// above 64KB were being truncated before reaching the ring buffer.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for scanner.Scan() {
 		ring.Write(scanner.Text())
 	}

@@ -6,10 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"mcp-gateway/internal/logbuf"
 	"mcp-gateway/internal/models"
 
 	"github.com/stretchr/testify/assert"
@@ -357,4 +359,27 @@ func TestConcurrentAccess(t *testing.T) {
 	wg.Wait()
 
 	require.NoError(t, m.Stop(ctx, "s1"))
+}
+
+// TestScanStderr_AcceptsLineOver64KB pins the 1MB scanner cap added in
+// T15A.2b. Before v1.5.0 the default 64KB bufio.Scanner limit caused
+// scanStderr to exit with bufio.ErrTooLong on long child-process stderr
+// lines (stack traces, JSON traces), dropping the line entirely — it
+// never reached the ring buffer. Regression would silently re-introduce
+// the drop. Asserting the line count (not length) sidesteps logbuf.Redact
+// which rewrites long base64url-shaped strings to a fixed placeholder.
+func TestScanStderr_AcceptsLineOver64KB(t *testing.T) {
+	ring := logbuf.New(16)
+
+	// 256KB single line using "line " chunks separated by spaces so the
+	// logbuf.Redact base64url catch-all (`\b[A-Za-z0-9_\-]{32,}\b`) does
+	// NOT match — we're testing the scanner, not the redactor.
+	longLine := strings.Repeat("line ", 50*1024) + "\n"
+	reader := strings.NewReader(longLine)
+
+	scanStderr(ring, reader, "test-server", testLogger())
+
+	lines := ring.Lines()
+	require.Len(t, lines, 1, "250KB+ line must reach the ring buffer in one piece (old 64KB cap would drop it entirely via bufio.ErrTooLong)")
+	assert.NotEmpty(t, lines[0].Text, "scanner must deliver the line content")
 }
