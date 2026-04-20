@@ -107,7 +107,7 @@ PLAN-main.md is complete as of commit `29e6fc2`. v1.4.0 delivers Bearer auth (12
 Next plans:
 - ✅ `docs/PLAN-catalogs.md` — v1.5.0 catalog UX **[COMPLETE 2026-04-20 — commits 54f8c16, c49e6ef, 6e70dbd, 864c5d5]**
 - ✅ `docs/PLAN-v15.md` — v1.5.0 tail items **[COMPLETE 2026-04-20 — commits 5c949ca, be9bbe9, 22f94c3, 253ce52]**
-- **No pending plans.** v1.5.0 released. v1.6.0 scope to be decided — candidates recorded in `## v1.6.0 Candidates` below.
+- **`docs/PLAN-16.md` — Phase 16 Claude Code Integration (v1.6.0) [PLAN APPROVED 2026-04-20 — audit APPROVE with 10 findings fixed in-cycle; PAL MCP unavailable → internal self-audit per CLAUDE.md fallback, documented in `docs/REVIEW-16.md`]** — Closes 3 prior-audit findings: HIGH bootstrap gap Claude Code ↔ Gateway, MEDIUM tools/list caching per Issue #13646, MEDIUM `.claude/commands/*.md` semantic confusion. Ships: dual-mode gateway (aggregate `/mcp` + per-backend `/mcp/{name}` proxy), Claude Code Plugin packaging (`~/.claude/plugins/cache/mcp-gateway@*/` with regenerated `.mcp.json`), webview patch automation via `commandRegistry.executeCommand("reload-plugins")`, dashboard "Claude Code Integration" panel with tri-state Patch+Channel status, `gateway.invoke` universal fallback tool, `mcp-ctl install-claude-code` bootstrap CLI, supported-versions map, ADR-0005, dogfood `.mcp.json` swap. 10 sub-phases (16.0 SPIKE → 16.9 docs), 74+ tasks. Critical path: 16.0 → 16.1 → 16.3 → 16.4 → 16.5 → 16.8 → 16.9.
 
 
 | # | Task | Description |
