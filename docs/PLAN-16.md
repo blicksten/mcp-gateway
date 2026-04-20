@@ -14,7 +14,7 @@ Phase 16 closes the three findings surfaced during the 2026-04-20 post-v1.5.0 au
 - PAL `thinkdeep` gpt-5.2-pro (2 rounds) confirmed dual-mode design, flagged overlap-suppression UX risk, recommended tri-state health indicators.
 - PAL `consensus` gpt-5.2-pro + gpt-5.1-codex: both converged on "A+C" (status-quo + meta-tools) initially, then upgraded to hybrid+plugin with `/reload-plugins` automation once webview-patch mechanism was validated.
 - PAL `challenge`: HIGH rating on bootstrap confirmed; counter-arguments (user-owned config, out-of-scope) defeated by zero README guidance + author's own dogfood bypass.
-- Webview patch precedent: `claude-team-control/patches/porfiry-taskbar.js` at line 187 already calls `appRegistry.executeCommand("fast")` — the exact mechanism we reuse for `executeCommand("reload-plugins")`.
+- Webview patch precedent: `claude-team-control/patches/porfiry-taskbar.js` already walks the React Fiber tree and calls live session methods directly — `session.setModel()`, `session.setThinkingLevel()`, `session.applySettings()`. One action (`appRegistry.executeCommand("fast")`) goes through the command registry; all others are session-direct calls. Phase 16.0 SPIKE (2026-04-21) confirmed the **Alt-E path**: `session.reconnectMcpServer(serverName)` is present on the same fiber object neighborhood at depth=2, structurally identical to `session.setModel`. This is the primitive 16.4 actually uses — not `executeCommand("reload-plugins")`, which does not exist in the webview bundle.
 - go-sdk API verified: `NewStreamableHTTPHandler(getServer func(*http.Request) *Server, ...)` per-request routing confirmed (streamable.go:187-192).
 
 ## Scope Assessment
@@ -23,7 +23,7 @@ Phase 16 closes the three findings surfaced during the 2026-04-20 post-v1.5.0 au
 
 1. Gateway dual-mode: existing `/mcp` aggregate endpoint untouched (backward compat), plus new `/mcp/{backend}` per-backend proxy endpoints via `getServer(req)` routing.
 2. Claude Code Plugin packaging (`.claude-plugin/plugin.json` + regenerated `.mcp.json`), local marketplace for installation.
-3. Webview patch (`apply-mcp-gateway.sh` + `porfiry-mcp.js`) that automates `/reload-plugins` on backend add/remove.
+3. Webview patch (`apply-mcp-gateway.sh` + `porfiry-mcp.js`) that automates MCP reconnect (via native `session.reconnectMcpServer("mcp-gateway")` Alt-E path, live-verified on CC 2.1.114) on backend add/remove.
 4. Dashboard "Claude Code Integration" panel with `[Activate for Claude Code]` button, `[ ] Auto-reload plugins` checkbox, and two independent status indicators (Patch + Channel, tri-state).
 5. Bootstrap CLI (`mcp-ctl install-claude-code`) for headless / CI setup.
 6. `gateway.invoke(backend, tool, args)` universal fallback tool — works when tools/list refresh fails entirely.
@@ -52,9 +52,9 @@ Phase 16 closes the three findings surfaced during the 2026-04-20 post-v1.5.0 au
 
 | # | Risk | Likelihood | Impact | Mitigation |
 |---|------|------------|--------|------------|
-| R-1 | Claude Code update renames `commandRegistry` / removes `reload-plugins` command | Medium | High | Version-detect in patch; heartbeat reports `fiber_ok` + `registry_ok` + `cmd_exists`; aggregate mode always works as fallback; supported-versions map flags known-broken. |
+| R-1 | Claude Code update changes fiber object shape / renames/removes `reconnectMcpServer` on the session object (Alt-E dependency) | Medium | High | Version-detect in patch; heartbeat reports `fiber_ok` + `mcp_method_ok` + `mcp_method_fiber_depth`; aggregate mode always works as fallback; supported-versions map tracks `alt_e_verified_versions` + `observed_fiber_depths` per CC version; dashboard YELLOW-flags unverified versions (mode C in 16.5.5). |
 | R-2 | Webview CORS blocks `fetch("http://127.0.0.1:8765")` from patched page | Medium | High | Gateway CORS config: `allowed_origins` must include `vscode-webview://` schema; integration test pins this. If blocked, fallback to file-based IPC (write sentinel file in `~/.mcp-gateway/pending-actions/`). |
-| R-3 | `/reload-plugins` side effects interrupt active Claude turn | Low | Medium | Debounce 500ms; skip if active tool call in progress (patch reads DOM spinner indicator same as porfiry-taskbar.js `enforceLock`). |
+| R-3 | `reconnectMcpServer` side effects interrupt active Claude turn | Low | Medium | Debounce 10s (2× observed reconnect latency of 5.4s — live probe 2026-04-21); skip if active tool call in progress (patch reads DOM spinner indicator same as porfiry-taskbar.js `enforceLock`); postpone up to 10s, then fire. Live probe on server `"pal"` confirmed active chat context is preserved — no observed interruption. |
 | R-4 | Plugin `.mcp.json` regen races with Claude Code reading it | Low | Medium | Atomic write (temp + rename); no partial states visible to reader. |
 | R-5 | Auth token exposed in webview fetch request | Low | High | Bearer header injected client-side in fetch options; never logged; patched page stripped of console.log in release build. |
 | R-6 | User has both aggregate (gateway-all) AND plugin entries → tool duplication confuses Claude | Low | Low | Tool description differentiates: aggregate prefix `[gateway-aggregate]`, plugin prefix `[context7]` etc. Claude can reason about the difference. PAL-recommended; no suppression. |
@@ -114,20 +114,27 @@ Phase 16 closes the three findings surfaced during the 2026-04-20 post-v1.5.0 au
   - `registerCommand` availability
   - Go/no-go recommendation for Phase 16.4
 
-- [ ] T16.0.GATE: Maintainer review of spike report. On FAIL, Phase 16 rescopes (see "Rescope on spike failure" below).
+- [x] T16.0.1 — Fiber walk confirmed (superseded by Alt-E: `session.reconnectMcpServer` at depth=2, see spike report 2026-04-20-reload-plugins-probe.md §Live verification results).
+- [x] T16.0.2 — Original probe obsolete. Alt-E real-server reconnect live-verified: `reconnectMcpServer("pal")` resolved in 5404ms with `{type:"reconnect_mcp_server_response"}`, active chat session preserved.
+- [x] T16.0.3 — `registerCommand` probe obsolete under Alt-E (we don't register new commands — we call a native method).
+- [x] T16.0.4 — `MutationObserver` on `#root` pattern carried over from porfiry-taskbar.js (verified resilient on this CC version). Formal resilience re-test deferred to T16.4 implementation.
+- [x] T16.0.5 — Spike report written at `docs/spikes/2026-04-20-reload-plugins-probe.md` (three passes documented).
+- [x] T16.0.GATE: **PASSED 2026-04-21** — Alt-E live probe all 3 steps PASS. Phase 16.4 redesign under Alt-E (see spike report §"Redesign of Phase 16.4 under Alt-E"). Original `executeCommand("reload-plugins")` design abandoned. No rescope triggered — 16.4/16.5 stay in scope with narrower, cleaner implementation.
 
 ### Rollback
 
 Nothing to roll back — this phase has no code changes. Spike report stays in `docs/spikes/` as historical reference.
 
-### Rescope on spike failure
+### Rescope on spike failure (OBSOLETE — spike PASSED 2026-04-21)
 
-If T16.0.2 fails (reload-plugins doesn't fire, or throws, or has bad side effects):
+**This block is historical.** The spike PASSED on 2026-04-21 via Alt-E (see T16.0.GATE above), so no rescope was triggered. 16.4/16.5 remain in scope. The fallback text below is kept for documentation and for re-use IF a future CC version breaks Alt-E fiber walk (a real possibility — hence `alt_e_verified_versions` tracking in T16.4.7).
 
-- Drop phases 16.4 and 16.5 (patch + dashboard panel).
+If a future re-spike against a newer Claude Code version FAILS Alt-E:
+
+- Drop phases 16.4 and 16.5 (patch + dashboard auto-reload).
 - Keep 16.1 (dual-mode), 16.2 (plugin packaging), 16.3 (REST endpoints — scoped back to plugin heartbeat without patch), 16.6–16.9.
 - Dashboard still gets `[Activate for Claude Code]` button (plugin install) but NOT the auto-reload checkbox.
-- Manual workflow documented: "After adding an MCP, run `/reload-plugins` in Claude Code chat."
+- Manual workflow documented: after adding an MCP, user right-clicks `mcp-gateway` entry in Claude Code `/mcp` panel → **Reconnect**. (The original rescope text here referenced a `/reload-plugins` slash command — that command does NOT exist in Claude Code, confirmed by spike §F-4. The UI-panel "Reconnect" is the correct manual primitive.)
 - Phase 17 candidate: SIGHUP+wrapper as alternative restart path.
 
 ---
@@ -318,7 +325,7 @@ Plugin directory is isolated under `installer/plugin/`. Revert removes the direc
 - [ ] T16.3.1 — New REST group `/api/v1/claude-code/*`, Bearer-auth-required (reuse existing auth middleware):
   - `POST /api/v1/claude-code/patch-heartbeat` — accepts JSON `{patch_version, cc_version, vscode_version, fiber_ok, registry_ok, reload_command_exists, session_id, timestamp}`. Gateway stores latest per `session_id` with 1h TTL; emits structured log entry.
   - `GET /api/v1/claude-code/patch-status` — returns array of latest heartbeats across all active sessions (for dashboard polling).
-  - `GET /api/v1/claude-code/pending-actions` — returns next action for patch to execute, e.g. `{id, action: "reload-plugins", nonce}`; idempotent read with `?after=<cursor>` for at-most-once semantics.
+  - `GET /api/v1/claude-code/pending-actions` — returns next action for patch to execute. Alt-E action shapes: `{id, type:"reconnect", serverName:"mcp-gateway", nonce}` for production reconnect; `{id, type:"probe-reconnect", serverName:"__probe_nonexistent_" + nonce, nonce}` for dashboard probe (see 16.5.6). Idempotent read with `?after=<cursor>` for at-most-once semantics.
   - `POST /api/v1/claude-code/pending-actions/{id}/ack` — patch confirms execution. Gateway marks as delivered.
   - `POST /api/v1/claude-code/probe-result` — patch reports `[Test now]` result `{nonce, ok, error?}`.
 
@@ -335,7 +342,7 @@ Plugin directory is isolated under `installer/plugin/`. Revert removes the direc
   ```
   Single-writer FIFO queue; eviction via background goroutine. **[REVIEW-16 M-01]** Persist `actions` + last-heartbeat-per-session to disk on every mutation (atomic tmp+rename, 0600 POSIX / Windows DACL to match auth.token). On gateway startup, load and TTL-filter (drop actions > 10 min old, heartbeats > 1 h old). Closes "pending reload-plugins lost on restart" class of bugs. Heartbeat debounce: only persist when session_id is new OR > 30 s since last persist for that session (amortize disk I/O).
 
-- [ ] T16.3.3 — Wire `RegenerateMCPJSON` (16.2.4) to ALSO enqueue a `reload-plugins` pending action after successful plugin regen. Debounce: if another regen fires within 500ms, coalesce into a single queued action (prevents action-flood on bulk backend operations).
+- [ ] T16.3.3 — Wire `RegenerateMCPJSON` (16.2.4) to ALSO enqueue a `{type:"reconnect", serverName:"mcp-gateway"}` pending action after successful plugin regen (Alt-E action shape). Debounce: if another regen fires within 500ms, coalesce into a single queued action (prevents action-flood on bulk backend operations). **Note:** the webview-side patch applies an additional 10s debounce (T16.4.3) on top of this 500ms server-side coalescing, matching observed reconnect latency. Actions that stay queued >10min are TTL-dropped on gateway restart (T16.3.2 M-01 durability).
 
 - [ ] T16.3.4 — CORS: add `vscode-webview://` to `Access-Control-Allow-Origin` for `/api/v1/claude-code/*` routes ONLY. The rest of `/api/v1` keeps its existing CSRF-protected origin policy. Verify via request from patched webview in integration test. **[REVIEW-16 L-02]** Explicit OPTIONS preflight handler required — browsers send OPTIONS before POST from a different origin. Respond 204 with: `Access-Control-Allow-Origin: vscode-webview://*`, `Access-Control-Allow-Methods: GET, POST`, `Access-Control-Allow-Headers: Authorization, Content-Type`, `Access-Control-Max-Age: 300`. Preflight handler runs BEFORE bearer auth (preflight has no auth header).
 
@@ -373,9 +380,9 @@ Plugin directory is isolated under `installer/plugin/`. Revert removes the direc
 
 ## Phase 16.4 — Webview patch (`apply-mcp-gateway.sh` + `porfiry-mcp.js`)
 
-**Prerequisite:** Phase 16.0 SPIKE must pass (maintainer sign-off).
+**Prerequisite:** Phase 16.0 SPIKE PASSED 2026-04-21. See `docs/spikes/2026-04-20-reload-plugins-probe.md` §"Live verification results" + §"Redesign of Phase 16.4 under Alt-E". This phase is rewritten under **Alt-E** — calling the native `session.reconnectMcpServer(name)` method via React Fiber walk. The original `commandRegistry.executeCommand("reload-plugins")` design was abandoned (the command does not exist in Claude Code's webview bundle at any tested version).
 
-**Goal:** Install a JavaScript patch into Claude Code's webview that runs a heartbeat + polls pending actions + triggers `executeCommand("reload-plugins")` via React Fiber walk. Copy the proven pattern from `claude-team-control/patches/`.
+**Goal:** Install a JavaScript patch into Claude Code's webview that runs a heartbeat + polls pending actions + triggers `session.reconnectMcpServer("mcp-gateway")` via React Fiber walk (Alt-E pattern). Copy the proven `porfiry-taskbar.js` pattern — the taskbar patch already walks the same Fiber neighborhood to call `session.setModel()`.
 
 ### Tasks
 
@@ -397,16 +404,21 @@ Plugin directory is isolated under `installer/plugin/`. Revert removes the direc
 
 - [ ] T16.4.2 — Author `installer/patches/apply-mcp-gateway.ps1` (PowerShell variant for Windows without Git Bash). Same semantics, different syntax.
 
-- [ ] T16.4.3 — Author `installer/patches/porfiry-mcp.js` (~200 lines). Key parts:
-  - React Fiber walk (copy from `porfiry-taskbar.js:65-93`).
-  - Heartbeat every 60s via `fetch(GATEWAY_URL + "/api/v1/claude-code/patch-heartbeat", {method:"POST", headers:{Authorization: "Bearer " + TOKEN, "Content-Type": "application/json"}, body: JSON.stringify({...})})`.
+- [ ] T16.4.3 — Author `installer/patches/porfiry-mcp.js` (~200 lines). **Alt-E structure.** Key parts:
+  - React Fiber walk — Alt-E target: find object exposing `reconnectMcpServer` (method-valued) starting from `[class*="inputContainer_"]`, walking `.return` up to depth 80. Empirically reaches at depth=2 on Claude Code 2.1.114 (live-verified 2026-04-21, see spike report). Lookup order within each fiber's `memoizedProps`: (a) `p.session?.reconnectMcpServer`, (b) `p.actions?.reconnectMcpServer`, (c) any own prop `p[k]` whose value exposes `reconnectMcpServer`. First match wins; store reference as `mcpSession`.
+  - Heartbeat every 60s via `fetch(GATEWAY_URL + "/api/v1/claude-code/patch-heartbeat", {method:"POST", headers:{Authorization: "Bearer " + TOKEN, "Content-Type": "application/json"}, body: JSON.stringify(heartbeat)})`.
   - Poll `/api/v1/claude-code/pending-actions` every 2s.
-  - On action `"reload-plugins"`: call `appRegistry.executeCommand("reload-plugins")`. Debounce: skip if active tool call in DOM (check `[class*="spinnerRow_"]` same as taskbar's `enforceLock`).
-  - Register `__mcp_gateway_probe` command via `appRegistry.registerCommand` if available; handler posts probe result.
-  - On each action success, POST `/pending-actions/{id}/ack`.
-  - Resilience: if fiber walk fails (e.g. after React hot reload), invalidate cache + retry on next DOM mutation (same pattern as taskbar's `MutationObserver` on `#root`).
-  - Silent-on-error: all `fetch` calls wrapped in `.catch(() => {})` to avoid crashing the webview.
-  - Heartbeat payload: `{patch_version, cc_version (parsed from extension path), vscode_version (from `process.versions.vscode` if available), fiber_ok: !!appSession, registry_ok: !!appRegistry, reload_command_exists: tryListRegistryCommands().includes("reload-plugins"), session_id: getOrCreateSessionId()}`.
+  - On action `{type:"reconnect", serverName}` (default `serverName="mcp-gateway"` when absent): if `mcpSession?.reconnectMcpServer` exists, `await mcpSession.reconnectMcpServer(serverName).catch(() => {})`. Fire-and-forget from the patch's perspective; action is acked regardless of server-side outcome (the gateway's heartbeat will notice if actions pile up).
+  - **Active-tool-call suppression:** same DOM-spinner check as taskbar's `enforceLock` — if `[class*="spinnerRow_"]` is visible, postpone reconnect by 1s and retry; cap total postponement at 10s, then fire anyway.
+  - **Debounce window: 10 seconds.** Rationale: observed reconnect latency ~5.4s on live probe; coalescing to `max(500ms, 2 × observed_latency)` gives ~10s headroom. Multiple pending `reconnect` actions for the same `serverName` within the window coalesce to ONE call (drop earlier, keep latest, ack both). Different `serverName` values do NOT coalesce — each is queued independently.
+  - On each action success, POST `/pending-actions/{id}/ack` with `{ok:true, latency_ms}`. On rejection, ack with `{ok:false, error_message}`.
+  - **Resilience (MutationObserver pattern — copied from `porfiry-taskbar.js:86-92`):** watch `document.body` for child changes; if the current `rootRef` element is replaced (React hot reload, panel remount), invalidate `mcpSession` reference and re-run fiber walk on next DOM event. Initial discovery retry: 2s then 8s; after that, failure reported via heartbeat but walk continues on every DOM mutation.
+  - **Silent-on-error:** all `fetch` calls and `reconnectMcpServer` invocations wrapped in `.catch(() => {})` to avoid crashing the webview.
+  - **Heartbeat payload:** `{patch_version, cc_version, vscode_version, fiber_ok: !!mcpSession, mcp_method_ok: typeof mcpSession?.reconnectMcpServer === "function", mcp_method_fiber_depth: <measured during walk>, last_reconnect_latency_ms, last_reconnect_ok, last_reconnect_error, pending_actions_inflight: <count of actions received but not yet acked>, fiber_walk_retry_count: <since last successful discovery>, session_id: getOrCreateSessionId(), ts: Date.now()}`. Fields `registry_ok` and `reload_command_exists` from the prior design are removed.
+  - **Explicit discovery state machine:** `mcpSessionState ∈ {unknown, discovering, ready, lost}`. Transitions: `unknown → discovering` on first DOM ready / MutationObserver tick; `discovering → ready` on successful fiber walk; `ready → lost` on root remount / `reconnectMcpServer` no longer typeof function; `lost → discovering` on next DOM mutation. Heartbeat reports current state in `mcp_session_state` field.
+  - **Jitter on timers** (prevents storm-on-reload per PAL review): heartbeat interval = `60s ± U(0, 5s)`; pending-actions poll interval = `2s ± U(0, 500ms)`. On webview load/remount after >10min offline: apply extra `U(0, 10s)` initial delay before first poll to spread retry thundering-herd across concurrent VSCode windows.
+  - **Singleflight on reconnect:** if a `reconnectMcpServer(serverName)` call is in-flight and another pending-action for the same `serverName` arrives, DO NOT start a second call — attach to the in-flight promise. Ack the second action with the in-flight's eventual result. Prevents overlapping reconnects from bulk backend operations within the 5.4s latency window.
+  - **Thresholds as named constants** (config-visible, testable): `DEBOUNCE_WINDOW_MS=10000`, `ACTIVE_TOOL_POSTPONE_CAP_MS=10000`, `HEARTBEAT_INTERVAL_MS=60000`, `HEARTBEAT_JITTER_MAX_MS=5000`, `POLL_INTERVAL_MS=2000`, `POLL_JITTER_MAX_MS=500`, `LATENCY_WARN_MS=30000` (drives dashboard mode L), `CONSECUTIVE_ERRORS_FAIL_THRESHOLD=3` (drives dashboard mode M). Top of file, grouped in a single `const CONFIG = {...}` object.
 
 - [ ] T16.4.4 — Auth token injection. Challenge: webview patch cannot read `~/.mcp-gateway/auth.token` directly (sandbox). Options evaluated:
   - **A (chosen)**: `apply-mcp-gateway.sh` substitutes `${GATEWAY_AUTH_TOKEN}` at patch-install time from file contents. Patch ships token inline. Token rotation → re-run apply script.
@@ -427,10 +439,17 @@ Plugin directory is isolated under `installer/plugin/`. Revert removes the direc
   On Windows without PowerShell (old systems or stripped-down images), detect and show actionable error. Closes R-7 (stale patch after auto-update) with explicit platform handling.
 
 - [ ] T16.4.6 — Add `installer/patches/porfiry-mcp.test.mjs` — node-based test harness mirroring `porfiry-taskbar.test.mjs`:
-  - Mock DOM + fiber tree; assert fiber walk finds registry.
-  - Mock `appRegistry.executeCommand`; assert called with `"reload-plugins"` after pending-action arrives.
-  - Debounce test: two actions within 500ms → one call.
-  - Active-tool-call skip test.
+  - Mock DOM + fiber tree with nested `memoizedProps.session.reconnectMcpServer` on an ancestor; assert fiber walk resolves `mcpSession` and records `mcp_method_fiber_depth`.
+  - Mock `mcpSession.reconnectMcpServer` as a jest-style spy returning `Promise.resolve({type:"reconnect_mcp_server_response"})`; assert called once with `"mcp-gateway"` after `{type:"reconnect"}` pending-action arrives.
+  - **Debounce test:** three pending-actions for `"mcp-gateway"` within 10s → exactly ONE `reconnectMcpServer` call (the latest), three acks.
+  - **Independent-server test:** two pending-actions `{serverName:"a"}` and `{serverName:"b"}` within 10s → TWO calls (one per server), both acked.
+  - **Active-tool-call suppression test:** simulate visible `[class*="spinnerRow_"]` for 3s; assert reconnect is postponed then fires at ~3s mark.
+  - **Failed fiber walk test:** mock returns no `reconnectMcpServer`-bearing fiber; assert heartbeat payload contains `fiber_ok:false, mcp_method_ok:false, mcp_session_state:"discovering"`; assert no reconnect attempted.
+  - **Heartbeat shape test:** assert payload keys match new schema exactly — old `registry_ok` / `reload_command_exists` fields MUST NOT appear; assert `pending_actions_inflight`, `fiber_walk_retry_count`, `mcp_session_state` ARE present.
+  - **Flapping test** (storm-regression): enqueue 10 alternating good/error pending-actions at 200ms intervals (total 2s); assert total reconnect calls ≤ 2 (first kicks off in-flight, singleflight suppresses rest within window), all 10 actions acked.
+  - **Singleflight test:** start reconnectMcpServer("mcp-gateway") (mock returns 3s Promise); during that 3s, enqueue 5 more pending-actions for the SAME serverName; assert exactly ONE actual `reconnectMcpServer` invocation, all 6 actions acked with the single result.
+  - **State-machine test:** force root-remount (simulate MutationObserver fires with new `#root` node); assert state transitions `ready → lost → discovering → ready`; assert reconnect calls during `lost`/`discovering` are queued (not dropped) and fire after re-discovery.
+  - **Jitter test:** mock `Math.random`; assert heartbeat actually fires within `[HEARTBEAT_INTERVAL_MS, HEARTBEAT_INTERVAL_MS + HEARTBEAT_JITTER_MAX_MS]` across 100 simulated intervals, distribution uniform (χ² test or visual).
 
 - [ ] T16.4.7 — Supported-versions table in `configs/supported_claude_code_versions.json`:
   ```json
@@ -438,32 +457,37 @@ Plugin directory is isolated under `installer/plugin/`. Revert removes the direc
     "min": "2.0.0",
     "max_tested": "2.5.8",
     "known_broken": [],
-    "last_verified": "2026-04-2X"
+    "last_verified": "2026-04-21",
+    "alt_e_verified_versions": ["2.1.114"],
+    "observed_fiber_depths": {"2.1.114": 2},
+    "max_accepted_fiber_depth": 80,
+    "observed_reconnect_latency_ms_p50": 5400,
+    "observed_reconnect_latency_note": "Single-point measurement on 2026-04-21 (server='pal'). Expand to p50/p95/p99 over accumulated heartbeat telemetry once the patch ships; update this field weekly via `mcp-ctl stats versions` (Phase 17 candidate)."
   }
   ```
-  Consumed by the patch + dashboard to classify current CC version.
+  Consumed by the patch + dashboard to classify current CC version. Fields `alt_e_verified_versions` + `observed_fiber_depths` track which versions have a live-verified fiber path; dashboard shows YELLOW "unverified version, fiber walk may not locate `reconnectMcpServer`" when running on a version outside this list. **Important:** the single-point p50 latency (5400ms) is based on ONE measurement from one machine — per PAL blind-spot review (2026-04-21). After the patch ships, accumulated heartbeat data should be used to compute actual p50/p95/p99 and recalibrate `LATENCY_WARN_MS` in T16.4.3 if needed.
 
-- [ ] T16.4.GATE: mocha tests PASS + `shellcheck installer/patches/apply-mcp-gateway.sh` clean + PAL codereview (JS + shell) zero errors + PAL thinkdeep on patch failure modes zero errors + spike T16.0 sign-off still valid for target Claude Code versions.
+- [ ] T16.4.GATE: mocha tests PASS + `shellcheck installer/patches/apply-mcp-gateway.sh` clean + PAL codereview (JS + shell) zero errors + PAL thinkdeep on Alt-E failure modes + debounce correctness + fiber walk resilience zero errors + spike T16.0 sign-off still valid for target Claude Code versions.
 
 ### Files
 
 - `installer/patches/apply-mcp-gateway.sh` (new)
 - `installer/patches/apply-mcp-gateway.ps1` (new)
-- `installer/patches/porfiry-mcp.js` (new)
+- `installer/patches/porfiry-mcp.js` (new; Alt-E structure)
 - `installer/patches/porfiry-mcp.test.mjs` (new)
 - `configs/supported_claude_code_versions.json` (new)
 
 ### Rollback
 
-Run `apply-mcp-gateway.sh --uninstall` to restore `index.js.bak` and remove the patch. No persistent state outside `~/.vscode/extensions/anthropic.claude-code-*/webview/`. On full revert, also remove activation-hook call in the extension.
+Run `apply-mcp-gateway.sh --uninstall` to restore `index.js.bak` and remove the patch. No persistent state outside `~/.vscode/extensions/anthropic.claude-code-*/webview/`. On full revert, also remove activation-hook call in the extension. If Alt-E fiber walk proves unreliable in practice (e.g. on a future CC version), fallback is the manual path documented in 16.9 (user-driven `/mcp` panel "Reconnect" action) — gateway still works, just without auto-reload.
 
 ---
 
 ## Phase 16.5 — Dashboard "Claude Code Integration" panel
 
-**Prerequisite:** 16.3 endpoints + 16.4 patch.
+**Prerequisite:** 16.3 endpoints + 16.4 patch. Alt-E redesign per spike 2026-04-20-reload-plugins-probe.md.
 
-**Goal:** Surface the integration in the VSCode extension with user-friendly UX. Two independent status indicators (Patch + Channel), tri-state (green/yellow/red), specific error message per failure mode.
+**Goal:** Surface the integration in the VSCode extension with user-friendly UX. Two independent status indicators (Patch + Channel), tri-state (green/yellow/red), specific error message per failure mode. `Channel` status reflects native-method (`reconnectMcpServer`) availability in the fiber tree, not `executeCommand` registry state.
 
 ### Tasks
 
@@ -472,12 +496,12 @@ Run `apply-mcp-gateway.sh --uninstall` to restore `index.js.bak` and remove the 
   - `[Activate for Claude Code]` button
   - Plugin status line: `● Installed — mcp-gateway plugin registered` / `● Not installed` / `● Installation failed: <reason>`
   - Divider
-  - `[x] Auto-reload plugins` checkbox
+  - `[x] Auto-reload plugins` checkbox (label kept for user familiarity; internals now call `reconnectMcpServer`)
   - Two status rows (only shown when checkbox on):
-    - `Patch:    ● Installed  v1.6.0` / `● Not installed` / `● Incompatible (CC v2.6.1, max tested 2.5.8)` / `● Stale — VSCode reload required`
-    - `Channel:  ● Active   last heartbeat 12s ago` / `● Idle  (VSCode unfocused)` / `● Broken — <reason>`
+    - `Patch:    ● Installed  v1.6.0` / `● Not installed` / `● Unverified (CC v2.6.1, Alt-E verified up to 2.5.8)` / `● Stale — VSCode reload required`
+    - `Channel:  ● Active   last heartbeat 12s ago  (fiber depth 2)` / `● Idle  (VSCode unfocused)` / `● Broken — reconnectMcpServer not reachable via fiber walk` / `● Broken — <reason>`
   - Overall status banner: green "✓ Auto-reload is working" / yellow "⏸ Claude Code idle" / red "✗ <specific reason + action>"
-  - Buttons: `[Test now]` + `[Copy diagnostics]`.
+  - Buttons: `[Probe reconnect]` + `[Copy diagnostics]` (replaces `[Test now]` — semantics updated under Alt-E, see T16.5.6).
 
 - [ ] T16.5.2 — `[Activate for Claude Code]` handler:
   - Check `claude plugin list --json` for `mcp-gateway` presence.
@@ -490,37 +514,46 @@ Run `apply-mcp-gateway.sh --uninstall` to restore `index.js.bak` and remove the 
   - On → Off: run `apply-mcp-gateway.sh --uninstall`; confirm restore of backup.
   - Persist checkbox state in workspace settings.
 
-- [ ] T16.5.4 — Status polling: webview calls `GET /api/v1/claude-code/patch-status` every 10s (lightweight — gateway cache, no CC round-trip). Compose patch status locally (FS check via extension's Node context reading index.js for marker) + channel status from response.
+- [ ] T16.5.4 — Status polling: webview calls `GET /api/v1/claude-code/patch-status` every 10s (lightweight — gateway cache, no CC round-trip). Compose patch status locally (FS check via extension's Node context reading index.js for marker) + channel status from response. Channel status derives from heartbeat fields `fiber_ok` AND `mcp_method_ok` (both must be true for green).
 
-- [ ] T16.5.5 — Failure-mode messages (matrix from design doc):
+- [ ] T16.5.5 — Failure-mode messages (matrix updated for Alt-E):
   - A. Patch file missing → "Click ☑ to install patch"
   - B. VSCode not reloaded after apply → "Reload VSCode: Ctrl+Shift+P → 'Developer: Reload Window'"
-  - C. CC version incompatible → "Claude Code v{X} not supported (patch tested up to {MAX}). [Report success/failure on GitHub]"
-  - D. Registry API changed (`fiber_ok=false`) → "Claude Code internal API changed. Aggregate mode still works as fallback."
-  - E. `reload-plugins` command missing (`reload_command_exists=false`) → "Claude Code removed /reload-plugins command. Manual restart needed."
+  - C. CC version unverified for Alt-E → "Claude Code v{X} not in `alt_e_verified_versions` (last verified {MAX_ALT_E}). Fiber walk may not locate `reconnectMcpServer`. [Report success/failure on GitHub]"
+  - D. **Fiber walk failed to locate `reconnectMcpServer` on session object** (`fiber_ok=false` OR `mcp_method_ok=false`) → "Claude Code internal API changed or `/mcp` panel not mounted. Open `/mcp` panel to trigger patch discovery, or revert to aggregate-only mode."
+  - ~~E. `reload-plugins` command missing~~ **OBSOLETE (Alt-E)** — no longer applicable; Alt-E does not depend on `reload-plugins`.
   - F. CORS blocks gateway → "Gateway unreachable from Claude Code webview. Check `gateway.allowed_origins` setting."
   - G. No plugin installed → "Click [Activate for Claude Code] first."
   - H. Gateway not running → "mcp-gateway daemon not running on port 8765."
   - I. VSCode idle → YELLOW "⏸ Claude Code idle — patch OK"
   - J. Multiple sessions → show per-session list.
   - **K. Token rotation detected** — **[REVIEW-16 L-06 + M-03]** — `mtime(~/.mcp-gateway/auth.token) > mtime(patched-index.js)` → RED "Gateway token rotated since patch install. Inlined token is stale. [Reinstall patch] to pick up new token." Dashboard also offers [Reinstall via mcp-ctl] which runs `mcp-ctl install-claude-code --no-plugin-change` to re-apply patch with current token without touching plugin.
+  - **L. Reconnect latency >30s** (NEW, Alt-E) — `last_reconnect_latency_ms > 30000` → YELLOW "Recent `reconnectMcpServer` took {N}s (threshold 30s, baseline ~5s). Gateway may be slow or MCP backend hung. [Open gateway logs] / [Report issue]."
+  - **M. Reconnect errors recurring** (NEW, Alt-E) — 3+ consecutive `last_reconnect_ok=false` heartbeats → RED "`reconnectMcpServer` failing: {error}. Check gateway + MCP backend health."
 
-- [ ] T16.5.6 — `[Test now]` handler: dashboard `POST /api/v1/claude-code/probe-trigger {nonce}` → gateway enqueues `__mcp_gateway_probe` action → patch executes it → posts result → dashboard polls and shows green "Test passed" / red "Test failed: <reason>". Timeout 5s → "Timeout — patch not responding".
+- [ ] T16.5.6 — `[Probe reconnect]` handler (Alt-E — replaces `[Test now]` + `__mcp_gateway_probe`):
+  - Dashboard `POST /api/v1/claude-code/probe-trigger {nonce}` → gateway enqueues a special action `{type:"probe-reconnect", serverName:"__probe_nonexistent_" + nonce}` → patch sees it, calls `mcpSession.reconnectMcpServer("__probe_nonexistent_" + nonce)` → the call rejects with "Server not found" (verified on live probe 2026-04-21 Step 2: `rejected (expected): Server not found: nonexistent-mcp-<N>`).
+  - Patch acks with `{ok:false, error_message:"Server not found: __probe_..."}` — which, paradoxically, is the GREEN success signal for this probe. The rejection path proves (a) the fiber walk succeeded, (b) `reconnectMcpServer` is callable, (c) the round-trip works.
+  - Dashboard UI: green "Probe passed — reconnectMcpServer reachable" / red "Probe failed: <unexpected-response>". Timeout 15s → "Timeout — patch not responding (check heartbeat)".
+  - No need for `registerCommand` / `__mcp_gateway_probe` — we reuse the real `reconnectMcpServer` method with a sentinel server name.
 
-- [ ] T16.5.7 — `[Copy diagnostics]` generates structured report (see design doc):
+- [ ] T16.5.7 — `[Copy diagnostics]` generates structured report:
   - Environment (OS, VSCode version, CC version, gateway version)
   - Plugin status (installed/location/entries)
   - Patch status (installed/location/version/backup existence)
-  - Supported-versions map + classification of current CC version
-  - Last 5 heartbeats
+  - Supported-versions map + classification of current CC version (inc. `alt_e_verified_versions` status)
+  - **Alt-E metrics:** `mcp_method_fiber_depth` (last 5 readings), `last_reconnect_latency_ms` (p50/p95 over session), `last_reconnect_ok` count, recent `last_reconnect_error` strings if any
+  - Last 5 heartbeats (raw payload)
   - Failure trace if any
   - Report-to URL with issue template link
   - Copied to clipboard via `vscode.env.clipboard.writeText`.
 
 - [ ] T16.5.8 — Unit tests `vscode/mcp-gateway-dashboard/src/test/claude-code-panel.test.ts`:
-  - State matrix: each failure mode produces correct banner + action.
+  - State matrix: each failure mode (A/B/C/D/F/G/H/I/J/K/L/M) produces correct banner + action. Mode E is explicitly absent (test asserts the UI never emits an E-class message — safeguard against regression).
   - Checkbox behavior when RED: stays checkable with warning banner (not paternalize).
-  - Diagnostics dump includes all required sections.
+  - Diagnostics dump includes Alt-E metric fields (`mcp_method_fiber_depth`, `last_reconnect_latency_ms`).
+  - Probe-reconnect handler: mock heartbeat `{type:"probe_reconnect_response", ok:false, error_message:"Server not found: __probe_..."}` → assert GREEN "Probe passed".
+  - Probe-reconnect unexpected-response: mock any OTHER response (incl. `ok:true`) → assert RED "Probe failed: unexpected response".
 
 - [ ] T16.5.9 — Extension `package.json`: register new command `mcpGateway.showClaudeCodeIntegration`, wire to tree view or status bar context menu.
 
@@ -536,7 +569,7 @@ Run `apply-mcp-gateway.sh --uninstall` to restore `index.js.bak` and remove the 
 
 ### Rollback
 
-Uncheck auto-reload checkbox (runs uninstall). Uninstall plugin via `claude plugin uninstall mcp-gateway`. Revert extension commit. No gateway state affected — dashboard is a consumer only.
+Uncheck auto-reload checkbox (runs uninstall). Uninstall plugin via `claude plugin uninstall mcp-gateway`. Revert extension commit. No gateway state affected — dashboard is a consumer only. If Alt-E auto-reload turns out unstable in production, the entire auto-reload track can be dropped while keeping `[Activate for Claude Code]` + manual-reload docs from 16.9 — no coupling forces removal of the rest of Phase 16.
 
 ---
 
@@ -604,7 +637,7 @@ Revert tool registrations in gateway.go. Built-in tools are additive; revert lea
 
 ## Phase 16.7 — Integration test end-to-end
 
-**Goal:** Automated proof of the full chain: add backend via REST → plugin .mcp.json regen → patch heartbeat → `reload-plugins` triggered → new MCP visible via a simulated client.
+**Goal:** Automated proof of the full chain under Alt-E: add backend via REST → plugin .mcp.json regen → patch heartbeat → `reconnect` action enqueued → patch invokes `reconnectMcpServer("mcp-gateway")` → new MCP tool visible via a simulated client.
 
 ### Tasks
 
@@ -614,7 +647,7 @@ Revert tool registrations in gateway.go. Built-in tools are additive; revert lea
   3. Set `GATEWAY_PLUGIN_DIR` env var.
   4. Start an MCP client using go-sdk (same library we use for the server) pointed at `http://127.0.0.1:8765/mcp`.
   5. Initial `tools/list` returns aggregate tools for initially-configured backends.
-  6. Simulate patch heartbeat: `POST /patch-heartbeat` with `fiber_ok=true, registry_ok=true, reload_command_exists=true`.
+  6. Simulate patch heartbeat (Alt-E schema): `POST /patch-heartbeat` with `{fiber_ok:true, mcp_method_ok:true, mcp_method_fiber_depth:2, last_reconnect_ok:null, last_reconnect_latency_ms:null}`.
   7. Add a new backend via `POST /api/v1/servers` (a local stub MCP child process).
   8. Assert: plugin `.mcp.json` regenerated with new entry (read file, JSON parse).
   9. Assert: pending action in queue (poll `GET /pending-actions`).
@@ -712,7 +745,7 @@ Add `mcp-ctl uninstall-claude-code` as the inverse operation. On revert, `mcp-ct
   - Two-line install: `mcp-ctl install-claude-code --mode proxy`.
   - What to expect in Claude Code `/mcp` panel (with screenshot of namespaced entries).
   - Auto-reload opt-in explanation + safety/risk notes (patches webview bundled JS).
-  - Manual path for users who decline patches: `/reload-plugins` after adding MCP.
+  - Manual path for users who decline the webview patch: after adding a backend, open Claude Code `/mcp` panel → right-click the `mcp-gateway` entry → **Reconnect**. (Note: Claude Code 2.1.114 does NOT ship a `/reload-plugins` slash command — the per-server Reconnect action in the `/mcp` panel UI is the native primitive and is what the auto-reload patch calls programmatically under the hood via `reconnectMcpServer`.)
   - Uninstall: `mcp-ctl uninstall-claude-code`.
 
 - [ ] T16.9.2 — README new section §"Commands vs MCP servers":
@@ -752,15 +785,15 @@ Add `mcp-ctl uninstall-claude-code` as the inverse operation. On revert, `mcp-ct
   Gateway's own config.json registers the three MCPs (context7, orchestrator, playwright) as backends. Proof: the project's author now actually uses the gateway they built.
 
 - [ ] T16.9.5 — Author `docs/ADR-0005-claude-code-integration.md`:
-  - Title: "Claude Code Integration: Dual-mode gateway + Plugin packaging + Webview patch"
+  - Title: "Claude Code Integration: Dual-mode gateway + Plugin packaging + Webview patch (Alt-E native reconnect)"
   - Context: 3 findings closed
-  - Decision: hybrid approach (aggregate + proxy + plugin + optional patch)
-  - Rejected alternatives (with reasoning): HTTP reverse proxy (MCP stateful), suppression of aggregate when plugin loaded (disappearing tools UX), SIGHUP wrapper (invasive shell rc edit), socket injection (unofficial).
-  - Consequences: patch is fragile vs Claude Code API changes; aggregate fallback mitigates; supported-versions map tracks compat.
-  - References: Issues #13646, #16143, #18174; PAL consultation rounds; spike T16.0 results.
+  - Decision: hybrid approach (aggregate + proxy + plugin + optional patch using native `session.reconnectMcpServer` fiber walk)
+  - Rejected alternatives (with reasoning): HTTP reverse proxy (MCP stateful), suppression of aggregate when plugin loaded (disappearing tools UX), SIGHUP wrapper (invasive shell rc edit), socket injection (unofficial), `executeCommand("reload-plugins")` fiber walk (command string does not exist in webview bundle — proven by spike 2026-04-20), `extension.js` dispatcher patch (superseded by Alt-E — native `reconnectMcpServer` already exposed in webview), `set_plugin_enabled` toggle trick (user-visible disable flicker + per-plugin-only granularity).
+  - Consequences: patch is still fragile vs Claude Code API changes, but Alt-E uses the SAME primitive as Claude Code's own `/mcp` panel "Reconnect" button — internal API stability is higher than arbitrary internal commands; aggregate fallback mitigates all patch failure modes; supported-versions map tracks `alt_e_verified_versions`.
+  - References: Issues #13646, #16143, #18174; PAL consultation rounds (3); spike `docs/spikes/2026-04-20-reload-plugins-probe.md` (three passes documented — final PASS 2026-04-21 on CC 2.1.114).
 
 - [ ] T16.9.6 — CHANGELOG.md entry for v1.6.0:
-  - **Added**: Dual-mode gateway (/mcp/{backend} per-backend endpoints), Claude Code Plugin packaging, mcp-ctl install-claude-code, webview patch for /reload-plugins automation (opt-in), gateway.invoke universal fallback tool, supported-versions map.
+  - **Added**: Dual-mode gateway (/mcp/{backend} per-backend endpoints), Claude Code Plugin packaging, mcp-ctl install-claude-code, webview patch for native MCP reconnect automation via `session.reconnectMcpServer` fiber walk — Alt-E pattern (opt-in), gateway.invoke universal fallback tool, supported-versions map (incl. Alt-E verified versions).
   - **Security**: CORS policy for vscode-webview:// narrowly scoped to /api/v1/claude-code/* — no broadening of existing API.
   - **Documentation**: README §Connecting Claude Code, §Commands vs MCP servers, ADR-0005.
   - **Breaking**: None (all additions backward-compatible).
@@ -792,8 +825,8 @@ Revert each doc + code change. Previous `.mcp.json` backed up via git history. D
 
 - **Dual-mode gateway**: aggregate (backward compat, live hot-add) + per-backend proxy (UI parity). SDK-level multiplexing via `getServer(req)` callback, not HTTP reverse proxy.
 - **Plugin packaging**: official Claude Code mechanism for namespaced MCP entries in /mcp panel. `.mcp.json` in plugin dir (not inline per Issue #16143).
-- **Webview patch**: opt-in, idempotent, uninstallable. Copies the proven pattern from `claude-team-control/patches/`. Triggers `executeCommand("reload-plugins")` via React Fiber walk.
-- **No suppression of aggregate tools when backend also in plugin**: PAL-validated; prevents "disappearing tools" UX bug during the window between plugin regen and reload.
+- **Webview patch (Alt-E)**: opt-in, idempotent, uninstallable. Copies the proven pattern from `claude-team-control/patches/porfiry-taskbar.js`. Walks React Fiber tree to find a session/actions object with the native `reconnectMcpServer(serverName)` method (live-verified at depth=2 on Claude Code 2.1.114 — spike 2026-04-20-reload-plugins-probe.md). On gateway-signaled MCP topology change, calls `reconnectMcpServer("mcp-gateway")` — the same operation Claude Code's own `/mcp` panel triggers when a user clicks "Reconnect". Debounce window 10s (2× observed reconnect latency of ~5.4s) to coalesce bulk backend operations. The original `commandRegistry.executeCommand("reload-plugins")` design was abandoned — the command string does not exist in the webview bundle at any tested version; Alt-E uses a native method call instead of a non-existent command.
+- **No suppression of aggregate tools when backend also in plugin**: PAL-validated; prevents "disappearing tools" UX bug during the window between plugin regen and reconnect.
 - **Auth token handling**: patch-install-time substitution into fetch headers; never logged; rotation via `apply-mcp-gateway.sh` re-run.
 - **gateway.invoke as safety net**: stable universal invoker; works even when tools/list caching completely fails.
 - **Supported-versions map as single source of truth**: maintainer-curated, read by both patch heartbeat handler and dashboard UI.
