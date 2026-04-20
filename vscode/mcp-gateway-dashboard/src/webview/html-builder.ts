@@ -414,11 +414,19 @@ function showBanner(msg) {
 // a malicious display_name cannot inject script regardless of content.
 const catalogEntries = new Map();
 
-// buildEnvKeyLines / buildHeaderKeyLines assume schema.server.json has already
-// rejected env_keys / header_keys entries containing '=' or ':' — the loader's
-// ajv pass guarantees bare key names (LOW-1, Sonnet 4.6 review). This
-// pre-fill is purely UX and the host-side validateEnvEntry / validateHeaderEntry
-// re-checks every submitted line before it ever reaches client.addServer.
+// buildEnvKeyLines / buildHeaderKeyLines rely on two layers of defence:
+// (1) schema.server.json applies a JSON-Schema "pattern" constraint on the
+//     env_keys / header_keys items — env_keys must match
+//     ^[A-Za-z_][A-Za-z0-9_]*$ (bare identifier), header_keys must match RFC
+//     7230 token chars. The ajv strict-mode pass in catalog.ts rejects any
+//     entry with = or : in its keys before the loader returns — pre-fill
+//     emission cannot be ambiguous.
+// (2) even if (1) is ever weakened, the host-side validateEnvEntry /
+//     validateHeaderEntry re-checks every submitted line before it ever
+//     reaches client.addServer, so a forged catalog never contaminates the
+//     daemon config.
+// NOTE: this file is a TypeScript template literal (backtick-delimited),
+// so DO NOT use backticks inside these comments — they close the literal.
 function buildEnvKeyLines(keys) {
   if (!keys || keys.length === 0) { return ''; }
   // One line per declared env key with empty VALUE — operator fills in VALUE.

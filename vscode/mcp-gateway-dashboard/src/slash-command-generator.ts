@@ -153,6 +153,10 @@ export class SlashCommandGenerator implements vscode.Disposable {
 	}
 
 	private async generateCommand(dir: string, server: ServerView): Promise<void> {
+		// SERVER_NAME_RE is /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/ — rejects any
+		// character that could introduce a path component (no '/', '\\', '.',
+		// ':' — see validation.ts). path.join below is therefore guaranteed to
+		// land inside `dir`; no traversal vector from daemon-supplied names.
 		if (!SERVER_NAME_RE.test(server.name)) { return; }
 		const filePath = path.join(dir, `${server.name}.md`);
 		const owned = await this.isOwnedFile(filePath);

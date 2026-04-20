@@ -56,19 +56,21 @@
           "type": "array",
           "items": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
           },
           "uniqueItems": true,
-          "description": "Environment variable names the operator must fill in. Only keys are declared — values never appear in catalog data."
+          "description": "Environment variable names the operator must fill in. Only keys are declared — values never appear in catalog data. Pattern enforces bare identifier shape so the AddServerPanel pre-fill can emit '<key>=' without ambiguity."
         },
         "header_keys": {
           "type": "array",
           "items": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "pattern": "^[!#$%&'*+\\-.^_`|~A-Za-z0-9]+$"
           },
           "uniqueItems": true,
-          "description": "HTTP header names the operator must fill in. Only keys are declared — values never appear in catalog data."
+          "description": "HTTP header names the operator must fill in. Only keys are declared — values never appear in catalog data. Pattern enforces RFC 7230 token chars so the AddServerPanel pre-fill can emit '<key>: ' without ambiguity."
         },
         "homepage": {
           "type": "string",

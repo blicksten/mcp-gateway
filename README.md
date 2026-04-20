@@ -179,6 +179,67 @@ code --install-extension mcp-gateway-dashboard-1.0.0.vsix
 | `mcpGateway.autoStart` | `true` | Auto-start daemon on VS Code launch |
 | `mcpGateway.daemonPath` | `""` | Path to `mcp-gateway` binary (empty = use PATH) |
 | `mcpGateway.pollInterval` | `5000` | Status polling interval (ms) |
+| `mcpGateway.catalogPath` | `""` | Optional override path to a catalog directory (see [Catalogs](#catalogs)). Machine-scope. When empty, the bundled catalog that ships with the extension is used. |
+
+## Catalogs
+
+The extension ships with a first-party catalog of popular MCP servers and matching slash-command templates. The catalog drives two UX surfaces:
+
+1. **Add Server → "Choose from catalog" dropdown.** Operators pick a catalog entry and the form pre-fills `transport`, `url` / `command` / `args`, and one empty row per declared `env_keys` / `header_keys` — the operator fills in only the secret VALUE, never the key structure.
+2. **Slash-command templates.** When a catalog-known server transitions to `running`, `SlashCommandGenerator` writes the catalog's `template_md` body into `.claude/commands/<server>.md` (substituting only the `${server_name}` / `${server_url}` allow-list). Servers without a catalog entry keep the previous bare skeleton.
+
+**Catalogs are local files only — the extension never fetches catalog data from the network.** JSON Schema `$id`s (`https://mcp-gateway.dev/schema/catalog/*.v1.json`) are used as version keys only; validators are pre-configured with the bundled schema files.
+
+**Catalog layout** — two JSON arrays beside each other:
+
+```
+<catalog-dir>/
+├── servers.json   — server entries (schema.server.json v1)
+└── commands.json  — command entries (schema.command.json v1)
+```
+
+**Example `servers.json` entry:**
+
+```json
+{
+  "name": "context7",
+  "display_name": "Context7 Documentation",
+  "transport": "http",
+  "description": "Up-to-date library documentation lookup.",
+  "url": "https://mcp.context7.com/mcp",
+  "header_keys": ["Authorization"],
+  "homepage": "https://context7.com",
+  "tags": ["docs", "research"]
+}
+```
+
+**Example `commands.json` entry:**
+
+```json
+{
+  "server_name": "context7",
+  "command_name": "docs",
+  "description": "Look up current documentation via ${server_name}.",
+  "template_md": "# /${server_name}-docs <library>\n\nFetch docs from ${server_url}.\n",
+  "suggested_vars": ["library", "topic"]
+}
+```
+
+Every `server_name` in `commands.json` must resolve to an entry in `servers.json` — enforced by `npm run lint:catalog`.
+
+### Operator override
+
+`mcpGateway.catalogPath` (machine-scope) points at a directory containing a custom `servers.json` + `commands.json` pair. Operator path wins when non-empty AND the directory exists; otherwise the extension falls back to the bundled catalog under its installation directory. The setting is scoped `machine` so catalog selection cannot be overridden per workspace (closes a per-workspace exfiltration vector).
+
+### Hard limits
+
+- Each catalog file is capped at **1 MiB**. Larger files are refused at load time with a warning; `readFile` is never invoked.
+- Schemas are pinned to `$id` major version `v1`. Any document whose `$id` does not match `v1.*` is rejected.
+- The loader never throws — malformed JSON, schema mismatch, or oversized files produce warnings and an empty entry list, so the rest of the panel keeps working.
+
+### Known limitation — slash-command edits below line 1
+
+Catalog-enriched slash-command files carry a magic-header marker on line 1. When the server re-transitions to `running`, the file is regenerated in full and any edits **below** line 1 are silently overwritten. To preserve operator edits, delete the line-1 marker — the generator treats markerless files as operator-owned and leaves them alone. A hash-augmented marker that tolerates below-line-1 edits is a v1.6 candidate.
 
 ## CLI Reference
 
@@ -329,6 +390,22 @@ and what they need to run:
 | **Unit + structural** | `go test ./...` | Default path. Covers all platforms. On Windows, verifies the token-file DACL shape (Protected, single ALLOW ACE for current user). No external prereqs. |
 | **TLS integration** | `go test ./...` (subset) | Runs as part of the default path. Generates a self-signed cert in `t.TempDir()`, drives `ListenAndServeTLS`, asserts half-configured TLS refuses to start. |
 | **Windows DACL enforcement** | `make test-integration-windows` | Requires Windows + a pre-provisioned local test account (`net user /add`). Uses `LogonUser` + `ImpersonateLoggedOnUser` to confirm the token file is OS-denied to a second account, not just structurally correct. |
+
+**Assurance levels for operators:**
+
+- **Windows:** the default `go test ./...` path proves the token-file DACL is
+  *shaped* correctly (Protected, single ALLOW ACE, current user only). The
+  `make test-integration-windows` path additionally proves the DACL is
+  *enforced* by the Windows kernel against a second local account — i.e., a
+  real second user cannot read the token even with the shape intact. Run the
+  enforcement tier once per release if the token-file isolation guarantee is
+  load-bearing for your threat model; the default path alone is enough for
+  routine development.
+- **Linux / macOS:** the token file is created with POSIX `0600` (owner
+  read/write only) at atomic-rename time — kernel-enforced by the filesystem,
+  verified structurally at daemon start. There is no separate enforcement-tier
+  test on POSIX platforms because the POSIX permission bits are the kernel
+  enforcement, not a shape-vs-enforcement layering.
 
 Operator protocol for the Windows enforcement tier (elevated PowerShell
 required for `net user /add`; run the commands below in a single elevated

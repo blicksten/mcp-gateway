@@ -5,6 +5,125 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-04-20
+
+### Added
+- **Server & command catalogs** — first-party JSON catalogs of popular MCP servers (context7, pdap-docs, orchestrator, pal-mcp, sap-gui-control) and matching slash-command templates. Versioned draft-07 JSON Schemas pinned by `$id` (`v1`). Catalogs ship bundled with the extension VSIX; never fetched from the network.
+- **Add Server "Choose from catalog" dropdown** — `AddServerPanel` webview now exposes a catalog dropdown above the Name field. Selecting an entry pre-fills transport / url / command / args and renders one empty row per declared `env_keys` / `header_keys` so the operator fills only secret values. `(Custom server)` preserves the pre-catalog free-form flow.
+- **Slash-command template enrichment** — `SlashCommandGenerator` injects the catalog's `template_md` body into `.claude/commands/<server>.md` on server transition to `running`. Allow-list substitution of `${server_name}` / `${server_url}`; unknown `${var}` tokens are left literal. Servers without a catalog entry keep the pre-v1.5 bare skeleton unchanged.
+- **`mcpGateway.catalogPath` setting** (`type: string`, `default: ""`, `scope: machine`) — optional override path to a directory containing `servers.json` + `commands.json`. Operator path wins when non-empty and the directory exists; otherwise falls back to the bundled catalog under the extension's installation directory.
+- **`npm run lint:catalog`** — ajv-cli validation of both seed files against their schemas plus a cross-reference check that every `command.server_name` resolves to a `server.name`. Added as a CI step alongside a VSIX-contents assertion ensuring the four catalog files plus ajv runtime dependencies are packaged.
+
+### Security
+- **Host-side re-validation of catalog selection** — `AddServerPanel.handleSubmit` re-loads the catalog and re-runs every field through `validation.ts` helpers before calling `client.addServer()`; forged `catalogId` payloads are rejected before they reach the daemon.
+- **No catalog HTML interpolation** — every catalog string reaches the webview via `jsonForScript` and is rendered via `textContent` / `.value` (never `innerHTML`). `escapeHtml` neutralises `<script>`-laden catalog entries; verified by targeted test.
+- **1 MiB catalog cap with TOCTOU-safe bounded read** — loader uses `fs.promises.open` + `fileHandle.stat` + bounded `fileHandle.read` on a single file handle, eliminating the swap window between stat and read. Oversized files produce a warning and an empty entry list; `readFile` is never invoked.
+- **`scope: machine`** on `mcpGateway.catalogPath` prevents per-workspace catalog override (exfiltration-vector mitigation).
+- **`$id` network refusal by design** — ajv is configured with bundled schema files via `addSchema`; catalog `$id`s are documentation-only and never trigger HTTP fetch.
+
+### Breaking-config
+
+- **Half-configured TLS now refuses to start** (T15B.3). Previously, setting
+  exactly one of `gateway.tls_cert_path` / `gateway.tls_key_path` silently
+  dropped back to plain HTTP — an operator who edited the config and forgot
+  the second setting would see no error, assume TLS, and actually run
+  cleartext. The daemon now refuses to start with an error message naming
+  **both** paths. The wording is deliberately stable (grep target; future
+  refactors must keep the string intact):
+
+  > `TLS is half-configured: gateway.tls_cert_path is set but gateway.tls_key_path is empty — both must be set to enable TLS, or both must be empty for plain HTTP`
+
+  Symmetric variant when only `tls_key_path` is set:
+
+  > `TLS is half-configured: gateway.tls_key_path is set but gateway.tls_cert_path is empty — both must be set to enable TLS, or both must be empty for plain HTTP`
+
+  Both variants are stable grep targets — future refactors must keep the
+  strings intact. **No grace period** —
+  silent plain-HTTP when the operator intended TLS is a security defect, not
+  a feature. Installations running with half-finished TLS config from v1.4.0
+  must either complete the pair or remove both settings before upgrading.
+
+### Fixes
+
+- **Scanner line-length cap raised from 64KB to 1MB** on both log paths
+  (T15A.2a + T15A.2b — atomic pair, F-11 closed). `bufio.Scanner` defaults to
+  a 64KB line limit, which silently truncated long lines both in
+  `internal/ctlclient/client.go` (SSE client-side, `streamLogsOnce`) and in
+  `internal/lifecycle/manager.go` (producer-side, `scanStderr`). The effective
+  end-to-end cap is the minimum of the two sites, so fixing only one would
+  still leave the user-visible ceiling at 64KB. Both sites now call
+  `scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)` with a comment explaining
+  the 64KB→1MB trade-off. Closes ROADMAP F-11.
+
+### Hygiene
+
+- **Bearer auth constant-time compare — pad-to-expected-length refactor**
+  (T15A.1). `internal/auth/middleware.go` previously called
+  `subtle.ConstantTimeCompare([]byte(received), expectedBytes)`, which the Go
+  stdlib documents as returning 0 immediately on length mismatch. For the
+  fixed 43-char token the practical leakage is 1 bit out of 256 — this is
+  **not a security fix**. Landed anyway to remove the recurring PAL-review
+  pattern and provide a clean reference for anyone copying the code to a
+  variable-length secret: compare a pad-to-expected-length buffer, then do a
+  separate `ConstantTimeEq` length check, combine both results
+  unconditionally. Existing `TestMiddleware_ConstantTimeOnDifferentLengths`
+  pins the coverage shape.
+
+### Tests
+
+- **TLS integration tier** (T15B.1 / T15B.2 / T15B.3). New
+  `internal/api/tls_integration_test.go`: generates a CA → leaf cert chain in
+  `t.TempDir()`, drives `ListenAndServeTLS`, probes with a custom `RootCAs`
+  client pool — asserts 200 on `/api/v1/health` and 401 on an authed route
+  without Bearer. Pins the previously-unexercised `ServeTLS` branch. Negative
+  tests cover non-loopback + `authEnabled` + no TLS → startup refusal with
+  pinned wording, and half-configured TLS refusal in both orderings
+  (cert-only, key-only). Runs under the default `go test ./...` path — no
+  external prereqs.
+- **Windows DACL enforcement tier** (T15C.1). New
+  `internal/auth/token_perms_integration_windows_test.go` under the
+  `integration` build tag. Uses `LogonUserW` + `ImpersonateLoggedOnUser` via
+  `advapi32.dll` to attempt `os.Open` on the token file as a second local
+  account; expects `ACCESS_DENIED`. Confirms the token-file DACL is
+  **OS-enforced**, not just structurally correct. Gated behind
+  `make test-integration-windows` so the default `go test ./...` path is
+  unaffected. `runtime.LockOSThread` pin + deferred `RevertToSelf` prevent
+  impersonation from bleeding into other goroutines. Skips gracefully when
+  `MCPGW_TEST_USER` / `MCPGW_TEST_PASSWORD` env vars are absent.
+- **Manual-protocol branch for Windows enforcement** (T15C.2). The
+  `windows-latest` GitHub-hosted runner spike
+  (`docs/spikes/2026-04-19-windows-latest-impersonate.md`) was deferred — the
+  branch cross-compiles clean but the repo's pre-push hook blocks leaking the
+  spike branch to the remote. Scoped back to documented manual protocol:
+  new `Makefile` target `test-integration-windows` (fail-fast env-var guard)
+  plus a three-tier Testing section in the README with the elevated-PowerShell
+  operator protocol. No `.github/workflows/ci.yml` change in v1.5.0.
+
+### Documentation
+
+- **README Testing tiers section** (T15D.2). Three-tier table separates what
+  each test command proves and what it needs to run: default `go test ./...`
+  covers unit + structural + TLS integration; `make test-integration-windows`
+  covers the Windows DACL enforcement tier on a pre-provisioned local test
+  account. Includes the elevated-PowerShell sequence (`net user /add` → env
+  vars → make → `net user /delete`) and the behavior of the integration test
+  when credentials are absent (`go test ./...` unaffected;
+  `go test -tags integration ./...` skips with a pointer back to the README;
+  `make test-integration-windows` fails fast).
+- **README Catalogs section** (CD.1). New end-user-facing section documenting
+  catalog layout (`servers.json` + `commands.json`), the `$id` version-pinning
+  convention, the `mcpGateway.catalogPath` machine-scope override, hard limits
+  (1 MiB cap, `v1.*` schema pin, fail-soft on malformed files), and the
+  known-limitation note on slash-command edits below line 1 (regeneration
+  overwrites edits unless the line-1 marker is removed). Paired with the
+  feature entries in `### Added` / `### Security` above.
+
+### ROADMAP
+
+- **F-11 (bufio.Scanner 64KB stderr limit) — CLOSED** in Phase 15.A. Both
+  scanner sites (SSE client + stderr producer) raised to 1MB atomically;
+  regression tests pin the cap. End-to-end log-line ceiling is now 1MB.
+
 ## [1.0.0] - 2026-04-09
 
 ### Added
