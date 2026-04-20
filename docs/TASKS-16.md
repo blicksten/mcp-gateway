@@ -52,7 +52,7 @@ Companion to `docs/PLAN-16.md`. Lists every task, assigns ownership, captures de
 |----|------|-------|-----|-----|-------|
 | T16.2.1 | `installer/plugin/` directory scaffold | backend-dev | — | S | |
 | T16.2.2 | `plugin.json` with userConfig | backend-dev | T16.2.1 | S | Keychain via `sensitive:true` |
-| T16.2.3 | `internal/plugin/regen.go` | backend-dev | T16.2.1 | M | Atomic write + backup + JSON validate |
+| T16.2.3 | `internal/plugin/regen.go` | backend-dev | T16.2.1 | M | Atomic write + backup + JSON validate; [REVIEW-16 M-02] mutex serialization + [REVIEW-16 L-05] OWNS file (unconditional overwrite) |
 | T16.2.4 | Wire regen into `/api/v1/servers` mutations | backend-dev | T16.2.3 | S | api/server.go:531,553 |
 | T16.2.5 | `internal/plugin/discover.go` (env → glob → error) | backend-dev | T16.2.3 | S | Cross-platform paths |
 | T16.2.6 | `installer/marketplace.json` | backend-dev | T16.2.1 | S | Local marketplace |
@@ -70,9 +70,9 @@ Companion to `docs/PLAN-16.md`. Lists every task, assigns ownership, captures de
 | ID | Task | Owner | Dep | Est | Notes |
 |----|------|-------|-----|-----|-------|
 | T16.3.1 | New route group `/api/v1/claude-code/*` | backend-dev | T16.2.3 | M | Bearer-auth-required |
-| T16.3.2 | `internal/patchstate/state.go` (heartbeats/actions/probes) | backend-dev | — | M | TTL-evicted in-memory state |
+| T16.3.2 | `internal/patchstate/state.go` (heartbeats/actions/probes) | backend-dev | — | M | TTL-evicted; [REVIEW-16 M-01] disk persistence to ~/.mcp-gateway/patch-state.json (0600) + TTL reload-filter |
 | T16.3.3 | Enqueue `reload-plugins` action on regen + 500ms debounce | backend-dev | T16.2.4, T16.3.2 | S | |
-| T16.3.4 | CORS narrow-scope for `vscode-webview://` on CC routes | backend-dev | T16.3.1 | S | Integration-test-validated |
+| T16.3.4 | CORS narrow-scope for `vscode-webview://` on CC routes | backend-dev | T16.3.1 | S | [REVIEW-16 L-02] explicit OPTIONS preflight handler (before auth) |
 | T16.3.5 | Rate limiting per session + per-IP | backend-dev | T16.3.1 | S | 60 GET/min, 5 heartbeat/min |
 | T16.3.6 | `claude_code_handlers_test.go` | test-engineer | T16.3.1–5 | M | 6 cases incl. CORS + debounce |
 | T16.3.7 | API docs at `docs/api/claude-code-endpoints.md` | doc-writer | T16.3.1 | S | |
@@ -95,7 +95,7 @@ Companion to `docs/PLAN-16.md`. Lists every task, assigns ownership, captures de
 | T16.4.2 | `apply-mcp-gateway.ps1` (Windows) | backend-dev | T16.4.1 | M | Same semantics |
 | T16.4.3 | `porfiry-mcp.js` (fiber walk + heartbeat + polling + executeCommand) | backend-dev | T16.0.GATE | L | Copy taskbar pattern |
 | T16.4.4 | Auth-token substitution at patch-install time | backend-dev | T16.4.1, T16.4.3 | S | Token rotation doc |
-| T16.4.5 | Extension activation hook auto-reapplies on CC update | backend-dev | T16.4.1 | M | Closes R-7 |
+| T16.4.5 | Extension activation hook auto-reapplies on CC update | backend-dev | T16.4.1 | M | Closes R-7; [REVIEW-16 M-04] explicit process.platform win32/unix dispatch |
 | T16.4.6 | `porfiry-mcp.test.mjs` mocha harness | test-engineer | T16.4.3 | M | Mock DOM + fiber |
 | T16.4.7 | `supported_claude_code_versions.json` | devops-engineer | — | S | Maintainer-edited JSON |
 | T16.4.GATE | tests + `shellcheck` + codereview + thinkdeep + spike still valid | qa-lead | T16.4.1–7 | — | GATE |
@@ -114,7 +114,7 @@ Companion to `docs/PLAN-16.md`. Lists every task, assigns ownership, captures de
 | T16.5.2 | `[Activate for Claude Code]` handler (plugin install flow) | frontend-dev | T16.2.6, T16.3.1 | M | Prompts for auth_token |
 | T16.5.3 | Auto-reload checkbox on/off → run apply/uninstall | frontend-dev | T16.4.1, T16.4.2 | M | Workspace-persisted state |
 | T16.5.4 | Status polling (every 10s) | frontend-dev | T16.3.1 | S | |
-| T16.5.5 | 10 failure-mode specific messages | frontend-dev | T16.5.1 | M | Matrix from design doc |
+| T16.5.5 | 11 failure-mode specific messages (A-K) | frontend-dev | T16.5.1 | M | [REVIEW-16 L-06 + M-03] K = token rotation detected via mtime compare |
 | T16.5.6 | `[Test now]` → probe-trigger flow | frontend-dev | T16.3.1, T16.4.3 | M | Timeout + result display |
 | T16.5.7 | `[Copy diagnostics]` clipboard dump | frontend-dev | T16.5.4 | S | vscode.env.clipboard |
 | T16.5.8 | Unit tests `claude-code-panel.test.ts` | test-engineer | T16.5.1–7 | M | State matrix coverage |

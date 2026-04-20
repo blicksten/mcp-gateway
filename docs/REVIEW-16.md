@@ -134,3 +134,64 @@ All 10 findings addressed in PLAN-16.md revision:
 PAL MCP threw `AttributeError: 'dict' object has no attribute 'strip'` on CV-gate invocation during step 1. Per CLAUDE.md "PAL unavailable" fallback, sub-agent cross-model review was attempted but the architect sub-agent hit an Anthropic quota cap mid-execution. Lead-auditor + specialist-auditor roles were therefore consolidated into a single rigorous self-audit with explicit finding documentation (this file). Session memory for Phase 16 captures this fallback decision.
 
 Future re-audit with PAL available (next session) SHOULD cross-check the 10 findings above against `pal__codereview` on PLAN-16.md and TASKS-16.md; any new findings surfaced post-hoc become cycle-3 inputs.
+
+---
+
+## Audit Pass 3 — `/check phase 16` re-verification (2026-04-20)
+
+**Trigger:** User invoked `/check phase 16` after initial /phase commit `bb4dbe4` landed. PAL MCP still unavailable in this session — continuing internal fallback protocol.
+
+### Verification of prior-cycle fixes
+
+All 10 findings from Pass 1 verified present in committed artifacts:
+
+- `[REVIEW-16 M-01]` at PLAN-16:343 (T16.3.2 persistence) ✓
+- `[REVIEW-16 M-02]` at PLAN-16:241,255 (T16.2.3 mutex) ✓
+- `[REVIEW-16 M-03]` at PLAN-16:682 (T16.8.6) + PLAN-16:506 (failure mode K) ✓
+- `[REVIEW-16 M-04]` at PLAN-16:416 (T16.4.5 platform dispatch) ✓
+- `[REVIEW-16 L-01]` at PLAN-16:175 (T16.1.5.a SDK path verify) ✓
+- `[REVIEW-16 L-02]` at PLAN-16:340,351 (T16.3.4 OPTIONS + test) ✓
+- `[REVIEW-16 L-03]` at PLAN-16:392 (T16.4.1.a permissions) ✓
+- `[REVIEW-16 L-04]` at PLAN-16:731 (T16.9.4.a dogfood smoke) ✓
+- `[REVIEW-16 L-05]` at PLAN-16:248 (T16.2.3 OWNS file) ✓
+- `[REVIEW-16 L-06]` at PLAN-16:506 (failure mode K mtime check) ✓
+
+TASKS-16.md has new-task rows for L-01 (T16.1.5.a), L-03 (T16.4.1.a), M-03 (T16.8.6), L-04 (T16.9.4.a). Rollback sections present in all 10 sub-phases (10 matches).
+
+### New findings from /check pass
+
+**N-01 — GATE phrasing non-canonical** (LOW)
+
+PLAN-v15.md (style reference) uses the canonical GATE format from `/phase` skill:
+```
+- [x] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding)
+```
+
+PLAN-16.md GATE lines are tool-specific (e.g., `T16.1.GATE: go test ./... PASS + go vet ./... clean + mcp__pal__codereview (go files changed) zero errors ...`). MORE specific content is good (operationally useful), but the tool-specific form doesn't start with the standardized `- [ ] GATE: tests + codereview + thinkdeep — zero errors ...` prefix that downstream automation may grep for.
+
+**Decision:** accept with note rather than fix. Rationale: the tool-specific lines ARE the authoritative GATE content; retrofitting a generic prefix would create two parallel statements per sub-phase, inviting drift. The `- [ ]` checkbox + `GATE:` keyword + "zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding)" substring are all present in every GATE line — greppable for the same automation use cases. Phase 17 should confirm this convention works for the tooling; if automation breaks, restructure in a fix-phase.
+
+**Status:** Accepted — not fixed.
+
+**N-02 — Partial traceability in TASKS-16.md** (LOW)
+
+Only findings that ADDED new tasks (L-01, L-03, M-03, L-04) have `[REVIEW-16 <id>]` markers in TASKS-16.md. Findings that EXTENDED existing tasks (M-01 in T16.3.2, M-02 in T16.2.3, L-02 in T16.3.4, L-05 in T16.2.3, L-06 in T16.5.5, M-04 in T16.4.5) have no such markers in the Notes column. A reader auditing from TASKS-16.md alone cannot tell which existing task carries which fix.
+
+**Decision:** fix. Cheap one-liner annotation in Notes column for 6 rows.
+
+**Status:** Fix applied below.
+
+**N-03 — `max_tested` in supported-versions map will rot** (LOW)
+
+T16.4.7 pins `max_tested: "2.5.8"`. If Phase 16 takes 4-6 weeks, Claude Code will ship 2-3 new versions. By the time 16.4 lands, the pinned value is already stale even though compatibility may be fine.
+
+**Decision:** defer to 16.4 implementation. Add task note: "maintainer re-runs spike T16.0 against latest Claude Code before each 16.4 patch release and bumps `max_tested` in one-commit PRs."
+
+**Status:** Will fold into T16.4.7 when phase starts; not a blocker today.
+
+### /check Pass 3 verdict
+
+**APPROVE** — 1 new LOW finding (N-02) fixed in-cycle; 1 accepted with rationale (N-01); 1 deferred to implementation phase with explicit tracking (N-03). No blocking-severity issues.
+
+Committed plan artifacts (`bb4dbe4`) stand as-is for N-01 and N-03. N-02 fix applied as a follow-up amend to TASKS-16.md below.
+
