@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0](https://github.com/blicksten/mcp-gateway/compare/v0.1.0...v0.2.0) (2026-04-20)
+
+
+### Features
+
+* **catalog-A:** server + command catalogs v1.5.0 — schemas, seeds, TS loader, CI ([54f8c16](https://github.com/blicksten/mcp-gateway/commit/54f8c16beac7ba708f9762aeb8fd641363e72045))
+* **catalog-B:** Add Server browse webview — catalog dropdown + host re-validation ([c49e6ef](https://github.com/blicksten/mcp-gateway/commit/c49e6ef422bba92b6a95189267002645ef68f58a))
+* **catalog-C:** slash-command template enrichment — catalog-aware SlashCommandGenerator ([6e70dbd](https://github.com/blicksten/mcp-gateway/commit/6e70dbd4b15e0dbbd5d36f2b7d598203fc3c1c1c))
+* **catalog-D:** v1.5.0 release gate — README + CHANGELOG + VSIX + final security codereview ([864c5d5](https://github.com/blicksten/mcp-gateway/commit/864c5d51cae7d0d00e29841244741188183dd1db))
+* **extension:** phase 11.E slash command auto-generation ([991121f](https://github.com/blicksten/mcp-gateway/commit/991121f82f946e103e007630395d5b5997bc8581))
+* mcp-gateway v1.0.0 ([5df38c3](https://github.com/blicksten/mcp-gateway/commit/5df38c348de01f29196afc868b53fa54d3e3bf43))
+* **phase-12.A:** Bearer auth - VS Code extension (T12A.8-T12A.12) ([4e075bf](https://github.com/blicksten/mcp-gateway/commit/4e075bfb63d7c71e867b8927e5d0182a4b0bbf57))
+* **phase-12.A:** Bearer token auth - daemon + mcp-ctl (Go side) ([6686cd2](https://github.com/blicksten/mcp-gateway/commit/6686cd2ba4d0c28fba606a66d8def6ea3af8c55b))
+* **phase-12.B:** KeePass credential push (T12B.1-T12B.6) ([7b1e52f](https://github.com/blicksten/mcp-gateway/commit/7b1e52f51669b674b398dfea79cd8cda03bf5ea7))
+* **phase-13:** security hardening - process groups + watcher race + TLS + log redaction ([a845a78](https://github.com/blicksten/mcp-gateway/commit/a845a7830ab0208ed60fab509203750ea493a7ec))
+* **phase-14:** community/CI — SECURITY.md + gitleaks + README auth/TLS/redaction ([29e6fc2](https://github.com/blicksten/mcp-gateway/commit/29e6fc22eb40d225752d69352f9e1a910cc7daa8))
+* **phase-15.A:** LOW findings closure — ConstantTimeCompare hygiene + scanner 1MB cap ([5c949ca](https://github.com/blicksten/mcp-gateway/commit/5c949caa5a2e26a0c5d24b7928ac59aecf75465c))
+* **phase-15.B:** TLS integration tier — half-configured refusal + ServeTLS coverage ([be9bbe9](https://github.com/blicksten/mcp-gateway/commit/be9bbe98d12b96d2c585c0f03658f6bbb90fc34f))
+* **phase-15.C:** Windows DACL enforcement tier — integration test + manual-protocol branch ([22f94c3](https://github.com/blicksten/mcp-gateway/commit/22f94c36682c6066e7c4b244ec6191991df060a2))
+
+
+### Bug Fixes
+
+* **phase-12.A gate:** PAL codereview findings — CRITICAL X-Forwarded-For bypass + 6 others ([a168647](https://github.com/blicksten/mcp-gateway/commit/a168647f09e8501a58b0b51571f1d2b519770b9f))
+* **phase-12.B gate:** PAL codereview findings — 1 CRITICAL + 3 HIGH + 5 MEDIUM ([b05f30e](https://github.com/blicksten/mcp-gateway/commit/b05f30e720bf9f17b14512d84708dc4375931592))
+* **phase-13 gate:** PAL codereview findings — 6 HIGH + 2 MEDIUM ([c242b35](https://github.com/blicksten/mcp-gateway/commit/c242b351c561afd1dfbd6f20778754fc85e103e8))
+* security hardening — env blocklist bypass, CRLF injection, URL validation ([b38447d](https://github.com/blicksten/mcp-gateway/commit/b38447debfdfacbad803936a1583be2849dc786c))
+
 ## [1.5.0] - 2026-04-20
 
 ### Added
