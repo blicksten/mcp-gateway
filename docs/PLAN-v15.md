@@ -225,7 +225,7 @@ branch → revert the Makefile target + README pointer.
 
 ## Phase 15.D — Release + docs
 
-- [ ] T15D.1 — `CHANGELOG.md` v1.5.0 entry. **Must include:**
+- [x] T15D.1 — `CHANGELOG.md` v1.5.0 entry. **Must include:**
   - **Hygiene** section: T15A.1 framed as code hygiene (not security fix)
     — ConstantTimeCompare pad-to-expected-buffer pattern, defensible
     reference for future variable-length secrets.
@@ -246,14 +246,14 @@ branch → revert the Makefile target + README pointer.
     enforcement tier (Windows DACL), T15C.2 either CI-hosted
     (`windows-latest`) or documented-manual protocol depending on T15C.0
     outcome.
-- [ ] T15D.2 — `README.md` pointer at the integration-test tier story:
+- [x] T15D.2 — `README.md` pointer at the integration-test tier story:
   `go test ./...` covers unit + structural tiers; `make
   test-integration-windows` covers the Windows DACL enforcement tier; new
   TLS integration tests run under the default path (they're self-contained,
   no runner prerequisites). Operator-facing framing so users know the
   Windows token-file DACL is OS-enforced (not just structurally correct)
   when the integration tier has been executed.
-- [ ] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding)
+- [x] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding) — PASSED 2026-04-20. Tests: `go test ./...` green (12 packages, 0 failed). Thinkdeep (PAL gpt-5.1-codex): PASS, 0 findings. Codereview: PAL MCP timed out → fell back to code-reviewer sub-agent (Sonnet 4.6) per CLAUDE.md — 1 HIGH (symmetric TLS error string missing from CHANGELOG verbatim quote), 1 MEDIUM ("every supported platform" in Assurance block over-stated DACL shape on Linux/macOS), 1 LOW (Catalogs absent from CHANGELOG Documentation section); all three fixed in-cycle. Precommit (PAL gpt-5.1-codex): PASS, 0 findings.
 
 **Files:** `CHANGELOG.md`, `README.md`, `docs/ROADMAP.md` (F-11 status).
 
