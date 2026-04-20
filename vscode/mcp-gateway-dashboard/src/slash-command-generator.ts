@@ -225,6 +225,10 @@ export class SlashCommandGenerator implements vscode.Disposable {
 	 * would force a second roundtrip on every transition.
 	 */
 	private async ensureCatalogLoaded(): Promise<void> {
+		// Note (A-1, v1.5.0 finalization audit): `catalogLoaded = true` is set
+		// before the awaited load to keep behaviour idempotent inside the .then-
+		// serialized enqueue() chain (each enqueued task awaits the previous).
+		// A Promise-sentinel refinement is tracked as a v1.6 candidate.
 		if (this.catalogLoaded) { return; }
 		this.catalogLoaded = true;
 		const dir = await resolveCatalogDir(this.extensionUri);

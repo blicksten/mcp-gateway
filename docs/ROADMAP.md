@@ -98,7 +98,7 @@ Deferred work split into dedicated plans:
 PLAN-main.md is complete as of commit `29e6fc2`. v1.4.0 delivers Bearer auth (12.A), KeePass credential push (12.B), security hardening (13), and community/CI foundations (14).
 
 Next plans:
-- `docs/PLAN-catalogs.md` — v1.5.0 catalog UX
+- ✅ `docs/PLAN-catalogs.md` — v1.5.0 catalog UX **[COMPLETE 2026-04-20 — commits 54f8c16, c49e6ef, 6e70dbd, 864c5d5]**
 - `docs/PLAN-v15.md` — v1.5.0 tail items (LOW fixes + integration-test tiers)
 
 
