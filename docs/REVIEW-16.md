@@ -195,3 +195,107 @@ T16.4.7 pins `max_tested: "2.5.8"`. If Phase 16 takes 4-6 weeks, Claude Code wil
 
 Committed plan artifacts (`bb4dbe4`) stand as-is for N-01 and N-03. N-02 fix applied as a follow-up amend to TASKS-16.md below.
 
+---
+
+## Pass-4 — Architect audit post-Alt-E rewrite (2026-04-21, /check pipeline `checkpoint-check-2a570a35`)
+
+**Scope:** Independent architect-level critical analysis of commit `0f7cfd0` on `docs/PLAN-16.md` + `docs/ROADMAP.md` — Phase 16.4 + 16.5 rewrite under Alt-E (session.reconnectMcpServer via fiber walk replacing the abandoned executeCommand("reload-plugins") design).
+
+**Auditor:** `architect` agent, backed by Read + Grep over PLAN-16.md §§16.3.1, 16.4 (381–482), 16.5 (486–572), 16.7.1, 16.9.5, Architectural Decisions.
+
+**Verdict:** 9 findings — 0 CRITICAL, 1 HIGH (P4-01), 6 MEDIUM (P4-02…P4-07), 2 LOW (P4-08, P4-09). Per zero-errors gate policy, all 9 block. All were spec-level / coherence issues, not implementation defects. **All 9 fixed in-cycle** via PLAN-16.md amendments in the follow-up commit to `0f7cfd0`.
+
+### HIGH
+
+**P4-01 — `probe-reconnect` action type has no handler in T16.4.3**
+
+T16.3.1 (pending-actions) defines probe action shape `{type:"probe-reconnect", serverName:"__probe_nonexistent_<nonce>"}`; T16.5.6 ([Probe reconnect] handler) asserts the patch consumes it. But T16.4.3's action-handler spec only mentioned `{type:"reconnect"}`. Literal implementation = probe actions silently dropped → `[Probe reconnect]` button permanently times out even on a fully-healthy system.
+
+**Fix applied:** Amended T16.4.3 to route `{type:"probe-reconnect"}` through the SAME code path as `{type:"reconnect"}` — `type` is metadata-only for ack interpretation. Ack body now carries `{ok, error_message, action_type, latency_ms}` so dashboard distinguishes real reconnect from probe rejection. Matching unit test added to T16.4.6.
+
+### MEDIUM
+
+**P4-02 — State machine `ready → lost` with in-flight reconnect behavior undefined** (T16.4.3)
+
+Stale `mcpSession` reference in closure after root remount; singleflight attachees could be promised the in-flight result on a now-invalid session.
+
+**Fix applied:** Amended T16.4.3 state-machine spec: in-flight Promise settles naturally; singleflight attachees receive that settled result; NEW actions queue into `awaitingDiscovery` FIFO bounded at 16 entries (overflow drops oldest with ack error); queue length reflected in heartbeat's `pending_actions_inflight`. Added T16.4.6 remount-during-inflight test. New constant `CONFIG.AWAITING_DISCOVERY_QUEUE_MAX=16`.
+
+**P4-03 — Two-tier debounce window semantics underspecified** (T16.4.3)
+
+Whether webview's 10s window resets on new action (starvation risk) or stays fixed from first action (latency asymmetry) was left unstated.
+
+**Fix applied:** Amended T16.4.3 to "fixed-from-first with starvation cap": window arms on first action and does NOT reset; hard cap `DEBOUNCE_FORCE_FIRE_COUNT=10` forces fire when 10 actions accumulate regardless of window-elapsed. Added T16.4.6 starvation-cap test. Explicit invariant: any enqueued action is acked within `DEBOUNCE_WINDOW_MS + p95_latency` OR force-fired at the 10-count cap.
+
+**P4-04 — Jitter re-draw ambiguity** (T16.4.3)
+
+Once-at-load vs per-tick drawing unspecified. Rationale (storm-on-reload) suggested once; test (100-interval uniformity) required per-tick.
+
+**Fix applied:** Amended T16.4.3 to specify BOTH mechanisms as independent: per-tick jitter for desync noise (every heartbeat + every poll redraws fresh `Math.random`); separate `INITIAL_SKEW_MS = random() * 30s` drawn once at load, persisted in `localStorage` with 10min TTL, for cross-window thundering-herd mitigation. Added T16.4.6 initial-skew persistence test. New constants `CONFIG.INITIAL_SKEW_MAX_MS=30000`, `CONFIG.INITIAL_SKEW_STORAGE_TTL_MS=600000`.
+
+**P4-05 — Mode M counter-reset rule missing** (T16.5.5)
+
+"3+ consecutive `last_reconnect_ok=false`" triggers RED, but no reset specified → latches RED indefinitely after 3 transient failures.
+
+**Fix applied:** Amended T16.5.5 mode M: counter resets on FIRST `last_reconnect_ok=true`; idle heartbeats (null `last_reconnect_ok`) neutral. New constant `CONFIG.MODE_M_RESET_ON_SUCCESS=true`. Added T16.5.8 mode-M reset + idle-neutrality test.
+
+**P4-06 — Test coverage gaps for mode L boundary, mode M reset, probe-reconnect patch-side** (T16.4.6 + T16.5.8)
+
+Matrix test in T16.5.8 covered detection, not semantics. Patch-side probe-reconnect handler had no dedicated test.
+
+**Fix applied:** Added 4 new tests — T16.4.6 probe-reconnect-handler test + T16.5.8 mode L boundary test + T16.5.8 mode M counter-reset test + T16.5.8 mode D threshold test (covers P4-09 below).
+
+**P4-07 — Single-point latency baseline drives 3 hardcoded thresholds; mitigation was Phase-17-deferred** (T16.4.7)
+
+`observed_reconnect_latency_ms_p50: 5400` from 1 probe drove `DEBOUNCE_WINDOW_MS`, 2×-latency heuristic, `LATENCY_WARN_MS`. Aggregate fallback does NOT mitigate patch-side debounce delay.
+
+**Fix applied:** Elevated mitigation from Phase-17-deferred to THIS-phase-scope, in TWO paths:
+  (a) pre-ship probe expansion: at least 2 backends × 2 machines (total ≥4 measurement points) before T16.4.3 merge; compute p95; raise `DEBOUNCE_WINDOW_MS` if observed p95 > 8000ms;
+  (b) post-ship runtime config override: gateway heartbeat RESPONSE may return `{config_override: {LATENCY_WARN_MS, DEBOUNCE_WINDOW_MS, CONSECUTIVE_ERRORS_FAIL_THRESHOLD}}`; patch validates each value against hard bounds and merges into in-memory `CONFIG`. Allows post-ship recalibration without re-patching. Amended T16.3.1 heartbeat-response spec.
+
+### LOW
+
+**P4-08 — T16.3.3 reconnect-action scoping invariant undocumented**
+
+Action always `serverName="mcp-gateway"` regardless of which backend inside the gateway mutated.
+
+**Fix applied:** Added one-line invariant note to T16.3.3 stating scoping is correct for aggregate plugin surface and future per-backend plugin entries are explicitly out-of-scope.
+
+**P4-09 — Mode D fires on single-heartbeat failure of `fiber_ok` / `mcp_method_ok`** (T16.5.5)
+
+Fresh VSCode window with `/mcp` panel not yet opened = immediate RED on a fully-healthy system.
+
+**Fix applied:** Amended T16.5.5 mode D: trigger requires BOTH `fiber_walk_retry_count >= 5` AND `mcp_session_state != "ready"` across 3+ consecutive heartbeats. New constants `CONFIG.MODE_D_MIN_RETRY_COUNT=5`, `CONFIG.MODE_D_MIN_CONSECUTIVE_HEARTBEATS=3`. Covered by new T16.5.8 mode-D threshold test (folded into P4-06).
+
+### /check Pass 4 lead-auditor cross-domain (2026-04-21)
+
+Lead-auditor Read-verified all 9 Pass-4 fixes at specific PLAN-16.md lines (P4-01@411, P4-02@418, P4-03@413, P4-04@419-421, P4-05@550, P4-06@455+575+576+577, P4-07@326+423+476-484, P4-08@345, P4-09@541). Heartbeat-schema consistency chain verified: T16.3.1 request+`config_override` response ↔ T16.4.3 patch send ↔ T16.5.5 dashboard consume ↔ T16.5.8 integration assert. Verdict: APPROVE — all 9 P4 findings resolved, zero new blocking issues.
+
+Cross-domain gap raised by lead-auditor — **P4-lead-L1 LOW** — `last_reconnect_error` heartbeat field could leak filesystem paths / stack-trace PII through the gateway's log pipeline. **Fix applied in-cycle:** amended T16.4.3 heartbeat payload spec to scrub `last_reconnect_error` before emission (256-char truncation + path-regex replacement with `<path>` + stack-trace-frame stripping). Matching scrub-test added to T16.4.6 requirements.
+
+Two remaining INFO-level items (non-findings, not blocking per lead-auditor APPROVE):
+- `config_override` per-field hard-bound values (min/max ms + min/max count) not yet documented in T16.4.7 §(b) — implementation-time concern, refine during T16.3 coding.
+- Runtime CONFIG values (post-override-merge) not surfaced in T16.5.7 `[Copy diagnostics]` output — minor operability improvement, can fold into T16.5.7 during implementation.
+
+### /check Pass 4 specialist-auditor deep-dive — concurrency + security (2026-04-21)
+
+Specialist-auditor with PAL thinkdeep (gpt-5.1-codex, thinking=high) cross-validation [C+O] audited the concurrency + security surface introduced by the Pass-4 architect fixes. 4 new findings + 1 cross-domain flag:
+
+**SP4-M1 MEDIUM / Fixed** — Debounce timer callback at fire time had unspecified behavior when `mcpSessionState` transitioned to `lost`/`discovering` during the window; naive implementation would call `reconnectMcpServer` on released reference, `.catch(()=>{})` swallows → silent action loss violating ack guarantee. **Fix:** amended T16.4.3 to mandate state-check at fire time; transfer to `awaitingDiscovery` FIFO if not `ready`. Added T16.4.6 debounce-during-lost test.
+
+**SP4-M2 MEDIUM / Fixed** — Error-scrub regex in P4-lead-L1 missed `/opt/`, `/workspace/`, `/app/`, `/System/`, `/Library/`, `/usr/`, `/mnt/`, `/root/`, `/srv/`, `/proc/`, `/dev/`, and UNC paths `\\server\share\...`. **Fix:** broadened regex to cover all common container/CI/macOS/UNC patterns. T16.4.6 scrub-test expanded to 6 input cases covering Unix home, container workspace, Claude Code install path in first line (not stack frame), UNC, macOS system, and Windows user profile.
+
+**SP4-L1 LOW / Fixed** — T16.4.3 debounce paragraph said "`awaitingDiscovery` queue accumulates 10+ actions" which conflated the debounce window accumulator (ready state, DEBOUNCE_FORCE_FIRE_COUNT=10) with the `awaitingDiscovery` FIFO (lost/discovering state, AWAITING_DISCOVERY_QUEUE_MAX=16). **Fix:** rewrote the sentence to explicitly separate the two code paths and their distinct bounds.
+
+**SP4-L2 LOW / Fixed** — config_override validator bounds (P4-07 option b) had overly permissive lower limits: `LATENCY_WARN_MS ≥ 1000` (below p50 of 5400ms), `DEBOUNCE_WINDOW_MS ≥ 500` (below reconnect latency), `CONSECUTIVE_ERRORS_FAIL_THRESHOLD ≥ 1` (single-failure = permanent RED). A compromised gateway token (R-5) could push these minimum-bound values and degrade UX silently. **Fix:** raised minimums — `LATENCY_WARN_MS ≥ 5000`, `DEBOUNCE_WINDOW_MS ≥ 2000`, `CONSECUTIVE_ERRORS_FAIL_THRESHOLD ≥ 2`. Added T16.5.8 boundary test. Dashboard advisory banner required when any override is active.
+
+**SP4-cross (escalated within-cycle to T16.4.4) LOW / Fixed** — Shell-injection risk in `apply-mcp-gateway.sh` token substitution. **Fix:** amended T16.4.4 to require byte-safe substitution (awk `-v` variable passing, Python-style byte tools — NOT shell `$TOKEN` interpolation), strict token-character validation (base64url regex `[A-Za-z0-9_\-\.]+`, reject + abort on any metachar), mirror of proven `__ORCHESTRATOR_REST_PORT__` pattern in `claude-team-control/patches/apply-taskbar.sh`. Integration test: poisoned token file with shell metacharacters must cause apply-script abort. `.ps1` variant gets equivalent guard.
+
+### /check Pass 4 verdict
+
+**APPROVE after fixes** — 9 findings from architect (1 HIGH, 6 MEDIUM, 2 LOW) + 1 LOW (P4-lead-L1) from lead-auditor + 4 findings from specialist-auditor (2 MEDIUM, 2 LOW) + 1 cross-domain flag (SP4-cross, LOW) = 15 findings total, ALL fixed in-cycle via PLAN-16.md amendments in follow-up commit to `0f7cfd0`. Zero-errors gate PASSED. No finding escalated or deferred. PAL CV: [C+O] on the 4 specialist findings (PAL thinkdeep gpt-5.1-codex full agreement); PAL CV-gate at step boundaries skipped twice due to MCP server timeouts — Read-evidenced independent reviews substituted per CLAUDE.md fallback rule.
+
+No new LOW findings introduced by the fixes (verified self-consistency: all new CONFIG constants referenced in both T16.4.3 spec and T16.4.6/T16.5.8 tests; heartbeat schema additions match T16.3.1 + T16.4.3 + T16.5.4; P4-07 option (b) config-override validation bounds documented on both ends).
+
+**Verification evidence:** applied edits, grep confirms no new `executeCommand`/`reload-plugins` forward-looking refs introduced; each new `P4-XX` marker is cross-referenced between PLAN-16.md (as `**[P4-XX]**` in task text) and REVIEW-16.md (as the finding heading); CONFIG constants all appear in T16.4.3 + heartbeat response spec in T16.3.1 + tests in T16.4.6/T16.5.8.
+
