@@ -197,12 +197,34 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	// MCP transports. Policy per ADR-0003 §policy-matrix-mcp-modes.
-	mcpServer := s.gw.Server()
+	//
+	// Phase 16.1 dual-mode routing (streamable handler only, per T16.1.5):
+	//   /mcp                          -> aggregate server (namespaced tools)
+	//   /mcp/{backend}                -> per-backend server (unnamespaced) if
+	//                                    backend name matches SERVER_NAME_RE
+	//                                    and backend is currently registered
+	//   /mcp/{backend-not-registered} -> nil return -> SDK responds per
+	//                                    streamable.go:190 (400 Bad Request)
+	//   /mcp/{invalid-name}           -> fall through to aggregate
+	//
+	// T16.1.5.a SDK path verification (go-sdk v1.4.1): read of
+	// streamable.go::ServeHTTP (lines ~246-365) confirms the handler is a
+	// single-endpoint design. It parses `mcp-session-id` from the request
+	// header (not from URL path) and routes by HTTP method, never by URL
+	// sub-path. Therefore the `/mcp/{backend}` scheme cannot collide with
+	// any SDK-internal routing primitive. The "fall through to aggregate"
+	// behavior for invalid names is defense-in-depth against a future SDK
+	// that might introduce sub-paths (e.g. /mcp/session/{id}); such names
+	// would fail SERVER_NAME_RE (dashes allowed, but "session" is accepted
+	// — a future denylist may be required if the SDK adopts such a scheme).
+	//
+	// SSE surface remains aggregate-only in Phase 16.1 — per-backend SSE
+	// adds no plugin-integration value (Claude Code uses HTTP streamable).
 	streamableHandler := mcp.NewStreamableHTTPHandler(
-		func(r *http.Request) *mcp.Server { return mcpServer }, nil,
+		s.mcpServerForRequest, nil,
 	)
 	sseHandler := mcp.NewSSEHandler(
-		func(r *http.Request) *mcp.Server { return mcpServer }, nil,
+		func(r *http.Request) *mcp.Server { return s.gw.Server() }, nil,
 	)
 
 	mcpPolicy := s.mcpTransportPolicy(authMW)
@@ -213,6 +235,53 @@ func (s *Server) Handler() http.Handler {
 	r.Handle("/sse/*", mcpPolicy(sseHandler))
 
 	return r
+}
+
+// mcpServerForRequest is the per-request getServer callback passed to the
+// go-sdk streamable handler. It inspects r.URL.Path and returns:
+//   - aggregate server for exact "/mcp"
+//   - per-backend server for "/mcp/{backend}" when {backend} validates as a
+//     backend name AND the backend is currently registered
+//   - nil for "/mcp/{valid-name}" where no such backend exists — SDK then
+//     responds 400 (streamable.go getServer-returns-nil contract)
+//   - aggregate server (fall-through) for any other shape, including paths
+//     that do not begin with "/mcp" (middleware only mounts this handler on
+//     /mcp and /mcp/*, so this branch is effectively unreachable but
+//     defensive).
+//
+// This is a free-standing method rather than an inline closure so it can
+// be unit-tested via server_proxy_test.go (T16.1.6).
+func (s *Server) mcpServerForRequest(r *http.Request) *mcp.Server {
+	agg := s.gw.Server()
+
+	remainder := strings.TrimPrefix(r.URL.Path, "/mcp")
+	// Exact /mcp (or, defensively, any non-/mcp path routed here).
+	if remainder == "" || remainder == "/" {
+		return agg
+	}
+	if !strings.HasPrefix(remainder, "/") {
+		// Path like "/mcpfoo" — not under our scheme; fall through safely.
+		return agg
+	}
+	remainder = strings.TrimPrefix(remainder, "/")
+
+	// Only the first path segment is the candidate backend name. Any
+	// trailing segments (e.g. a hypothetical "/mcp/context7/extra") are
+	// ignored by this router; the SDK then receives the request and
+	// decides on its own behavior. See T16.1.5.a analysis above.
+	seg, _, _ := strings.Cut(remainder, "/")
+	if seg == "" {
+		return agg
+	}
+	// Validate the segment against the backend-name regex. Invalid names
+	// fall back to the aggregate surface for defense-in-depth (see
+	// T16.1.5.a: defensive against future SDK sub-path introductions).
+	if err := models.ValidateServerName(seg); err != nil {
+		return agg
+	}
+	// Registered backend? Return its per-backend server. Unregistered name
+	// returns nil, which the SDK translates to a 400 response.
+	return s.gw.ServerFor(seg)
 }
 
 // mcpTransportPolicy returns a handler wrapper that enforces the

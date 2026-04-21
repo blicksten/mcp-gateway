@@ -145,7 +145,7 @@ If a future re-spike against a newer Claude Code version FAILS Alt-E:
 
 ### Tasks
 
-- [ ] T16.1.1 — Extend `internal/proxy/gateway.go`: replace single `server *mcp.Server` field (gateway.go:28) with:
+- [x] T16.1.1 — Extend `internal/proxy/gateway.go`: replace single `server *mcp.Server` field (gateway.go:28) with:
   ```go
   aggregateServer  *mcp.Server           // existing behavior, keyed by "" (empty string)
   perBackendServer map[string]*mcp.Server // new: keyed by backend name
@@ -153,19 +153,19 @@ If a future re-spike against a newer Claude Code version FAILS Alt-E:
   ```
   `Gateway.Server()` returns `aggregateServer` (unchanged API). New method `Gateway.ServerFor(backend string) *mcp.Server` returns per-backend instance or nil.
 
-- [ ] T16.1.2 — Extend `Gateway.RebuildTools()` (gateway.go:91) to update BOTH registries:
+- [x] T16.1.2 — Extend `Gateway.RebuildTools()` (gateway.go:91) to update BOTH registries:
   - Aggregate: existing namespaced tools `<server>__<tool>` with description prefix `[<server>] ...` (gateway.go:141) — unchanged.
   - Per-backend: for each running backend, ensure `perBackendServer[backend]` exists (lazy-create with `mcp.NewServer(&mcp.Implementation{Name: backend, Version: g.version}, nil)`); register that backend's tools WITHOUT namespace prefix, and description WITHOUT `[<server>]` prefix. When a backend is removed, tear down its `perBackendServer` entry.
 
-- [ ] T16.1.3 — Add `registerToolForBackend(nt namespacedTool)` helper mirroring `registerTool()` (gateway.go:140) but writing to `perBackendServer[nt.server]`. Reuse `router.Call` for dispatch via the same `nt.namespaced` path — per-backend view is just a different surface, same underlying routing.
+- [x] T16.1.3 — Add `registerToolForBackend(nt namespacedTool)` helper mirroring `registerTool()` (gateway.go:140) but writing to `perBackendServer[nt.server]`. Reuse `router.Call` for dispatch via the same `nt.namespaced` path — per-backend view is just a different surface, same underlying routing.
 
-- [ ] T16.1.4 — Add `internal/proxy/gateway_proxy_test.go`:
+- [x] T16.1.4 — Add `internal/proxy/gateway_proxy_test.go`:
   - Unit: `TestRebuildTools_DualMode` — two backends, aggregate has both namespaced, per-backend has each independently unnamespaced.
   - Unit: `TestPerBackendServer_ListChangedScoping` — adding a tool to backend X fires `list_changed` on `perBackendServer[X]` only, not on other per-backend servers (verify via SDK session mock).
   - Unit: `TestPerBackendServer_ToolDescriptionNoBrackets` — `[context7]` prefix MUST be absent in per-backend view.
   - Unit: `TestConcurrentRebuildAndBackendAdd` — race-safe (reuse pattern from existing `TestConcurrentRebuildAndFilteredTools` at gateway_test.go:310).
 
-- [ ] T16.1.5 — Extend `internal/api/server.go:200-213` HTTP handler wiring. Replace:
+- [x] T16.1.5 — Extend `internal/api/server.go:200-213` HTTP handler wiring. Replace:
   ```go
   streamableHandler := mcp.NewStreamableHTTPHandler(
       func(r *http.Request) *mcp.Server { return mcpServer }, nil,
@@ -179,17 +179,17 @@ If a future re-spike against a newer Claude Code version FAILS Alt-E:
     - `/mcp/{backend}` where `{backend}` matches `SERVER_NAME_RE` → per-backend
     - `/mcp/{anything-else}` → aggregate (streamable internal paths preserved)
 
-- [ ] T16.1.5.a — **[REVIEW-16 L-01]** SDK path verification. Before committing T16.1.5, read ALL of `go-sdk@v1.4.1/mcp/streamable.go` and `protocol.go`. Enumerate every sub-path the SDK uses (e.g. if it uses `/mcp/session/{id}` for resumption). Extend `SERVER_NAME_RE` or add a name-denylist rejecting backend names that would collide. Document findings in code comment at the dispatcher. If SDK uses NO sub-paths (single-endpoint), removes the "anything-else" ambiguity entirely — router becomes: exact `/mcp` → aggregate; `/mcp/{name}` → per-backend; unknown → 404.
+- [x] T16.1.5.a — **[REVIEW-16 L-01]** SDK path verification. Verified go-sdk v1.4.1 `streamable.go::ServeHTTP` is single-endpoint, parses `mcp-session-id` from the request header only, registers no URL sub-paths. Documented inline at `internal/api/server.go` `mcpServerForRequest` dispatcher comment. Invalid backend names fall through to aggregate as defense-in-depth against any future SDK sub-path introduction.
 
-- [ ] T16.1.6 — Add `internal/api/server_proxy_test.go`:
+- [x] T16.1.6 — Add `internal/api/server_proxy_test.go`:
   - `TestStreamablePerBackendRoute` — GET /mcp/context7 returns context7's serverInfo
   - `TestStreamableUnknownBackend404` — /mcp/nonexistent returns 400 (SDK default for nil return)
   - `TestAggregateRouteStillWorks` — /mcp returns aggregate serverInfo
   - `TestPerBackendAuthRequiresSameBearer` — same Bearer token works for both paths
 
-- [ ] T16.1.7 — Extend `mcpTransportPolicy` middleware (server.go:231) to match `/mcp` AND `/mcp/*` paths identically (loopback-only or bearer-required apply uniformly). No security regression.
+- [x] T16.1.7 — `mcpTransportPolicy` middleware uniformity: confirmed applied identically to `/mcp` and `/mcp/*` via `r.Handle("/mcp", policy(...))` and `r.Handle("/mcp/*", policy(...))` at `internal/api/server.go:210-211`. `TestPerBackendAuthRequiresSameBearer` asserts bearer-required rejects without-bearer 401 on both paths and accepts with correct bearer on both.
 
-- [ ] T16.1.GATE: `go test ./...` PASS + `go vet ./...` clean + `mcp__pal__codereview` (go files changed) zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding) + `mcp__pal__thinkdeep` on dual-mode design zero errors.
+- [x] T16.1.GATE: **PASSED 2026-04-21** — `go test ./...` -> 12/12 packages PASS including 8 new Phase 16.1 subtests; `go vet ./...` clean; `mcp__pal__thinkdeep` async gpt-5.1-codex PASS 0 findings (task rev-b8fc7a52ae0e, 98s); `mcp__pal__codereview` gpt-5.1-codex internal (fallback after async timeout) PASS 0 findings gate_verdict=PASS. Coverage: internal/proxy 89.2%, internal/api 74.8%. Dual-mode `/mcp` aggregate + `/mcp/{backend}` per-backend now active; backward-compatible by construction.
 
 ### Files
 

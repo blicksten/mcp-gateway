@@ -21,18 +21,38 @@ import (
 )
 
 // Gateway is the core MCP proxy engine. It aggregates tools from all
-// running backends and exposes them through a single MCP server.
+// running backends and exposes them through two MCP server surfaces:
+//
+//   - aggregateServer: existing behavior — all backend tools flattened into
+//     one MCP server with namespaced names (<backend>__<tool>) and
+//     descriptions prefixed by "[<backend>] ". Mounted at /mcp.
+//   - perBackendServer[name]: one MCP server per running backend, exposing
+//     ONLY that backend's tools, unnamespaced, descriptions without prefix.
+//     Mounted at /mcp/<backend>. Lazy-created on first tool registration.
+//
+// Phase 16.1 introduces the per-backend surface for Claude Code plugin
+// integration; the aggregate surface is unchanged for backward compatibility.
 type Gateway struct {
-	lm       *lifecycle.Manager
-	router   *router.Router
-	server   *mcp.Server
-	cfg      *models.Config
-	version  string
-	logger   *slog.Logger
+	lm      *lifecycle.Manager
+	router  *router.Router
+	cfg     *models.Config
+	version string
+	logger  *slog.Logger
 
-	cfgMu          sync.RWMutex // protects g.cfg reads/writes (separate from toolsMu)
-	toolsMu        sync.Mutex   // protects tool registration on MCP server
-	registeredTools map[string]struct{} // tracks currently registered tool names
+	cfgMu   sync.RWMutex // protects g.cfg reads/writes (separate from toolsMu)
+	toolsMu sync.Mutex   // protects tool registration on MCP servers (aggregate + per-backend)
+
+	// Phase 16.1 dual-mode: aggregateServer is the legacy single-server
+	// surface; perBackendServer is the new per-backend surface map.
+	aggregateServer  *mcp.Server
+	perBackendServer map[string]*mcp.Server
+	serverMu         sync.RWMutex // guards perBackendServer map mutations
+
+	// registeredTools tracks currently-registered tool names on aggregateServer
+	// (keyed by namespaced name). backendRegistered tracks per-backend
+	// unnamespaced tool names, outer map keyed by backend name.
+	registeredTools   map[string]struct{}
+	backendRegistered map[string]map[string]struct{}
 }
 
 // New creates a new Gateway with the given config and lifecycle manager.
@@ -43,20 +63,34 @@ func New(cfg *models.Config, lm *lifecycle.Manager, version string, logger *slog
 	}
 	r := router.New(lm)
 	g := &Gateway{
-		lm:              lm,
-		router:          r,
-		cfg:             cfg,
-		version:         version,
-		logger:          logger,
-		registeredTools: make(map[string]struct{}),
+		lm:                lm,
+		router:            r,
+		cfg:               cfg,
+		version:           version,
+		logger:            logger,
+		registeredTools:   make(map[string]struct{}),
+		perBackendServer:  make(map[string]*mcp.Server),
+		backendRegistered: make(map[string]map[string]struct{}),
 	}
-	g.server = g.buildMCPServer()
+	g.aggregateServer = g.buildMCPServer()
 	return g
 }
 
-// Server returns the underlying MCP server (for mounting HTTP/SSE handlers).
+// Server returns the aggregate MCP server (unchanged API for HTTP/SSE mounts
+// at /mcp and /sse). This is the flattened view with namespaced tool names.
 func (g *Gateway) Server() *mcp.Server {
-	return g.server
+	return g.aggregateServer
+}
+
+// ServerFor returns the per-backend MCP server for the given backend name,
+// or nil if no such backend is currently registered. Intended for the
+// Phase 16.1 per-backend HTTP route at /mcp/{backend}. The returned server
+// exposes the backend's tools unnamespaced (no "<backend>__" prefix) and
+// without the "[<backend>] " description prefix.
+func (g *Gateway) ServerFor(backend string) *mcp.Server {
+	g.serverMu.RLock()
+	defer g.serverMu.RUnlock()
+	return g.perBackendServer[backend]
 }
 
 // Router returns the tool router.
@@ -81,26 +115,36 @@ func (g *Gateway) buildMCPServer() *mcp.Server {
 	return server
 }
 
-// RebuildTools re-registers all tools from running backends on the MCP server.
-// Called after backend start/stop to update the exposed tool set.
+// RebuildTools re-registers all tools from running backends on BOTH the
+// aggregate MCP server AND the per-backend MCP servers (Phase 16.1). Called
+// after backend start/stop to update the exposed tool sets.
 //
 // Thread safety: the MCP SDK's AddTool and RemoveTools methods are internally
 // synchronized via sync.Mutex (confirmed in go-sdk v1.4.1, server.go
-// changeAndNotify). Our toolsMu provides an additional serialization layer so
-// that the diff logic (add/remove) sees a consistent registeredTools map.
+// changeAndNotify). Our toolsMu serializes the diff logic (add/remove) so
+// the registeredTools / backendRegistered maps stay consistent with the
+// registered state on each server. serverMu guards perBackendServer map
+// mutations (create/delete entries); reads via ServerFor use RLock.
+//
+// Per-backend scoping: each backend gets its own *mcp.Server lazy-created on
+// first tool registration. Tools are exposed WITHOUT namespace prefix
+// ("echo" rather than "context7__echo") and descriptions WITHOUT
+// "[<backend>] " prefix. list_changed notifications fire only on the
+// affected per-backend server because each backend has its own instance.
 func (g *Gateway) RebuildTools() {
 	allTools := g.filteredTools()
 
 	g.toolsMu.Lock()
 	defer g.toolsMu.Unlock()
 
-	// CR-3 fix: determine which tools to add and which to remove.
+	// ---------- Aggregate surface (existing behavior) ----------
+
+	// CR-3 fix: determine which aggregate tools to add and which to remove.
 	newNames := make(map[string]struct{}, len(allTools))
 	for _, nt := range allTools {
 		newNames[nt.namespaced] = struct{}{}
 	}
 
-	// Remove tools that are no longer present.
 	var toRemove []string
 	for name := range g.registeredTools {
 		if _, exists := newNames[name]; !exists {
@@ -108,19 +152,87 @@ func (g *Gateway) RebuildTools() {
 		}
 	}
 	if len(toRemove) > 0 {
-		g.server.RemoveTools(toRemove...)
+		g.aggregateServer.RemoveTools(toRemove...)
 		for _, name := range toRemove {
 			delete(g.registeredTools, name)
 		}
 	}
 
-	// Register (or replace) current tools.
 	for _, nt := range allTools {
 		g.registerTool(nt)
 		g.registeredTools[nt.namespaced] = struct{}{}
 	}
 
-	g.logger.Info("tools rebuilt", "count", len(allTools), "removed", len(toRemove))
+	// ---------- Per-backend surface (Phase 16.1) ----------
+
+	// Group current tools by backend. Synthetic meta-tools are included so
+	// the per-backend view mirrors the aggregate view for that backend.
+	byBackend := make(map[string][]namespacedTool)
+	for _, nt := range allTools {
+		byBackend[nt.server] = append(byBackend[nt.server], nt)
+	}
+
+	// Tear down per-backend servers for backends no longer present.
+	g.serverMu.Lock()
+	for backend := range g.perBackendServer {
+		if _, stillPresent := byBackend[backend]; !stillPresent {
+			delete(g.perBackendServer, backend)
+			delete(g.backendRegistered, backend)
+		}
+	}
+	// Lazy-create per-backend servers for new backends (keyed by name).
+	for backend := range byBackend {
+		if _, exists := g.perBackendServer[backend]; !exists {
+			g.perBackendServer[backend] = mcp.NewServer(&mcp.Implementation{
+				Name:    backend,
+				Version: g.version,
+			}, nil)
+			g.backendRegistered[backend] = make(map[string]struct{})
+		}
+	}
+	g.serverMu.Unlock()
+
+	// Diff + register each backend's tools on its per-backend server. Any
+	// map reads for perBackendServer here are safe without RLock because we
+	// hold toolsMu (the only other mutator of the same maps is this same
+	// critical section) and the earlier Lock/Unlock above synchronized the
+	// membership changes.
+	for backend, tools := range byBackend {
+		srv := g.perBackendServer[backend]
+		reg := g.backendRegistered[backend]
+
+		// Build the set of unnamespaced names this backend currently exposes.
+		wantNames := make(map[string]struct{}, len(tools))
+		for _, nt := range tools {
+			wantNames[nt.name] = struct{}{}
+		}
+
+		// Remove tools no longer exposed by this backend.
+		var bRemove []string
+		for name := range reg {
+			if _, keep := wantNames[name]; !keep {
+				bRemove = append(bRemove, name)
+			}
+		}
+		if len(bRemove) > 0 {
+			srv.RemoveTools(bRemove...)
+			for _, name := range bRemove {
+				delete(reg, name)
+			}
+		}
+
+		// Register current tools on the per-backend server.
+		for _, nt := range tools {
+			g.registerToolForBackend(srv, nt)
+			reg[nt.name] = struct{}{}
+		}
+	}
+
+	g.logger.Info("tools rebuilt",
+		"count", len(allTools),
+		"removed", len(toRemove),
+		"backends", len(byBackend),
+	)
 }
 
 // namespacedTool holds info for a tool to be registered.
@@ -159,7 +271,63 @@ func (g *Gateway) registerTool(nt namespacedTool) {
 	}
 
 	// Use non-generic server.AddTool to avoid SDK schema generation.
-	g.server.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	g.aggregateServer.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var args map[string]any
+		if len(req.Params.Arguments) > 0 {
+			if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: "invalid arguments: " + err.Error()}},
+					IsError: true,
+				}, nil
+			}
+		}
+		result, err := g.router.Call(ctx, nt.namespaced, args)
+		if err != nil {
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
+				IsError: true,
+			}, nil
+		}
+		return result, nil
+	})
+}
+
+// registerToolForBackend registers a single tool on a per-backend MCP server
+// (Phase 16.1). This mirrors registerTool but:
+//   - the tool name is the BARE backend-local name (e.g. "echo"),
+//     not the aggregate-namespaced form ("context7__echo");
+//   - the description carries NO "[<backend>] " prefix, because the
+//     per-backend server already identifies the backend in its own
+//     Implementation.Name (visible to clients via serverInfo);
+//   - routing still uses nt.namespaced because g.router keys dispatch by
+//     the aggregate namespaced form regardless of which surface received
+//     the call.
+//
+// Synthetic meta-tools (consolidateExcess) are registered identically —
+// the meta-tool dispatcher resolves tool_name against the allowed set, and
+// the target backend is captured at registration time.
+func (g *Gateway) registerToolForBackend(target *mcp.Server, nt namespacedTool) {
+	schema := nt.inputSchema
+	if schema == nil {
+		schema = map[string]any{"type": "object"}
+	}
+
+	tool := &mcp.Tool{
+		Name:        nt.name, // unnamespaced on per-backend surface
+		Description: nt.description,
+		InputSchema: schema,
+	}
+
+	if nt.synthetic {
+		allowedSet := make(map[string]struct{}, len(nt.allowedTools))
+		for _, t := range nt.allowedTools {
+			allowedSet[t] = struct{}{}
+		}
+		target.AddTool(tool, g.makeMetaToolHandler(allowedSet, nt.server))
+		return
+	}
+
+	target.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var args map[string]any
 		if len(req.Params.Arguments) > 0 {
 			if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
@@ -197,7 +365,7 @@ func (g *Gateway) registerMetaTool(tool *mcp.Tool, nt namespacedTool) {
 	for _, t := range nt.allowedTools {
 		allowedSet[t] = struct{}{}
 	}
-	g.server.AddTool(tool, g.makeMetaToolHandler(allowedSet, nt.server))
+	g.aggregateServer.AddTool(tool, g.makeMetaToolHandler(allowedSet, nt.server))
 }
 
 // makeMetaToolHandler creates the dispatch handler closure for a meta-tool.
