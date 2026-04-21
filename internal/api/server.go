@@ -24,6 +24,7 @@ import (
 	"mcp-gateway/internal/health"
 	"mcp-gateway/internal/lifecycle"
 	"mcp-gateway/internal/models"
+	"mcp-gateway/internal/plugin"
 	"mcp-gateway/internal/proxy"
 
 	"github.com/go-chi/chi/v5"
@@ -47,6 +48,12 @@ type Server struct {
 	authToken   string // empty ⇔ authEnabled=false
 	authEnabled bool   // false only when --no-auth is set on the daemon CLI
 	version     string // populated for /api/v1/version (public endpoint)
+
+	// Claude Code plugin regen (Phase 16.2). pluginRegen and pluginDir are
+	// set via SetPluginRegen; when either is zero-valued, regen is a no-op
+	// (the plugin was not installed / discovery failed — not fatal).
+	pluginRegen *plugin.Regenerator
+	pluginDir   string
 
 	// listenerAddr records the bound listener address once ListenAndServe
 	// has successfully called net.Listen. Nil before that point. Used by
@@ -102,6 +109,69 @@ func (s *Server) UpdateConfig(cfg *models.Config) {
 	s.cfgMu.Lock()
 	s.cfg = cfg
 	s.cfgMu.Unlock()
+}
+
+// SetPluginRegen wires the Claude Code plugin regenerator into the API
+// server (Phase 16.2). When dir or regen is empty/nil, TriggerPluginRegen
+// becomes a no-op — the daemon continues to serve normally even without a
+// discovered plugin directory.
+//
+// The main daemon calls this once after NewServer: dir comes from
+// plugin.Discover, regen from plugin.NewRegenerator. Tests can leave it
+// unset; server_test.go does not exercise the plugin surface.
+func (s *Server) SetPluginRegen(dir string, regen *plugin.Regenerator) {
+	s.pluginDir = dir
+	s.pluginRegen = regen
+}
+
+// TriggerPluginRegen rebuilds the plugin's `.mcp.json` from the current
+// config (Phase 16.2). Best-effort: regen errors are logged but never
+// propagated to the caller — the mutation already succeeded against
+// the lifecycle manager and config file; plugin regen is a downstream
+// notification, not a precondition.
+//
+// Exposed publicly (not just called from REST handlers) so the daemon
+// can bootstrap the file once on startup and rebuild on config-watcher
+// reloads (PAL-TD-GAP1 + GAP2, 2026-04-21). Prior to this, mutation-only
+// triggers meant a fresh daemon with config-only management kept the
+// stub `.mcp.json`, and live edits to config.json never propagated to
+// the plugin surface.
+//
+// Holding no locks on entry so the caller can invoke this from within or
+// outside cfgMu critical sections; we take our own RLock here to build an
+// immutable snapshot (deep-copy) of each ServerConfig and release before
+// calling Regenerate (which does its own I/O and internal mutex
+// serialization).
+//
+// Deep-copy rationale (PAL-CR-H1, 2026-04-21): copying only pointers left
+// a race window after RUnlock — a concurrent handlePatchServer holding
+// cfgMu.Lock could do `*sc = scCopy`, torning the struct from an
+// unsynchronized reader (Regenerate dereferencing the same pointer).
+// Even though only `Disabled` is read in practice, Go's memory model
+// treats any unsynchronized concurrent read+write as a data race. Cloning
+// the value under RLock gives Regenerate a private, stable view.
+func (s *Server) TriggerPluginRegen() {
+	if s.pluginRegen == nil || s.pluginDir == "" {
+		return
+	}
+	s.cfgMu.RLock()
+	snapshot := make(map[string]*models.ServerConfig, len(s.cfg.Servers))
+	for name, sc := range s.cfg.Servers {
+		if sc == nil {
+			continue
+		}
+		clone := *sc // value copy — severs pointer aliasing with live cfg.Servers
+		snapshot[name] = &clone
+	}
+	s.cfgMu.RUnlock()
+
+	// Production: pass the default placeholder so Claude Code substitutes
+	// the gateway URL from userConfig at MCP-client runtime. This keeps
+	// the regenerated file portable across machines (different hosts,
+	// different ports).
+	if err := s.pluginRegen.Regenerate(s.pluginDir, snapshot, plugin.DefaultGatewayURLPlaceholder); err != nil {
+		s.logger.Warn("plugin regen failed", "error", err, "plugin_dir", s.pluginDir)
+	}
 }
 
 // Handler returns the chi router with all routes mounted.
@@ -600,6 +670,9 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 			s.gw.RebuildTools()
 		}
 	}
+	// T16.2.4: regen Claude Code plugin's .mcp.json (best-effort; any
+	// failure is logged but never surfaced to the REST client).
+	s.TriggerPluginRegen()
 
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "added"})
 }
@@ -621,6 +694,9 @@ func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 	if s.gw != nil {
 		s.gw.RebuildTools()
 	}
+	// T16.2.4: regen Claude Code plugin's .mcp.json after removal.
+	s.TriggerPluginRegen()
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 }
 
@@ -726,6 +802,11 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		// T16.2.4: disabled-flag flip changes which backends appear in
+		// the plugin's .mcp.json. env/header-only patches are invisible
+		// to the plugin surface (they only affect the backend process),
+		// so regen is gated specifically on the Disabled toggle.
+		s.TriggerPluginRegen()
 	} else if needsRestart {
 		// Restart server to pick up env/header changes (outside mutexes).
 		if err := s.lm.Restart(r.Context(), name); err != nil {

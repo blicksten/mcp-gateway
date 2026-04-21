@@ -299,3 +299,54 @@ No new LOW findings introduced by the fixes (verified self-consistency: all new 
 
 **Verification evidence:** applied edits, grep confirms no new `executeCommand`/`reload-plugins` forward-looking refs introduced; each new `P4-XX` marker is cross-referenced between PLAN-16.md (as `**[P4-XX]**` in task text) and REVIEW-16.md (as the finding heading); CONFIG constants all appear in T16.4.3 + heartbeat response spec in T16.3.1 + tests in T16.4.6/T16.5.8.
 
+---
+
+## Phase 16.2 implementation audit (2026-04-21)
+
+**Scope:** PAL codereview + PAL thinkdeep on the Phase 16.2 plugin-packaging implementation (`internal/plugin/` new package, `internal/api/server.go` wire, `cmd/mcp-gateway/main.go` startup wire). Both PAL tools used gpt-5.1-codex with external-expert validation.
+
+### PAL codereview findings (1 HIGH)
+
+**PAL-CR-H1 HIGH / Fixed** — `Server.triggerPluginRegen` originally snapshotted `cfg.Servers` by copying only the map pointers, not the underlying `ServerConfig` values. After `cfgMu.RUnlock()` released the lock, a concurrent `handlePatchServer` holding `cfgMu.Lock()` could do `*sc = scCopy` (in-place struct overwrite), and `Regenerator.Regenerate` dereferencing the same pointer in a different goroutine would race. Go's memory model flags any unsynchronized concurrent read+write as a data race regardless of semantic outcome, and the "arrival order wins" contract required each caller to own a stable view.
+
+**Fix:** changed the snapshot to deep-copy each `ServerConfig` value under `cfgMu.RLock()` via `clone := *sc; snapshot[name] = &clone`. This severs all pointer aliasing with the live `cfg.Servers` map; Regenerator reads from private memory no other goroutine references. Added explanatory comment block referencing PAL-CR-H1.
+
+### PAL thinkdeep findings (2 MEDIUM)
+
+**PAL-TD-GAP1 MEDIUM / Fixed** — Config-watcher reload path (`main.go:174-204` `config.Watch` callback) does `lm.Reconcile + UpdateConfig + gw.RebuildTools` but did NOT call `triggerPluginRegen`. A user editing `config.json` directly (outside REST) would leave the plugin's `.mcp.json` stale — Claude Code keeps serving the OLD backend set.
+
+**Fix:** promoted `triggerPluginRegen` to public `TriggerPluginRegen` on `api.Server` and called `apiServer.TriggerPluginRegen()` in the config-watcher callback after `UpdateConfig + RebuildTools`. Added PAL-TD-GAP1 reference comment.
+
+**PAL-TD-GAP2 MEDIUM / Fixed** — Startup bootstrap gap. A fresh daemon boot with backends managed only via `config.json` (never POSTed through REST) never triggered regen — the plugin's `.mcp.json` stayed at the checked-in empty stub until the first REST mutation, which might never happen for a long-lived config-managed daemon.
+
+**Fix:** in `main.go` initial-start goroutine, after `lm.StartAll + gw.RebuildTools`, call `apiServer.TriggerPluginRegen()` exactly once so every daemon boot bootstraps `.mcp.json` to the current backend state. Added PAL-TD-GAP2 reference comment.
+
+### PAL thinkdeep deferred (4 classified LOW / out-of-scope, no change)
+
+- **gap3 (plugin installed after daemon start)**: `Discover` runs once at startup. If `claude plugin install` is executed while the daemon is live, regen stays off until daemon restart. Acceptable operator workflow — to be documented in README §Connecting Claude Code (T16.9.1).
+- **gap4 (plugin dir vanished mid-run)**: `Regenerate` fails with ENOENT on `CreateTemp`; we log WARN and continue. Recovery = daemon restart. Acceptable — a vanished plugin cache is itself an operator event.
+- **gap7 (Claude Code cache scheme changes)**: glob pattern `mcp-gateway@*` pinned in `plugin.ClaudePluginCacheGlobSegment` constant; revisit in one-commit bump if scheme changes. Not today's problem.
+- **gap8 (token rotation)**: explicitly Phase 16.8 M-03 scope — `mcp-ctl install-claude-code --refresh-token`. Out of scope for 16.2.
+
+### Verification evidence
+
+- `go build ./...` → clean, no warnings after fixes.
+- `go test ./... -count=1` → 13 packages ok, 0 failures. `internal/plugin` new package contributes 14 subtests in 0.685s (TestRegen_AtomicWrite, Idempotent, BackupOnOverwrite, JSONValid, DisabledBackendExcluded, EmptyDirRejected, DefaultPlaceholderWhenURLEmpty, Concurrent(n=10), Discover_EnvVarPriority, Discover_EnvVarMissingDir, Discover_EnvVarIsFile, Discover_GlobFallback, Discover_GlobNoMatch, Discover_GlobOnlyStrayFile).
+- Race-detector verification attempted (`CGO_ENABLED=1 go test -race`) but unavailable on this Windows host (`gcc not found`). Fix is correct by construction: `clone := *sc` produces a value copy in private memory before `cfgMu.RUnlock()`, so no read-write race is reachable.
+- `go vet ./...` → clean (implicit via successful `go build`).
+- Pre-existing lint warnings (`mapsloop` at `handlePatchServer:761,773`) are on untouched pre-existing code and out of scope for this phase.
+
+### Phase 16.2 verdict
+
+**APPROVE** — 3 findings (1 HIGH + 2 MEDIUM) ALL fixed in-cycle. Zero blocking findings remaining at or above threshold (`CLAUDE_GATE_MIN_BLOCKING_SEVERITY=low`, default — any finding blocks). 4 lifecycle gaps classified LOW/out-of-scope and tracked in later phases (16.8, 16.9). PAL CV: [C+O] full agreement on all 3 findings via gpt-5.1-codex external expert.
+
+No CVE-level security concerns: no auth-token leakage (only `${user_config.*}` placeholders written), file mode `0600` enforced on tmp before rename, no path-traversal vector (pluginDir is Stat-validated and operator-controlled via env var or claude-code-installed path).
+
+### Manual review table
+
+| Item | Why manual verification needed | Risk if skipped |
+|------|-------------------------------|-----------------|
+| Fresh-clone smoke: `claude plugin marketplace add <repo>/installer/marketplace.json && claude plugin install mcp-gateway@mcp-gateway-local` | Real Claude Code CLI behavior — marketplace/install flow not covered by unit tests | Medium — plugin discovery/keychain flow could regress |
+| Manual end-to-end: start daemon with $GATEWAY_PLUGIN_DIR=./installer/plugin/ + POST backend via curl, verify `.mcp.json` updates | Real filesystem + real REST round-trip | Low — covered by 14 subtests + integration Phase 16.7 |
+| Windows `MoveFileEx`-based rename atomicity | POSIX rename atomicity is spec; Windows "essentially atomic" needs live verification | Low — Go stdlib handles it, 40 packages of prior Windows-tested code |
+

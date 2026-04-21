@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"mcp-gateway/internal/health"
 	"mcp-gateway/internal/lifecycle"
 	"mcp-gateway/internal/models"
+	"mcp-gateway/internal/plugin"
 	"mcp-gateway/internal/proxy"
 
 	"golang.org/x/sync/errgroup"
@@ -124,6 +126,24 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 	monitor := health.NewMonitor(lm, time.Duration(cfg.Gateway.PingInterval), logger)
 	apiServer := api.NewServer(lm, gw, monitor, cfg, configPath, logger, authCfg, version)
 
+	// Phase 16.2: Claude Code plugin regen wiring. Discovery is best-effort
+	// — a missing plugin directory is not a daemon-startup failure, it
+	// simply leaves regen as a no-op on every mutation.
+	pluginDir, err := plugin.Discover()
+	switch {
+	case err == nil:
+		apiServer.SetPluginRegen(pluginDir, plugin.NewRegenerator())
+		logger.Info("plugin regen enabled", "plugin_dir", pluginDir)
+	case errors.Is(err, plugin.ErrPluginDirNotFound):
+		logger.Info("plugin regen disabled", "reason", "plugin directory not discovered",
+			"hint", "install the plugin via `claude plugin install` or set $GATEWAY_PLUGIN_DIR")
+	default:
+		// Non-nil error that is NOT ErrPluginDirNotFound — e.g. env var
+		// points at a non-existent path. Log at warn so the operator
+		// notices, but still start the daemon.
+		logger.Warn("plugin discovery failed", "error", err)
+	}
+
 	// Context with signal handling.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -136,6 +156,12 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 			logger.Warn("some backends failed to start", "error", err)
 		}
 		gw.RebuildTools()
+		// Phase 16.2 (PAL-TD-GAP2): bootstrap plugin .mcp.json on startup.
+		// Without this, a fresh daemon whose backends are managed only via
+		// config.json (never POSTed through REST) leaves the plugin with
+		// the empty checked-in stub until the first REST mutation — which
+		// may never happen.
+		apiServer.TriggerPluginRegen()
 		return nil
 	})
 
@@ -180,6 +206,11 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 			gw.UpdateConfig(newCfg)
 			apiServer.UpdateConfig(newCfg)
 			gw.RebuildTools()
+			// Phase 16.2 (PAL-TD-GAP1): config.json edited outside REST
+			// also needs to propagate into the plugin's .mcp.json. Without
+			// this, `claude plugin install`-installed clients serve a
+			// stale view after every file-level config edit.
+			apiServer.TriggerPluginRegen()
 			logger.Info("config reloaded")
 		}, logger)
 	})

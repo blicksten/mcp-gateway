@@ -1,0 +1,21 @@
+{
+  "name": "mcp-gateway",
+  "version": "1.6.0",
+  "description": "MCP Gateway — aggregates and manages multiple MCP servers behind a single Bearer-authed endpoint",
+  "author": {
+    "name": "Stanislav Naumov",
+    "url": "https://github.com/blicksten"
+  },
+  "repository": "https://github.com/blicksten/mcp-gateway",
+  "license": "MIT",
+  "userConfig": {
+    "gateway_url": {
+      "description": "Gateway base URL (default http://127.0.0.1:8765). No trailing slash.",
+      "sensitive": false
+    },
+    "auth_token": {
+      "description": "Bearer token from ~/.mcp-gateway/auth.token. Stored in OS keychain when sensitive=true.",
+      "sensitive": true
+    }
+  }
+}

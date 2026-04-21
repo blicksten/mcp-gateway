@@ -1,0 +1,11 @@
+{
+  "name": "mcp-gateway-local",
+  "version": "1.0.0",
+  "description": "Local marketplace for installing the mcp-gateway Claude Code plugin from a checked-out copy of this repo.",
+  "plugins": [
+    {
+      "name": "mcp-gateway",
+      "source": "./plugin/"
+    }
+  ]
+}

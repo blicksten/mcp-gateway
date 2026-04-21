@@ -210,7 +210,7 @@ If a future re-spike against a newer Claude Code version FAILS Alt-E:
 
 ### Tasks
 
-- [ ] T16.2.1 — Create `installer/plugin/` directory structure:
+- [x] T16.2.1 — Create `installer/plugin/` directory structure:
   ```
   installer/plugin/
   ├── .claude-plugin/
@@ -219,7 +219,7 @@ If a future re-spike against a newer Claude Code version FAILS Alt-E:
   └── README.md             # plugin user docs
   ```
 
-- [ ] T16.2.2 — Author `installer/plugin/.claude-plugin/plugin.json`:
+- [x] T16.2.2 — Author `installer/plugin/.claude-plugin/plugin.json`:
   ```json
   {
     "name": "mcp-gateway",
@@ -242,7 +242,7 @@ If a future re-spike against a newer Claude Code version FAILS Alt-E:
   ```
   Notes: `sensitive: true` stores in OS keychain per Claude Code plugins-reference §userConfig. Never inline `mcpServers` in `plugin.json` — Issue #16143 drops it.
 
-- [ ] T16.2.3 — Implement `internal/plugin/regen.go`:
+- [x] T16.2.3 — Implement `internal/plugin/regen.go`:
   ```go
   type Regenerator struct {
       mu sync.Mutex // [REVIEW-16 M-02] serialize concurrent regens
@@ -262,13 +262,15 @@ If a future re-spike against a newer Claude Code version FAILS Alt-E:
   - **[REVIEW-16 M-02]** Serialize concurrent callers via `Regenerator.mu`. Arrival order at gateway = application order. Prevents lost-update race.
   - Use `${user_config.auth_token}` placeholder for Bearer header (Claude Code substitutes at runtime).
 
-- [ ] T16.2.4 — Wire `RegenerateMCPJSON` into gateway lifecycle:
-  - Call on `POST /api/v1/servers` (backend added) — api/server.go:531.
-  - Call on `DELETE /api/v1/servers/{name}` — api/server.go:553.
-  - Call on `PATCH /api/v1/servers/{name}` if `disabled` flag changes (disabled backend should drop out of plugin view).
+- [x] T16.2.4 — Wire `TriggerPluginRegen` into gateway lifecycle:
+  - Call on `POST /api/v1/servers` (backend added) — api/server.go:handleAddServer after RebuildTools.
+  - Call on `DELETE /api/v1/servers/{name}` — api/server.go:handleRemoveServer after RebuildTools.
+  - Call on `PATCH /api/v1/servers/{name}` if `disabled` flag changes (disabled backend should drop out of plugin view). Env/header-only patches skipped since they don't affect plugin surface.
+  - **[PAL-TD-GAP2]** Call once on daemon startup after `lm.StartAll + gw.RebuildTools` so fresh daemons bootstrap `.mcp.json` even without a REST mutation.
+  - **[PAL-TD-GAP1]** Call on config-watcher reload after `UpdateConfig + gw.RebuildTools` so config.json edits outside REST propagate to the plugin file.
   - Idempotent: no-op if generated content matches existing file.
 
-- [ ] T16.2.5 — Plugin directory discovery. Gateway needs to know WHERE to write `.mcp.json`. Two paths:
+- [x] T16.2.5 — Plugin directory discovery. Gateway needs to know WHERE to write `.mcp.json`. Two paths:
   - **Dev path** (from repo): `$GATEWAY_PLUGIN_DIR` env var points to `installer/plugin/`.
   - **Installed path** (post `claude plugin install`): `~/.claude/plugins/cache/mcp-gateway@<marketplace>/`.
   - Implement `internal/plugin/discover.go` with `FindPluginDir() (string, error)` that walks:
@@ -276,7 +278,7 @@ If a future re-spike against a newer Claude Code version FAILS Alt-E:
     2. `~/.claude/plugins/cache/mcp-gateway@*/` (glob)
     3. Return nil + user-friendly error if neither found (regen is skipped, not fatal).
 
-- [ ] T16.2.6 — Author `installer/marketplace.json` (local marketplace for one-command install):
+- [x] T16.2.6 — Author `installer/marketplace.json` (local marketplace for one-command install):
   ```json
   {
     "name": "mcp-gateway-local",
@@ -288,7 +290,7 @@ If a future re-spike against a newer Claude Code version FAILS Alt-E:
   ```
   README documents: `claude plugin marketplace add <repo-path>/installer/marketplace.json && claude plugin install mcp-gateway@mcp-gateway-local`.
 
-- [ ] T16.2.7 — Add `internal/plugin/regen_test.go`:
+- [x] T16.2.7 — Add `internal/plugin/regen_test.go` — 14 subtests (added Concurrent race serialization + EmptyDirRejected + DefaultPlaceholderWhenURLEmpty + per-glob-branch Discover tests beyond the 6 in plan):
   - `TestRegen_AtomicWrite` — write is visible only after rename (partial file never observable).
   - `TestRegen_Idempotent` — second call with same backends produces identical output.
   - `TestRegen_BackupOnOverwrite` — `.mcp.json.bak` contains previous content.
@@ -297,7 +299,7 @@ If a future re-spike against a newer Claude Code version FAILS Alt-E:
   - `TestRegen_DisabledBackendExcluded` — disabled servers don't appear in output.
   - Cross-platform: use `t.TempDir()` + `filepath.Join` everywhere; no raw slashes.
 
-- [ ] T16.2.GATE: `go test ./internal/plugin/...` PASS + `mcp__pal__codereview` on plugin package zero errors + `mcp__pal__thinkdeep` on plugin lifecycle edge cases zero errors.
+- [x] T16.2.GATE: **PASSED 2026-04-21** — `go test ./...` PASS (13 packages, 573+14=587 tests, 0 failures) + `mcp__pal__codereview` (gpt-5.1-codex, external expert) 1 HIGH finding `PAL-CR-H1` (snapshot pointer aliasing) FIXED IN-CYCLE via deep-copy under `cfgMu.RLock` + `mcp__pal__thinkdeep` (gpt-5.1-codex, external expert) 2 MEDIUM findings `PAL-TD-GAP1` (config-reload) + `PAL-TD-GAP2` (startup bootstrap) FIXED IN-CYCLE via public `TriggerPluginRegen` + wired at both sites in main.go. Final: zero findings at/above threshold. 4 other gaps (plugin-installed-post-start, plugin-dir-vanished, cache-scheme-change, token-rotation) classified LOW/out-of-scope — deferred to 16.7 integration + 16.8 CLI + 16.9 docs.
 
 ### Files
 
@@ -307,8 +309,9 @@ If a future re-spike against a newer Claude Code version FAILS Alt-E:
 - `installer/marketplace.json` (new)
 - `internal/plugin/regen.go` (new)
 - `internal/plugin/discover.go` (new)
-- `internal/plugin/regen_test.go` (new)
-- `internal/api/server.go` (modify: call regen on mutations)
+- `internal/plugin/regen_test.go` (new, 14 subtests)
+- `internal/api/server.go` (modify: Server.pluginRegen+pluginDir fields, SetPluginRegen setter, public TriggerPluginRegen with deep-copy snapshot under cfgMu.RLock, calls from handleAddServer/handleRemoveServer/handlePatchServer-on-Disabled-toggle)
+- `cmd/mcp-gateway/main.go` (modify: plugin.Discover at startup, apiServer.TriggerPluginRegen called after initial lm.StartAll and after config-watcher reload)
 
 ### Rollback
 
