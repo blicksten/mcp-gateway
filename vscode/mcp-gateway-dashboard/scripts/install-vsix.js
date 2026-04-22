@@ -37,14 +37,12 @@ function candidates() {
 		list.push(path.join(localAppData, 'Programs', 'Microsoft VS Code', 'bin', 'code.cmd'));
 		// VSCode system-install
 		list.push(path.join(programFiles, 'Microsoft VS Code', 'bin', 'code.cmd'));
-		// Cursor user-install
-		list.push(path.join(localAppData, 'Programs', 'cursor', 'resources', 'app', 'bin', 'cursor.cmd'));
-		// Cursor from D: drive (user has this per PATH snapshot)
-		list.push('D:\\cursor\\resources\\app\\bin\\cursor.cmd');
+		// VSCode Insiders (some dev setups)
+		list.push(path.join(localAppData, 'Programs', 'Microsoft VS Code Insiders', 'bin', 'code-insiders.cmd'));
 	} else {
 		// POSIX: rely on PATH — `code` CLI wrapper is a shell script there.
 		list.push('code');
-		list.push('cursor');
+		list.push('code-insiders');
 	}
 
 	return list;
