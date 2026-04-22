@@ -195,6 +195,7 @@ func runValidation(ctx context.Context, command string, args []string, cwd strin
 	var results []validateResult
 
 	execCmd := exec.CommandContext(ctx, command, args...)
+	hideChildWindow(execCmd) // Windows: CREATE_NO_WINDOW; no-op elsewhere
 	if cwd != "" {
 		execCmd.Dir = cwd
 	}
