@@ -114,6 +114,11 @@ func newRootCmd() *cobra.Command {
 
 	root.AddCommand(newValidateCmd())
 
+	// Phase 16.8 — Claude Code integration bootstrap.
+	installCCCmd := newInstallClaudeCodeCmd()
+	installCCCmd.Annotations = map[string]string{skipClientAnnotation: "true"}
+	root.AddCommand(installCCCmd)
+
 	versionCmd := newVersionCmd()
 	versionCmd.Annotations = map[string]string{skipClientAnnotation: "true"}
 	root.AddCommand(versionCmd)
