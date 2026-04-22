@@ -53,6 +53,7 @@ export class DaemonManager {
 				this.child = this.spawnFn(cmd, [], {
 					stdio: ['ignore', 'pipe', 'pipe'],
 					detached: false,
+					windowsHide: true,
 				});
 			} catch (err) {
 				this.output.appendLine(`[daemon] Failed to spawn: ${err instanceof Error ? err.message : String(err)}`);

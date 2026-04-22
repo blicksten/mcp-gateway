@@ -64,6 +64,7 @@ export function runPatchInstaller(opts: InstallerOptions): Promise<InstallerResu
 				GATEWAY_AUTH_TOKEN: opts.gatewayAuthToken,
 			},
 			stdio: ['ignore', 'pipe', 'pipe'],
+			windowsHide: true,
 		});
 		const stdoutChunks: Buffer[] = [];
 		const stderrChunks: Buffer[] = [];

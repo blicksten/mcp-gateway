@@ -47,9 +47,14 @@ type commandHandle interface {
 }
 
 // realCommand is the production commandRunner — thin wrapper around
-// os/exec.Command.
+// os/exec.Command. On Windows, hideChildWindow is applied so `claude`,
+// `apply-mcp-gateway.ps1`, and `curl` don't flash a console window when
+// mcp-ctl is invoked from a GUI context (e.g. the VSCode dashboard
+// [Activate for Claude Code] button).
 func realCommand(name string, args ...string) commandHandle {
-	return exec.Command(name, args...) // #nosec G204 — args are hard-coded or operator-provided subcommands
+	cmd := exec.Command(name, args...) // #nosec G204 — args are hard-coded or operator-provided subcommands
+	hideChildWindow(cmd)
+	return cmd
 }
 
 // installer is the subcommand state. Exposed for tests.
