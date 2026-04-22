@@ -1,4 +1,4 @@
-.PHONY: test test-integration-windows help
+.PHONY: test test-integration-windows test-integration-phase16 help
 
 # Default Go test path — unit + structural tiers. Covers the DACL
 # SHAPE on Windows (TestApplyTokenFilePerms_Windows_Structural) but
@@ -35,7 +35,15 @@ test-integration-windows:
 	}
 	go test -tags integration -run TestTokenPerms_Integration_Windows ./internal/auth/ -v
 
+# Phase 16.7 — full-chain Claude Code integration tests. Builds the stub
+# MCP server on the fly (buildMockServer helper), starts the gateway with
+# plugin regen + patch state wired, and exercises the patch lifecycle
+# end-to-end. No external accounts or fixtures required.
+test-integration-phase16:
+	go test -tags integration -run 'TestIntegration_Phase16|TestIntegration_CORS' ./internal/api/... -v
+
 help:
 	@echo "Targets:"
-	@echo "  test                       - run unit + structural tests (all platforms)"
-	@echo "  test-integration-windows   - run Windows DACL enforcement test (requires MCPGW_TEST_USER/PASSWORD; see Makefile header)"
+	@echo "  test                         - run unit + structural tests (all platforms)"
+	@echo "  test-integration-windows     - run Windows DACL enforcement test (requires MCPGW_TEST_USER/PASSWORD; see Makefile header)"
+	@echo "  test-integration-phase16     - run Phase 16 Claude Code E2E integration tests (Linux/macOS/Windows)"
