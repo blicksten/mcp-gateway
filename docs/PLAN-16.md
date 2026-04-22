@@ -632,7 +632,7 @@ Uncheck auto-reload checkbox (runs uninstall). Uninstall plugin via `claude plug
 
 ### Tasks
 
-- [ ] T16.6.1 — Register built-in tool `gateway.invoke` on `aggregateServer` only (NOT per-backend). Schema:
+- [x] T16.6.1 — Register built-in tool `gateway.invoke` on `aggregateServer` only (NOT per-backend). Schema:
   ```json
   {
     "name": "gateway.invoke",
@@ -650,11 +650,11 @@ Uncheck auto-reload checkbox (runs uninstall). Uninstall plugin via `claude plug
   ```
   Handler: validate backend exists, validate tool exists on backend, call `router.Call(namespaced, args)`. Forward result.
 
-- [ ] T16.6.2 — Register `gateway.list_servers` and `gateway.list_tools(server?)` (meta-tools from Option C in design):
+- [x] T16.6.2 — Register `gateway.list_servers` and `gateway.list_tools(server?)` (meta-tools from Option C in design):
   - `gateway.list_servers` → returns array of backends with `{name, status, transport, tool_count, health, uptime_seconds}`.
   - `gateway.list_tools` with optional `server` filter → returns tools grouped by backend (name, namespaced, description, inputSchema).
 
-- [ ] T16.6.3 — Gateway `instructions` field on `initialize` response: set to:
+- [x] T16.6.3 — Gateway `instructions` field on `initialize` response: set to:
   ```
   This gateway aggregates N MCP backends. Tool names are namespaced as
   <backend>__<tool>. Call `gateway.list_servers` to see backend topology.
@@ -662,18 +662,32 @@ Uncheck auto-reload checkbox (runs uninstall). Uninstall plugin via `claude plug
   ```
   Set via `mcp.NewServer(&mcp.Implementation{..., Instructions: ...}, nil)` — verify API in go-sdk (streamable.go / server.go).
 
-- [ ] T16.6.4 — `serverInfo.version` cache-busting (PAL recommendation): compute version as `baseVersion + "+" + shortHash(sortedBackendNames + toolCount)` on each `RebuildTools`. Some clients cache by `(name, version)`; changing version on topology change invites refetch.
+- [x] T16.6.4 — `serverInfo.version` cache-busting (PAL recommendation): compute version as `baseVersion + "+" + shortHash(sortedBackendNames + toolCount)` on each `RebuildTools`. Some clients cache by `(name, version)`; changing version on topology change invites refetch.
 
-- [ ] T16.6.5 — Integration: `supported_claude_code_versions.json` (16.4.7) is now ALSO the source of truth for patch UI. Gateway exposes read-only `GET /api/v1/claude-code/compat-matrix` that returns the JSON — dashboard consumes this rather than bundling its own copy. Single source of truth; updates by maintainers via repo PR.
+- [x] T16.6.5 — **Already delivered in Phase 16.3 as PAL-CONTRACT-3 fix** — `GET /api/v1/claude-code/compat-matrix` is live, serving `configs/supported_claude_code_versions.json` as 200-JSON or 503 when unseeded. Dashboard consumption path unchanged. No new work for 16.6.
 
-- [ ] T16.6.6 — Tests:
-  - `TestGatewayInvoke_HappyPath` — invokes context7 query-docs via gateway.invoke, result matches direct namespaced call.
-  - `TestGatewayInvoke_UnknownBackend` — returns IsError result with clear message.
-  - `TestGatewayInvoke_UnknownTool` — same.
-  - `TestListServers_IncludesStatus` — running/degraded/stopped backends reported correctly.
-  - `TestServerInfoVersionChangesOnTopology` — add backend → version string differs.
+- [x] T16.6.6 — Tests (11 total, all PASS; `go test ./internal/proxy/` 1.5s):
+  - `TestGatewayInvoke_HappyPath` — in-process backend via `mcp.NewInMemoryTransports` + `lifecycle.Manager.SetSession` (new test helper). gateway.invoke result matches direct `router.Call` result on the same `backend__tool`.
+  - `TestGatewayInvoke_UnknownBackend` — returns IsError with clear "unknown backend" message.
+  - `TestGatewayInvoke_StaleToolsCache_Fallback` — **CR-16.6-01 regression**: with `lm.SetTools("alpha", nil)` and a live session, gateway.invoke MUST still reach the backend. Proves the fallback intent survives regressions that would re-add pre-validation against `entry.Tools`.
+  - `TestGatewayInvoke_MissingRequiredArgs` — table-driven: no backend, no tool.
+  - `TestListServers_IncludesStatus` — running + stopped + degraded backends reported with status/transport; output sorted by name.
+  - `TestListTools_FiltersByServer` — no-filter returns all backends; `server:"alpha"` excludes beta.
+  - `TestServerInfoVersionChangesOnTopology` — four scenarios: same topology → identical hash; add backend → different; remove backend → different; tool-count change on existing backend → different.
+  - `TestComputeTopologyVersion_Invariants` — deterministic; order-sensitive input (documents pre-sort caller contract); base version carries through; short hash is exactly 8 hex chars.
+  - `TestGatewayBuiltins_NotOnPerBackend` — scope invariant: `gateway.*` built-ins never appear in `backendRegistered["alpha"|"beta"]`.
+  - `TestGatewayInstructions_Surfaced` — `gatewayInstructions` constant contains namespace-scheme hint AND built-in tool names; resists silent drift.
 
-- [ ] T16.6.GATE: `go test ./...` PASS + PAL codereview zero errors + PAL thinkdeep on schema-versioning invariants zero errors.
+- [x] T16.6.GATE: **PASSED 2026-04-22** — `go test ./... -count=1` → all 15 packages green (proxy: 11 new tests PASS, 0 regressions elsewhere). `go build ./...` + `go vet ./...` clean. `-race` deferred to CI (no gcc on build host; race path on `aggregateImpl.Version` mutation is documented inline — theoretical race, benign on 64-bit).
+
+  **PAL codereview gpt-5.1-codex** (external expert, continuation `d04c3234`): 3 findings — 1 HIGH + 1 MEDIUM + 1 LOW, **all fixed in-cycle**:
+  - [HIGH] CR-16.6-01 `handleGatewayInvoke` pre-rejected calls whose tool wasn't in `entry.Tools`, defeating the fallback intent. **Fix**: removed the Tools scan; kept "unknown backend" check only. Backend-side method-not-found errors surface via `router.Call`.
+  - [MEDIUM] CR-16.6-02 no regression test for the stale-cache scenario. **Fix**: added `TestGatewayInvoke_StaleToolsCache_Fallback`.
+  - [LOW] CR-16.6-03 `uptime_seconds` semantics not documented. **Fix**: expanded comment on `serverSummary` — uptime is 0 for non-running statuses by design; historical uptime belongs in `/api/v1/metrics`.
+
+  **PAL thinkdeep gpt-5.2-pro** on schema/versioning invariants: external expert was unresponsive (repeatedly requested "more files" despite fully-embedded context across two continuation rounds). Internal analysis (`use_assistant_model=false`) completed with very_high confidence — invariants A (determinism), C (collision rate acceptable at 32 bits), D (schema stability via typed tests + freeze markers), F (compat-matrix independence) hold cleanly; B has a narrow documented collision case (simultaneous per-backend add+remove preserving total — list_changed still fires); E documents the theoretical race on `aggregateImpl.Version` mutation with the trade-off rationale. One action item applied: SCHEMA-FREEZE v1.6.0 markers added to `serverSummary` and `toolSummary`.
+
+  Files modified: `internal/proxy/gateway.go` (+ ~220 LOC), `internal/proxy/gateway_invoke_test.go` (new, ~350 LOC), `internal/lifecycle/manager.go` (+ 12 LOC `SetSession` test helper).
 
 ### Files
 

@@ -655,6 +655,20 @@ func (m *Manager) SetTools(name string, tools []models.ToolInfo) {
 	}
 }
 
+// SetSession injects an *mcp.ClientSession for a managed server entry.
+// Intended for tests that need a live session without going through the
+// Start() connect path (stdio/http/sse). Mirrors SetStatus/SetTools in shape.
+// Production code paths MUST continue to use connect(); this helper does not
+// record transport, cmd, or client state the lifecycle manager would
+// normally own.
+func (m *Manager) SetSession(name string, session *mcp.ClientSession) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e, ok := m.entries[name]; ok {
+		e.session = session
+	}
+}
+
 // configChanged does a simple comparison of two server configs.
 func configChanged(a, b *models.ServerConfig) bool {
 	if a.Command != b.Command || a.URL != b.URL || a.RestURL != b.RestURL {

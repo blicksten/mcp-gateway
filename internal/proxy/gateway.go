@@ -4,13 +4,17 @@ package proxy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"mcp-gateway/internal/lifecycle"
@@ -48,6 +52,15 @@ type Gateway struct {
 	perBackendServer map[string]*mcp.Server
 	serverMu         sync.RWMutex // guards perBackendServer map mutations
 
+	// Phase 16.6 cache-busting: aggregateImpl is the Implementation we handed
+	// to mcp.NewServer; the SDK stores the pointer (server.go:1463 reads
+	// s.impl on initialize). Mutating aggregateImpl.Version is observable by
+	// fresh client sessions, allowing topology-driven refetch. versionMu
+	// guards our own writes; see RebuildTools for the rationale on why SDK
+	// read-side locking is not attempted.
+	aggregateImpl *mcp.Implementation
+	versionMu     sync.RWMutex
+
 	// registeredTools tracks currently-registered tool names on aggregateServer
 	// (keyed by namespaced name). backendRegistered tracks per-backend
 	// unnamespaced tool names, outer map keyed by backend name.
@@ -73,8 +86,20 @@ func New(cfg *models.Config, lm *lifecycle.Manager, version string, logger *slog
 		backendRegistered: make(map[string]map[string]struct{}),
 	}
 	g.aggregateServer = g.buildMCPServer()
+	g.registerGatewayBuiltins()
 	return g
 }
+
+// gatewayInstructions is surfaced to MCP clients via the initialize response
+// (Phase 16.6 T16.6.3). It tells the client how tool names are namespaced and
+// which built-in fallback tools are available when a backend's concrete tools
+// are not yet visible (e.g. after a just-added backend whose tools list is
+// still being fetched). Kept terse because MCP clients feed this directly to
+// an LLM — the 1–2 sentence shape matches the rest of the tool descriptions.
+const gatewayInstructions = "This gateway aggregates multiple MCP backends. " +
+	"Tool names are namespaced as <backend>__<tool>. " +
+	"Call `gateway.list_servers` to see backend topology. " +
+	"Use `gateway.invoke` to call any backend tool when the list is stale."
 
 // Server returns the aggregate MCP server (unchanged API for HTTP/SSE mounts
 // at /mcp and /sse). This is the flattened view with namespaced tool names.
@@ -106,13 +131,254 @@ func (g *Gateway) UpdateConfig(cfg *models.Config) {
 	g.cfgMu.Unlock()
 }
 
-// buildMCPServer creates the MCP server with tool aggregation.
+// buildMCPServer creates the MCP server with tool aggregation. The
+// Implementation pointer is retained on Gateway so RebuildTools can mutate
+// Version for cache-busting on topology change (Phase 16.6 T16.6.4).
+// Instructions is wired via ServerOptions so the aggregate initialize
+// response carries guidance on the namespacing scheme and built-in fallbacks
+// (Phase 16.6 T16.6.3).
 func (g *Gateway) buildMCPServer() *mcp.Server {
-	server := mcp.NewServer(&mcp.Implementation{
+	impl := &mcp.Implementation{
 		Name:    "mcp-gateway",
 		Version: g.version,
-	}, nil)
+	}
+	g.aggregateImpl = impl
+	server := mcp.NewServer(impl, &mcp.ServerOptions{
+		Instructions: gatewayInstructions,
+	})
 	return server
+}
+
+// registerGatewayBuiltins wires the Phase 16.6 built-in tools onto the
+// aggregate server only. These tools are NOT registered on per-backend
+// servers because per-backend endpoints (mounted at /mcp/{backend}) already
+// expose exactly that backend's tools unnamespaced — aggregate-wide fallbacks
+// have no meaning there.
+//
+//   - gateway.invoke        — universal fallback invoker for any backend tool
+//   - gateway.list_servers  — runtime topology snapshot
+//   - gateway.list_tools    — tools grouped by backend (optional server filter)
+//
+// Called once from New(). RebuildTools does NOT re-register these (they are
+// stable across topology changes); only backend-supplied tools are rebuilt.
+func (g *Gateway) registerGatewayBuiltins() {
+	g.aggregateServer.AddTool(&mcp.Tool{
+		Name:        "gateway.invoke",
+		Description: "[gateway] Universal fallback invoker. Call any backend tool by name. Use when specific tools aren't yet visible (e.g. recently added).",
+		InputSchema: map[string]any{
+			"type":     "object",
+			"required": []string{"backend", "tool"},
+			"properties": map[string]any{
+				"backend": map[string]any{"type": "string", "description": "Backend server name"},
+				"tool":    map[string]any{"type": "string", "description": "Tool name on that backend"},
+				"args":    map[string]any{"type": "object", "description": "Arguments for the tool"},
+			},
+		},
+	}, g.handleGatewayInvoke)
+
+	g.aggregateServer.AddTool(&mcp.Tool{
+		Name:        "gateway.list_servers",
+		Description: "[gateway] List all configured backend servers with runtime status, transport, tool count, and uptime.",
+		InputSchema: map[string]any{"type": "object"},
+	}, g.handleGatewayListServers)
+
+	g.aggregateServer.AddTool(&mcp.Tool{
+		Name:        "gateway.list_tools",
+		Description: "[gateway] List tools grouped by backend. Optionally filter by server name.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"server": map[string]any{"type": "string", "description": "Optional backend name filter"},
+			},
+		},
+	}, g.handleGatewayListTools)
+}
+
+// errToolResult returns an MCP tool result carrying the given error message,
+// with IsError set. The MCP contract lets a tool report a domain-level failure
+// without tripping a transport-level error.
+func errToolResult(msg string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: msg}},
+		IsError: true,
+	}
+}
+
+// textToolResult wraps a JSON-serializable payload as a text content result.
+func textToolResult(v any) (*mcp.CallToolResult, error) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return errToolResult("marshal: " + err.Error()), nil
+	}
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: string(body)}},
+	}, nil
+}
+
+// gatewayInvokeArgs mirrors the gateway.invoke inputSchema.
+type gatewayInvokeArgs struct {
+	Backend string         `json:"backend"`
+	Tool    string         `json:"tool"`
+	Args    map[string]any `json:"args"`
+}
+
+// handleGatewayInvoke implements gateway.invoke: validates that the backend
+// exists, then routes through the shared router.Call so the same namespace
+// splitting + session resolution path is used as for namespaced calls.
+//
+// Deliberately does NOT validate `tool` against entry.Tools: the whole point
+// of gateway.invoke is a fallback when the aggregate tools/list is stale
+// (backend just added, refresh not yet propagated to Claude Code). Rejecting
+// the call in that window would defeat the fallback. The backend itself
+// returns a clear error if the tool doesn't exist (method-not-found), which
+// router.Call surfaces as an IsError result. Backend existence is still
+// checked here so the caller gets a gateway-level "unknown backend" message
+// rather than an opaque "no active session" from the router.
+func (g *Gateway) handleGatewayInvoke(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var args gatewayInvokeArgs
+	if len(req.Params.Arguments) > 0 {
+		if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+			return errToolResult("invalid arguments: " + err.Error()), nil
+		}
+	}
+	if args.Backend == "" {
+		return errToolResult("backend argument is required"), nil
+	}
+	if args.Tool == "" {
+		return errToolResult("tool argument is required"), nil
+	}
+	if _, ok := g.lm.Entry(args.Backend); !ok {
+		return errToolResult(fmt.Sprintf("unknown backend %q", args.Backend)), nil
+	}
+
+	namespaced := g.router.NamespacedTool(args.Backend, args.Tool)
+	result, err := g.router.Call(ctx, namespaced, args.Args)
+	if err != nil {
+		return errToolResult(err.Error()), nil
+	}
+	return result, nil
+}
+
+// serverSummary mirrors the gateway.list_servers output shape.
+//
+// SCHEMA-FREEZE v1.6.0 — the JSON field names below are part of the Phase 16
+// wire contract consumed by LLM clients (via the built-in gateway.list_servers
+// tool) and by the dashboard. Renames/removals are breaking changes and
+// require a coordinated matrix update. New OPTIONAL fields may be added; see
+// the LLM-client + dashboard rollout path before doing so.
+//
+// The Health field currently reflects Status for parity with the dashboard's
+// rendering; a richer health signal (from health.Monitor) can replace it
+// without breaking the schema.
+//
+// UptimeSeconds is 0 for any status other than "running" (stopped/degraded/
+// starting report 0). Consumers that want historical uptime should derive it
+// from restart_count + started_at in /api/v1/metrics.
+type serverSummary struct {
+	Name          string `json:"name"`
+	Status        string `json:"status"`
+	Transport     string `json:"transport"`
+	ToolCount     int    `json:"tool_count"`
+	Health        string `json:"health"`
+	UptimeSeconds int64  `json:"uptime_seconds"`
+}
+
+// handleGatewayListServers implements gateway.list_servers: returns the full
+// runtime topology in a single call. Sorted by name for stable output.
+func (g *Gateway) handleGatewayListServers(_ context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	entries := g.lm.Entries()
+	summary := make([]serverSummary, 0, len(entries))
+	now := time.Now()
+	for _, e := range entries {
+		uptime := int64(0)
+		if !e.StartedAt.IsZero() && e.Status == models.StatusRunning {
+			uptime = int64(now.Sub(e.StartedAt).Seconds())
+		}
+		summary = append(summary, serverSummary{
+			Name:          e.Name,
+			Status:        string(e.Status),
+			Transport:     e.Config.TransportType(),
+			ToolCount:     len(e.Tools),
+			Health:        string(e.Status),
+			UptimeSeconds: uptime,
+		})
+	}
+	sort.Slice(summary, func(i, j int) bool { return summary[i].Name < summary[j].Name })
+	return textToolResult(summary)
+}
+
+// toolSummary mirrors the gateway.list_tools per-tool output shape.
+//
+// SCHEMA-FREEZE v1.6.0 — the JSON field names below are part of the Phase 16
+// wire contract. Renames/removals are breaking changes; new OPTIONAL fields
+// may be added with coordinated client rollout.
+type toolSummary struct {
+	Name        string `json:"name"`
+	Namespaced  string `json:"namespaced"`
+	Description string `json:"description"`
+	InputSchema any    `json:"inputSchema,omitempty"`
+}
+
+// gatewayListToolsArgs mirrors the gateway.list_tools inputSchema.
+type gatewayListToolsArgs struct {
+	Server string `json:"server"`
+}
+
+// handleGatewayListTools implements gateway.list_tools: returns a map keyed
+// by backend name with each backend's tools. Backend names that match the
+// optional server filter are included; missing filter means all backends.
+// Tool order within a backend is the order reported by the backend.
+func (g *Gateway) handleGatewayListTools(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var args gatewayListToolsArgs
+	if len(req.Params.Arguments) > 0 {
+		if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+			return errToolResult("invalid arguments: " + err.Error()), nil
+		}
+	}
+	entries := g.lm.Entries()
+	result := make(map[string][]toolSummary)
+	for _, e := range entries {
+		if args.Server != "" && e.Name != args.Server {
+			continue
+		}
+		tools := make([]toolSummary, 0, len(e.Tools))
+		for _, t := range e.Tools {
+			tools = append(tools, toolSummary{
+				Name:        t.Name,
+				Namespaced:  g.router.NamespacedTool(e.Name, t.Name),
+				Description: t.Description,
+				InputSchema: t.InputSchema,
+			})
+		}
+		result[e.Name] = tools
+	}
+	return textToolResult(result)
+}
+
+// computeTopologyVersion returns the serverInfo.version string for the given
+// sorted backend names + total tool count. The short hash is SHA-256 over
+// "name1,name2,...|<tool_count>"; 8 hex chars is enough to invalidate client
+// caches on topology change without bloating serverInfo payloads.
+func computeTopologyVersion(baseVersion string, sortedBackends []string, toolCount int) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte(strings.Join(sortedBackends, ",")))
+	_, _ = h.Write([]byte{'|'})
+	_, _ = fmt.Fprintf(h, "%d", toolCount)
+	digest := h.Sum(nil)
+	return baseVersion + "+" + hex.EncodeToString(digest[:4])
+}
+
+// ServerInfoVersion returns the current cache-busting version string reported
+// to clients via the aggregate MCP server's initialize response. Exported for
+// tests and diagnostics. The value is refreshed inside RebuildTools on every
+// topology change.
+func (g *Gateway) ServerInfoVersion() string {
+	g.versionMu.RLock()
+	defer g.versionMu.RUnlock()
+	if g.aggregateImpl == nil {
+		return g.version
+	}
+	return g.aggregateImpl.Version
 }
 
 // RebuildTools re-registers all tools from running backends on BOTH the
@@ -233,6 +499,35 @@ func (g *Gateway) RebuildTools() {
 		"removed", len(toRemove),
 		"backends", len(byBackend),
 	)
+
+	// Phase 16.6 T16.6.4 — cache-busting serverInfo.version. Hash over the
+	// sorted backend names and the current total tool count. The SDK reads
+	// aggregateImpl.Version on every initialize (server.go:1463). Some
+	// clients key their tool-list cache by (name, version); changing version
+	// on topology change invites a fresh fetch.
+	//
+	// Concurrency: we hold toolsMu here (the single writer path for tool
+	// topology), so computing off of allTools + byBackend is consistent.
+	// versionMu guards our own reads (ServerInfoVersion) against the
+	// assignment below. The SDK's initialize read of aggregateImpl.Version
+	// races with the assignment in principle, but:
+	//   (a) initialize is per-session, infrequent, and completes in microseconds;
+	//   (b) RebuildTools runs in response to backend start/stop, also infrequent;
+	//   (c) the write is a single string-header store (two words); on all
+	//       supported platforms it is observably atomic in practice.
+	// We therefore accept the theoretical race rather than recreating the
+	// server (which would sever every existing session).
+	names := make([]string, 0, len(byBackend))
+	for name := range byBackend {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	newVer := computeTopologyVersion(g.version, names, len(allTools))
+	g.versionMu.Lock()
+	if g.aggregateImpl != nil {
+		g.aggregateImpl.Version = newVer
+	}
+	g.versionMu.Unlock()
 }
 
 // namespacedTool holds info for a tool to be registered.

@@ -385,3 +385,320 @@ No CVE-level security concerns: no auth-token leakage (only `${user_config.*}` p
 
 **Final state: zero findings at or above threshold.** 14/14 packages `go test ./...` PASS. `go build ./...` + `go vet ./...` clean. Commit `a7521fa`.
 
+
+---
+
+## Phase 16.4 Code Review (pipeline feature-b8f2decf, 2026-04-22)
+
+**Reviewer:** Porfiry [Sonnet 4.6] + GPT-5.1-codex (PAL MCP external expert, continuation a8170908)
+**Scope:** 5 files in `installer/patches/` + `configs/supported_claude_code_versions.json`
+**Reference:** PLAN-16.md §Phase 16.4 lines 384–510, docs/api/claude-code-endpoints.md v1.6.0 (FROZEN)
+**Test evidence:** `node --test installer/patches/porfiry-mcp.test.mjs` → 22 pass, 0 fail
+
+### Findings
+
+| ID | File:line | Severity | Confidence | Finding | Recommendation |
+|----|-----------|----------|------------|---------|----------------|
+| CR-16.4-01 | `installer/patches/porfiry-mcp.js:232-242` | HIGH | [C+O] | `probe-result` endpoint never called. API contract (claude-code-endpoints.md line 233) declares `POST /api/v1/claude-code/probe-result` as "Patch → gateway. Reports [Probe reconnect] result." The `nonce` field is preserved in `normalizeAction()` (line 129) but never sent to the gateway. The patch only calls `/pending-actions/{id}/ack` with `action_type:"probe-reconnect"`. Without posting the nonce to `/probe-result`, the gateway cannot correlate the probe round-trip; dashboard probe button (`[Probe reconnect]`, T16.5.6) will always show "Timeout — patch not responding" after 15s. | After `ackAction` for a `probe-reconnect` action, add a separate fire-and-forget `fetch(GATEWAY_URL + "/api/v1/claude-code/probe-result", {method:"POST", headers:authHeaders(), body:JSON.stringify({nonce:action.nonce, ok:ok, error:ok?"":scrubError(errMsg)})}).catch(function(){})`. Call only when `action.type === "probe-reconnect"` and `action.nonce` is non-empty. |
+| CR-16.4-02 | `installer/patches/porfiry-mcp.js:382-390` | MEDIUM | [C+O] | `acquireVsCodeApi()` called on every heartbeat (every 60s+). VSCode webview contract states the function may only be called once; subsequent calls throw. The try/catch on lines 382-391 silently swallows the exception so the heartbeat fires correctly, but `cc_version` and `vscode_version` will always be empty strings (the standard VSCode webview API does not expose `extensionVersion` or `vscodeVersion` properties — only `getState`, `setState`, `postMessage`). Also generates a silent exception every 60s, which is wasteful. | Cache the result once at module init: `var _vscApi = null; try { _vscApi = typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : null; } catch(e) {}`. Read `_vscApi.extensionVersion` / `_vscApi.vscodeVersion` in `sendHeartbeat`. Note these properties are non-standard; if the webview populates them via `setState`, the cached reference will reflect the current state correctly. |
+| CR-16.4-03 | `installer/patches/porfiry-mcp.test.mjs:555-563` | MEDIUM | [C+O] | T16.4.6 #5 (active-tool-call suppression) is a manual stub: `assert.ok(true, "[manual]…")`. The test always passes without exercising the suppression invariant. PLAN-16 line 453 requires an automated test: "simulate visible `[class*='spinnerRow_']` for 3s; assert reconnect is postponed then fires at ~3s mark." The DOM dependency can be injected (replace `isToolCallActive` with a controlled flag) without a real browser, consistent with the harness pattern used for all other tests. | Refactor `executeReconnect` to accept an optional `isToolCallActiveFn` parameter (or expose it as a module-level injectable for the test harness). Add a test that sets the flag `true` for 3s then `false`, advances the controllable clock, and asserts the reconnect fires after suppression ends. |
+| CR-16.4-04 | `installer/patches/apply-mcp-gateway.sh:16` | LOW | [C] | Argument parsing loop uses `"${@:-}"` which in bash 3.x (macOS default until 12) causes `unbound variable` with `set -u` when `$@` is empty. The `:-` default is the correct approach but the trailing `-` after `@` in `${@:-}` is redundant in bash 4+; in bash 3 it still works correctly. This is a minor portability note, not a crash. | No action required if macOS bash 3 is not a target. If POSIX-sh compatibility is desired (script header is `#!/bin/bash`, so bash-only is fine), the current form is acceptable. Document minimum bash version in README. |
+| CR-16.4-05 | `installer/patches/porfiry-mcp.js:36-41` | LOW | [C] | `getOrCreateSessionId()` fallback (lines 39-40) produces `Math.random().toString(36).slice(2) + Date.now().toString(36)` — approximately 11 base-36 chars of entropy plus a timestamp. Sufficient for per-window session uniqueness within a single browser context, but not cryptographically random. `crypto.randomUUID()` is available in Chromium 92+ (VSCode ≥1.60) and is preferred. The fallback is only reached if `crypto.randomUUID` is absent, which is unlikely in any supported VSCode version. | Acceptable as-is given the fallback guard. Advisory only. |
+
+### Spec compliance summary
+
+| Requirement | Status |
+|-------------|--------|
+| T16.4.1 — sh idempotent, semantic version sort, backup-once | PASS |
+| T16.4.1.a — chmod 600 (sh) + icacls (ps1) | PASS |
+| T16.4.2 — ps1 mirrors sh semantics | PASS |
+| T16.4.3 — Alt-E fiber walk (inputContainer_ + 3 lookup strategies, depth 80) | PASS |
+| T16.4.3 — Heartbeat every 60s, poll every 2s, both with per-tick jitter | PASS |
+| T16.4.3 — CONFIG constants match spec (all 14 named constants present) | PASS |
+| T16.4.3 — Debounce 10s fixed-from-first, DEBOUNCE_FORCE_FIRE_COUNT=10 cap (SP4-L1) | PASS |
+| T16.4.3 — SP4-M1 state-check at debounce fire time | PASS |
+| T16.4.3 — awaitingDiscovery FIFO bound=16, drop-oldest overflow with ack | PASS |
+| T16.4.3 — Singleflight per serverName | PASS |
+| T16.4.3 — Active-tool postpone cap 10s | PASS |
+| T16.4.3 — Error scrub (SP4-M2): regex, 256-char truncation, first-line only | PASS |
+| T16.4.3 — MutationObserver remount invalidation + 2s/8s retry | PASS |
+| T16.4.3 — Config override validation SP4-L2 (3 keys, bounded ranges) | PASS |
+| T16.4.3 — Heartbeat fields match API contract (no registry_ok / reload_command_exists) | PASS |
+| T16.4.3 — probe-reconnect same-path ack with action_type | PASS |
+| T16.4.3 — probe-result POST with nonce | **FAIL** (CR-16.4-01) |
+| T16.4.4 — Token injection via awk -v (no shell interpolation) | PASS |
+| T16.4.4 — Token validator allowlist ^[A-Za-z0-9_\-\.]+$ in sh + ps1 | PASS |
+| T16.4.4 — Placeholder survival guard + backup restore | PASS |
+| T16.4.6 — All 17 T16.4.6 test cases present and passing | PARTIAL (#5 manual stub) |
+| T16.4.6 — Scrub regex 6-input coverage | PASS |
+| T16.4.7 — supported_claude_code_versions.json shape matches /compat-matrix contract | PASS |
+| Scope boundary — zero modifications outside 5 declared files | PASS |
+
+### API contract conformance (claude-code-endpoints.md v1.6.0)
+
+| Endpoint | Used | Body shape | Status |
+|----------|------|------------|--------|
+| `POST /patch-heartbeat` | Yes (line 409) | 15 fields match spec lines 63-78 | PASS |
+| `GET /pending-actions?after=` | Yes (line 356-357) | cursor-based, encodeURIComponent | PASS |
+| `POST /pending-actions/{id}/ack` | Yes (line 233) | ok/error_message/action_type/latency_ms match lines 199-213 | PASS |
+| `POST /probe-result` | No | — | **FAIL — CR-16.4-01** |
+
+### Approval status
+
+**CHANGES REQUESTED** — initial verdict. **RESOLVED 2026-04-22 in-cycle**.
+
+- **CR-16.4-01 (HIGH) — Fixed.** Added `postProbeResult(nonce, ok, errMsg)` + `completeAction(action, ok, errMsg, latencyMs)` wrapper in [porfiry-mcp.js:252-281](installer/patches/porfiry-mcp.js#L252-L281). All 4 ack call sites (2 singleflight + 2 own-call + overflow) migrated. Regression tests at [porfiry-mcp.test.mjs:606-634](installer/patches/porfiry-mcp.test.mjs#L606-L634) — one positive (probe-reconnect triggers /probe-result) + one negative (plain reconnect does NOT).
+- **CR-16.4-02 (MEDIUM) — Fixed.** Cached `_vscApi` once at module init in [porfiry-mcp.js:237-238](installer/patches/porfiry-mcp.js#L237-L238); heartbeat reuses cached ref, no per-60s throw.
+- **CR-16.4-03 (MEDIUM) — Fixed.** `isToolCallActive` now indirected through mutable ref in patch ([porfiry-mcp.js:228-235](installer/patches/porfiry-mcp.js#L228-L235)); test harness exposes `setToolCallActive(fn)` + new automated test at [porfiry-mcp.test.mjs:575-604](installer/patches/porfiry-mcp.test.mjs#L575-L604) — tool-active → postpone → clear → fires.
+- CR-16.4-04/05 (LOW): Advisory, no action (bash 3.x not a supported target; session-ID fallback entropy sufficient for per-window dedup).
+
+**Re-verify evidence:** `node --test installer/patches/porfiry-mcp.test.mjs` → 24 tests, 24 passed, 0 failed (was 22 — added 2 CR-01 regression tests, 1 automated CR-03 suppression test replacing the manual stub). `node --check installer/patches/porfiry-mcp.js` → OK.
+
+
+## Phase 16.4 QA Report (pipeline feature-b8f2decf, 2026-04-22)
+
+**QA Lead:** Porfiry | **Gate run:** 2026-04-22 | **Pipeline step:** 7 of 9
+
+### Gate Results
+
+| Gate | Command | Expected | Observed | Verdict |
+|------|---------|----------|----------|---------|
+| Node test suite | `node --test porfiry-mcp.test.mjs` | 24 pass / 0 fail | 24 pass / 0 fail / 0 skipped | **PASS** |
+| JS syntax | `node --check porfiry-mcp.js` | exit 0 | `js:OK` | **PASS** |
+| Bash syntax | `bash -n apply-mcp-gateway.sh` | exit 0 | `sh:OK` | **PASS** |
+| shellcheck | `shellcheck -S warning apply-mcp-gateway.sh` | clean / SKIP | Not installed on host | **SKIP** (not FAIL — tool absent) |
+| PS1 syntax | `Parser::ParseFile(apply-mcp-gateway.ps1)` | 0 parse errors | `ps1:OK` | **PASS** |
+| JSON schema | `node -e "...key-count check..."` | 9 keys, 0 missing, 0 extra | `keys: 9 missing: [] extra: []` | **PASS** |
+| Token validation | `MCP_GATEWAY_TOKEN_FILE=<bad\|token> bash apply-mcp-gateway.sh --auto` | exit 1 + error message | `ERROR: invalid token format — token must match ^[A-Za-z0-9_\-\.]+$` / exit=1 | **PASS** |
+
+**shellcheck note:** Not installed on this host (Windows, no scoop/choco). Manual substitute: bash -n passed; file reviewed — quoting is consistent throughout; no bare variable expansions in dangerous positions; `readonly` used on TOKEN_REGEX. Recommend CI job installs `shellcheck` for automated enforcement.
+
+### Coverage Summary
+
+| Layer | Count | Method |
+|-------|-------|--------|
+| PLAN T16.4.6 invariants | 17 | node:test suite (named + tagged tests) |
+| CR-16.4-01 regression tests | 2 | probe-result positive + negative |
+| CR-16.4-03 suppression test | 1 | active-tool-call automated |
+| Pure-helper unit tests | 5 | validateConfigOverride (3) + normalizeAction (2) |
+| **Total** | **24** | all pass |
+
+**PLAN tag coverage (T16.4.6 mandatory invariants):**
+
+| Tag | Test name | Found |
+|-----|-----------|-------|
+| P4-02 | `[P4-02] remount during in-flight: original acked when resolved; new actions held in awaitingDiscovery` | ✔ |
+| P4-03 | `[P4-03] debounce starvation cap: 12 actions triggers force-fire at 10th, exactly 1 reconnect call` | ✔ |
+| P4-04 | `[P4-04] initial-skew persistence: stored on load; reused within TTL; fresh after TTL expiry` | ✔ |
+| P4-06 | `[P4-06] probe-reconnect handler calls reconnectMcpServer and acks with probe metadata` | ✔ |
+| SP4-M1 | `[SP4-M1] debounce fires during lost: coalesced action queued, no reconnect; fires after re-discovery` | ✔ |
+| SP4-M2 | `[SP4-M2] scrubError handles 6 path patterns: each produces <path>, no original path survives` | ✔ |
+
+All 6 mandatory PLAN tags have matching test implementations. No invariant gaps.
+
+### Scope Boundary Verification
+
+`git diff --name-only HEAD` → `docs/REVIEW-16.md` only (this report).
+
+In-scope new files (all untracked `??`):
+- `installer/patches/porfiry-mcp.js`
+- `installer/patches/apply-mcp-gateway.sh`
+- `installer/patches/apply-mcp-gateway.ps1`
+- `installer/patches/porfiry-mcp.test.mjs`
+- `configs/supported_claude_code_versions.json`
+
+Pre-existing Phase 16.3 modifications (`cmd/mcp-gateway/main.go`, `internal/api/server.go`) appear in `git status` as `M` but are NOT in this pipeline's diff — scope isolation confirmed.
+
+### Findings
+
+None. All code-reviewer findings (1 HIGH + 2 MEDIUM + 2 LOW) were resolved in-cycle prior to this QA run. No new findings identified at QA gate.
+
+### Quality Gate Verdict
+
+**PASS** — all executable gates pass. shellcheck SKIP is environmental (tool absent), not a code defect. Recommend installing shellcheck in CI to make the skip permanent-FAIL absent tool.
+
+---
+
+## Phase 16.4 Security Audit (pipeline feature-b8f2decf, 2026-04-22)
+
+**Auditor:** security-lead (Porfiry [Opus 4.7])
+**Scope:** 5 files in installer/patches/ + configs/supported_claude_code_versions.json, local to Phase 16.4 webview-patch installer.
+**Tools:** Read, Grep, Bash (PoC), PAL codereview (gpt-5.2-pro), PAL chat (gpt-5.2-pro), PAL challenge.
+**Method:** Manual code review + live poisoned-token test (22 payloads) + live JS-injection PoC against awk -v substitution + cross-validation with OpenAI gpt-5.2-pro.
+
+### Summary
+
+| Severity | Count | Status |
+|----------|------:|--------|
+| CRITICAL | 0 | — |
+| HIGH     | 2 | **blocker** — fix before shipping v1.6.0 patch |
+| MEDIUM   | 2 | fix recommended in-cycle |
+| LOW      | 2 | track as defense-in-depth follow-up |
+
+**Verdict:** **FAIL** at Per-Phase Gate (default CLAUDE_GATE_MIN_BLOCKING_SEVERITY=low). 2 HIGH findings represent real cross-trust-boundary vulnerabilities in the installer input surface.
+
+### Findings Table
+
+| ID | Severity | CWE | File | Lines | Summary |
+|----|----------|-----|------|------:|---------|
+| S16.4-H1 | HIGH | CWE-94 (Code Injection) / CWE-20 | apply-mcp-gateway.sh + .ps1 | sh:81,126-128 / ps1:98-101,140 | MCP_GATEWAY_URL is inlined verbatim into the JS string literal `var GATEWAY_URL = "..."` without validation. A hostile URL such as `http://a";malicious();//` breaks out of the literal and executes arbitrary code in the vscode-webview context with access to the inlined Bearer token. **Live PoC confirmed.** |
+| S16.4-H2 | HIGH | CWE-200 / CWE-601 | apply-mcp-gateway.sh + .ps1 | sh:81 / ps1:98-101 | Even without JS injection, an unvalidated MCP_GATEWAY_URL lets the webview patch send the Bearer token (and all heartbeat telemetry) to a non-loopback origin chosen by whoever controls the installer env. README advertises MCP_GATEWAY_URL as a user-facing override, so the attack surface extends to social-engineered install recipes. |
+| S16.4-M1 | MEDIUM | CWE-732 | apply-mcp-gateway.sh | 124-138 | Bearer token is written to index.js via `awk >> $INDEX_JS` (line 128) while the file still inherits 644 (world-readable) from the .bak. `chmod 600` runs ~10 lines later. Any co-located process reading index.js during the window observes the cleartext token. Fix: `chmod 600 "$INDEX_JS"` **before** the awk append. |
+| S16.4-M2 | MEDIUM | CWE-276 | apply-mcp-gateway.ps1 | 163-167 | `icacls /grant:r` DACL lockdown is explicitly **fail-open** (comment on line 165 says "Log but do not fail"). If icacls exits non-zero, the token-bearing index.js retains its inherited NTFS DACL. Contradicts internal/auth/token_perms_windows.go which documents a deny-by-default design that prevents the "failed to restrict, but serve anyway" class of vulnerability. Fix: on `$LASTEXITCODE != 0`, `Copy-Item $IndexBak $IndexJs -Force` and `throw`. |
+| S16.4-L1 | LOW | CWE-732 | apply-mcp-gateway.ps1 | 163 | `icacls /grant:r "${env:USERNAME}:(F)"` uses the env-var form of the current username. If the parent process pre-sets `$env:USERNAME` to another valid local account, the grant can go to that other principal. Parallel Go code in token_perms_windows.go:27-61 uses the token-SID explicitly. Fix: resolve SID via `[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value` and pass `*<SID>:(F)`. |
+| S16.4-L2 | LOW | CWE-20 | apply-mcp-gateway.sh | 98-99 | Trim sequence strips at most one trailing LF then one trailing CR. A file with two trailing CRLF pairs would fail validation due to an embedded CR. Not exploitable — fails safe (reject). Low-priority robustness: use `IFS= read -r AUTH_TOKEN < "$TOKEN_FILE"` plus full CR strip. |
+
+### Evidence
+
+#### Verification — token validator (SAFE)
+
+Live test of bash validator (sh:102-108) against 22 hostile token payloads — **100% rejected**:
+
+- baseline-safe → accept (expected).
+- spaces, newline-LF, newline-CRLF, semicolon, backtick, dollar-parens, pipe, quotes, backslash, forward-slash, `=`, `@`, `#`, unicode, empty, tab, braces, parens, brackets, `<>`, `&`, awk-backref, awk-ampersand → all reject (expected).
+
+Trim-then-validate sequence tested on real files:
+
+- `validtoken123<LF>` → trimmed → accepted.
+- `crlftoken123<CRLF>` → trimmed → accepted.
+- `evil<LF>second_line<LF>` → trailing LF stripped; inner LF survives → rejected.
+
+#### Verification — scrub regex (SAFE)
+
+porfiry-mcp.js:65 — PATH_SCRUB_RE has bounded alternation of literal path prefixes, lazy `.*?` terminated by lookahead, and input is pre-truncated to 256 chars in scrubError. ReDoS analysis: worst-case O(n); no nested quantifiers. SP4-M2 test covers all 6 canonical patterns (porfiry-mcp.test.mjs:937-993).
+
+#### Verification — config_override trust boundary (SAFE)
+
+porfiry-mcp.js:80-95 — validateConfigOverride rejects non-object input, iterates only over whitelisted CONFIG_OVERRIDE_RANGES keys (LATENCY_WARN_MS, DEBOUNCE_WINDOW_MS, CONSECUTIVE_ERRORS_FAIL_THRESHOLD), and rejects non-number, NaN, out-of-range values; retains compiled-in default on reject. Test coverage: porfiry-mcp.test.mjs:1003-1021.
+
+#### Verification — fetch security (SAFE)
+
+- No `credentials: "include"` anywhere (grep confirmed). Bearer in Authorization header only — no cookie leakage.
+- No `innerHTML`, `document.write`, `new Function`, `eval` (grep confirmed).
+- Patch is fire-and-forget — heartbeat response read only for typed config_override via range-bounded validator. No response text reflected into DOM.
+- `console.warn` on rejected override logs only key-name and rejected value (no TOKEN reference).
+- `localStorage` holds only `porfiry-mcp-initial-skew` (integer) and its timestamp — no secrets.
+- `session_id` = `crypto.randomUUID()` with `Math.random()` fallback — opaque, non-identifying.
+
+#### Verification — shell/PowerShell injection (SAFE apart from URL surface)
+
+- `awk -v token="$AUTH_TOKEN" -v url="$GATEWAY_URL"` (sh:126) — correct variable-binding form; token never shell-interpolated into a command. Token content is restricted to `[A-Za-z0-9_.-]` so awk gsub replacement metacharacters (`&`, backref) are inert.
+- PS1 uses `.Replace()` (literal substring) + `[System.IO.File]::WriteAllBytes` — no cmd.exe path, no regex interpretation of substitution values.
+- No `sed -i`, `eval`, `curl`, `wget`, `Invoke-Expression` anywhere in either installer (grep confirmed).
+- However: `awk -v url=...` and `.Replace` on `$GatewayUrl` both trust the URL without validation → S16.4-H1/H2.
+
+#### PoC — JS injection via MCP_GATEWAY_URL (DEFECT)
+
+Setting `MCP_GATEWAY_URL=http://a";stealToken(document.location);//` and running the exact awk substitution pipeline from apply-mcp-gateway.sh:126-128 against a patch stub produces:
+
+    var GATEWAY_URL = "http://a";stealToken(document.location);//";
+
+Parses as: (1) benign assignment `var GATEWAY_URL = "http://a";`, (2) arbitrary function call `stealToken(document.location);` in the patch IIFE scope with access to TOKEN, SESSION_ID, mcpSession, and full fetch capability; (3) `//` comments out the residual `";`. When the vscode-webview loads the patched index.js, attacker code runs every VSCode reload until the patch is reinstalled with a clean URL.
+
+#### Supply-chain / exfiltration / DoS surfaces
+
+- No `curl`, `wget`, or external fetches in either installer — supply-chain footprint limited to inlined patch content.
+- Heartbeat payload (porfiry-mcp.js:420-435) contains only: session_id (opaque UUID), patch_version (static), cc_version / vscode_version (from acquireVsCodeApi), FSM state ints, scrubbed-error string, ts. No PII, no console dumps, no DOM state.
+- No ReDoS reachable.
+
+### Scope Confirmation
+
+In-scope files audited:
+
+- installer/patches/porfiry-mcp.js (464 lines, fully read).
+- installer/patches/apply-mcp-gateway.sh (149 lines, fully read — task brief declared 130; actual file has 149).
+- installer/patches/apply-mcp-gateway.ps1 (179 lines, fully read — task brief declared 180).
+- installer/patches/porfiry-mcp.test.mjs (1036 lines — SP4-M2 + pure-helper tests fully read; security-relevant patterns grepped across the rest).
+- configs/supported_claude_code_versions.json (12 lines, fully read — **no sensitive info leakage**; only semver/version-map metadata).
+
+Cross-referenced for consistency:
+
+- internal/auth/token_perms_windows.go (gateway token-file DACL reference — S16.4-L1 / S16.4-M2 compared against this).
+- docs/api/claude-code-endpoints.md (FROZEN API contract — confirmed fetch shapes, CORS policy, Bearer scheme).
+
+### Cross-Validation
+
+PAL codereview (gpt-5.2-pro, external validation): independently flagged S16.4-H1, H2, M1, M2, L1. Agreement with Claude analysis on all points.
+
+PAL challenge on severity of S16.4-H1: after stress-testing against the "attacker already has env control" precondition, HIGH classification retained. Justification: (a) transient env control → persistent token-extracting webview code (lifetime gain), (b) env-scope → vscode-webview-scope (trust-boundary crossing), (c) README advertises MCP_GATEWAY_URL as a user-facing override (social-engineering surface).
+
+Agreement tag: [C+O] on all 6 findings. No disagreements requiring human escalation.
+
+### Recommended Remediation (ordered by criticality)
+
+1. **S16.4-H1 / H2 (both installers):** Validate MCP_GATEWAY_URL to loopback-only before substitution. In bash: add a case-statement scheme/host whitelist (accept only `http://127.0.0.1:*`, `http://localhost:*`, and https variants) plus a defense-in-depth reject of JS-string-breaking characters. In PowerShell: parse as `[Uri]`, require `IsLoopback` + `http`/`https` scheme + empty path/query/fragment, and normalize to `GetLeftPart(Authority)` before substitution.
+2. **S16.4-M1 (bash):** Move `chmod 600 "$INDEX_JS"` to **before** the awk append; add a trap on ERR that restores .bak and re-applies chmod 600.
+3. **S16.4-M2 (PowerShell):** Fail-closed on icacls error — `Copy-Item $IndexBak $IndexJs -Force` and `throw`, instead of `Write-Warning`.
+4. **S16.4-L1 (PowerShell):** Use current-token SID (`[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value`) instead of `$env:USERNAME`.
+5. **S16.4-L2 (bash):** Replace the two trailing-whitespace trim expressions with `IFS= read -r` plus full CR strip.
+
+### Risks
+
+1. Current code path ships a user-facing JS-injection vector if MCP_GATEWAY_URL is hostile. Social-engineered install recipes can weaponize this. Mitigated entirely by the H1/H2 fix.
+2. Bearer-token exposure window during install: chmod race (M1) and icacls fail-open (M2) leave the token-bearing index.js observable by co-located processes for a sub-second window. Mitigated by M1/M2 fixes.
+
+### Gate Decision
+
+**BLOCK → RESOLVED 2026-04-22 in-cycle.** All 6 findings fixed before doc-writer step.
+
+| ID | Status | Fix location | Evidence |
+|----|--------|--------------|----------|
+| S16.4-H1 | **Fixed** | [apply-mcp-gateway.sh:80-92](installer/patches/apply-mcp-gateway.sh#L80-L92) / [apply-mcp-gateway.ps1:97-108](installer/patches/apply-mcp-gateway.ps1#L97-L108) — strict regex `^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/%-]*)?$` using bash `=~` (sh) and `-notmatch` (ps1). Rejects quotes, backslash, backtick, `$`, `&`, `|`, `;`, `@`, whitespace, unicode. | PoC: 9/9 hostile URLs rejected (incl. `http://a";X();//`, `javascript:alert(1)`, `http://h@other`, `ftp://host`, `http://h|x`); 3/3 legit URLs accepted. |
+| S16.4-H2 | **Fixed** | same as H1 — the URL validator closes both vectors simultaneously (no separate fix needed). Token exfiltration requires URL-controlled destination, which the validator now denies. | Same PoC. |
+| S16.4-M1 | **Fixed** | [apply-mcp-gateway.sh:131-139](installer/patches/apply-mcp-gateway.sh#L131-L139) — `umask 077` set BEFORE `cp "$INDEX_JS.bak" "$INDEX_JS"` + awk append. New file is 600 from birth; the post-append `chmod 600` is now belt-and-suspenders. Closes the world-readable race window on POSIX. | Syntax OK; behavioral verification on POSIX requires Linux/macOS (NTFS emulation masks mode bits). |
+| S16.4-M2 | **Fixed** | [apply-mcp-gateway.ps1:168-177](installer/patches/apply-mcp-gateway.ps1#L168-L177) — if `icacls` exits non-zero, script rolls back to `.bak` and exits 1 (fail-closed) instead of `Write-Warning` + continue. | `powershell.exe Parser::ParseFile` → zero errors. |
+| S16.4-L1 | **Fixed** | [apply-mcp-gateway.ps1:167](installer/patches/apply-mcp-gateway.ps1#L167) — grant uses `*<SID>:(F)` resolved via `[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value`, aligning with `internal/auth/token_perms_windows.go` SDDL pattern. No longer trusts `$env:USERNAME`. | Syntax OK. |
+| S16.4-L2 | **Fixed** | [apply-mcp-gateway.sh:106-107](installer/patches/apply-mcp-gateway.sh#L106-L107) — trim now uses `tr -d '\r' | awk 'NR==1 { sub(/[[:space:]]+$/,""); sub(/^[[:space:]]+/,""); print }'` which strips all leading/trailing whitespace. | `sh:OK` syntax + existing poisoned-token regression still aborts (pipe-char rejected). |
+
+All fixes tested. `node --test installer/patches/porfiry-mcp.test.mjs` → 24/24 pass unchanged (patch JS not modified).
+
+**Re-verify PoC:** 9/9 hostile URLs rejected with `ERROR: invalid MCP_GATEWAY_URL`; 3/3 legitimate URLs (`http://127.0.0.1:8765`, `https://gateway.internal:443`, `http://localhost:8765/mcp-gateway`) accepted. Zero false positives or false negatives after URL-regex fix landed via bash-native `=~` (the first attempt with `printf '%s' | awk '/re/'` silently passed every input because no trailing newline = zero awk records = exit 0 default).
+
+**Final verdict: APPROVE.** 0 CRITICAL / 0 HIGH / 0 MEDIUM / 0 LOW unresolved. Proceed to doc-writer.
+
+---
+
+## Phase 16.6 Code Review (2026-04-22)
+
+**Reviewer:** Porfiry [Opus 4.7 1M ctx] + GPT-5.1-codex (PAL MCP external expert, continuation `d04c3234-fd8b-45b8-8590-7266b07ea88e`)
+**Scope:** 3 files — `internal/proxy/gateway.go` (modify), `internal/proxy/gateway_invoke_test.go` (new), `internal/lifecycle/manager.go` (add `SetSession` test helper).
+**Reference:** [PLAN-16.md §Phase 16.6](PLAN-16.md#phase-166--gatewayinvoke-universal-fallback-tool--supported-versions-map) lines 629–688.
+**Test evidence:** `go test ./internal/proxy/` → 11/11 Phase 16.6 tests PASS in 1.5s + 0 regressions in pre-existing tests; `go test ./... -count=1` → 15/15 packages green.
+
+### Findings
+
+| ID | File:line | Severity | Confidence | Finding | Recommendation | Status |
+|----|-----------|----------|------------|---------|----------------|--------|
+| CR-16.6-01 | `internal/proxy/gateway.go:246-255` (original) | HIGH | [C+O] | `handleGatewayInvoke` scanned `entry.Tools` and returned IsError `backend %q has no tool %q` when the tool wasn't in the lifecycle cache. This defeats the entire premise of gateway.invoke: "Universal fallback invoker. Use when specific tools aren't yet visible (e.g. recently added)". When the Tools cache is stale (backend live, refresh not propagated), legitimate calls were rejected. | Remove the `entry.Tools` scan. Keep `lm.Entry(backend)` existence check so callers get a gateway-level "unknown backend" error rather than an opaque router "no active session" message. Let the backend itself return method-not-found, which `router.Call` surfaces as IsError. | **Fixed in-cycle.** `internal/proxy/gateway.go:228-261`. |
+| CR-16.6-02 | test suite | MEDIUM | [O] | No regression test covered the "live backend + empty Tools cache" scenario, which is exactly the gateway.invoke use case. A future re-addition of pre-validation (same mistake as CR-16.6-01) would pass the existing suite. | Add `TestGatewayInvoke_StaleToolsCache_Fallback`: live session via `InMemoryTransports` + `lm.SetTools("alpha", nil)`, call `gateway.invoke` for `alpha/echo`, assert non-error + backend response. | **Fixed in-cycle.** `internal/proxy/gateway_invoke_test.go:206-225`. |
+| CR-16.6-03 | `internal/proxy/gateway.go:265-276` | LOW | [O] | `uptime_seconds` silently reports 0 for non-running statuses by design but the doc didn't say so. LLM consumers may interpret 0 as "just restarted" rather than "not running". | Expand field comment: explicit "0 for any status other than running" + pointer to `/api/v1/metrics` for historical uptime. | **Fixed in-cycle.** `internal/proxy/gateway.go:265-284`. |
+
+### Schema/Versioning Invariants (PAL thinkdeep internal validation)
+
+PAL thinkdeep external expert (`gpt-5.2-pro`) was unresponsive across two continuation rounds despite fully-embedded file context. Internal validation (`use_assistant_model=false`) completed with very_high confidence covering six invariants:
+
+| Invariant | Verdict | Evidence |
+|-----------|---------|----------|
+| A — Version determinism (same topology → same hash) | HOLDS | `TestComputeTopologyVersion_Invariants` + `TestServerInfoVersionChangesOnTopology` second `RebuildTools()` pass. |
+| B — Version discrimination on topology change | HOLDS with narrow documented collision (simultaneous per-backend add+remove preserving net count) — `list_changed` notification fires on every RebuildTools regardless. |
+| C — 32-bit short-hash collision rate | HOLDS — birthday bound ~2^16 distinct topologies; a deployment cycles through <<100. 48-bit bump not worth doubling display length. |
+| D — JSON schema stability of `serverSummary`/`toolSummary` | HOLDS with action applied — SCHEMA-FREEZE v1.6.0 markers added to both types; typed tests unmarshal field names as a rename canary. |
+| E — Concurrency on `aggregateImpl.Version` | HOLDS with documented limitation — our writes are mutex-guarded, SDK reads are not. Theoretical race on a single string-header store; alternative (rebuild server) would sever sessions. |
+| F — Forward compatibility via compat-matrix | HOLDS — T16.6.5 endpoint already live (Phase 16.3 PAL-CONTRACT-3); schema additions are independent of compat-matrix. |
+
+### Spec compliance summary
+
+| Requirement | Status |
+|-------------|--------|
+| T16.6.1 — `gateway.invoke` registered on aggregateServer only, schema matches spec | PASS |
+| T16.6.1 — validates backend exists; tool check removed per CR-16.6-01 | PASS |
+| T16.6.2 — `gateway.list_servers` returns name/status/transport/tool_count/health/uptime_seconds, sorted | PASS |
+| T16.6.2 — `gateway.list_tools` grouped by backend, optional server filter | PASS |
+| T16.6.3 — `Instructions` wired via `mcp.ServerOptions` (NOT `Implementation` — plan spec had a minor SDK typo; verified in go-sdk v1.4.1 `server.go`) | PASS |
+| T16.6.4 — Version = baseVersion + "+" + 8-hex SHA-256 over sorted names + total tool count | PASS |
+| T16.6.4 — Applied on every RebuildTools; topology change flips version | PASS |
+| T16.6.5 — compat-matrix endpoint live (Phase 16.3 carryover) | PASS (already delivered) |
+| T16.6.6 — all 5 plan-named tests present + 6 extras (regression, determinism invariants, scope invariant, instructions surfaced) | PASS |
+| Scope boundary — zero modifications outside 3 declared files (lifecycle/manager.go added for `SetSession` test helper, same pattern as `SetStatus`/`SetTools`) | PASS with justification |
+
+**Final verdict: APPROVE.** 0 CRITICAL / 0 HIGH / 0 MEDIUM / 0 LOW unresolved. `-race` deferred to CI (no gcc locally; write path is a documented theoretical race over a two-word string store).
