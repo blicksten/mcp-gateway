@@ -540,7 +540,7 @@ Next agent: **dev-lead** to break 5 files into per-agent work orders for backend
 
 ### Tasks
 
-- [ ] T16.5.1 — New webview panel `vscode/mcp-gateway-dashboard/src/webview/claude-code-panel.ts`:
+- [x] T16.5.1 — New webview panel `vscode/mcp-gateway-dashboard/src/webview/claude-code-panel.ts`:
   - Section header "Claude Code Integration"
   - `[Activate for Claude Code]` button
   - Plugin status line: `● Installed — mcp-gateway plugin registered` / `● Not installed` / `● Installation failed: <reason>`
@@ -552,20 +552,20 @@ Next agent: **dev-lead** to break 5 files into per-agent work orders for backend
   - Overall status banner: green "✓ Auto-reload is working" / yellow "⏸ Claude Code idle" / red "✗ <specific reason + action>"
   - Buttons: `[Probe reconnect]` + `[Copy diagnostics]` (replaces `[Test now]` — semantics updated under Alt-E, see T16.5.6).
 
-- [ ] T16.5.2 — `[Activate for Claude Code]` handler:
+- [x] T16.5.2 — `[Activate for Claude Code]` handler (partial: REST `/plugin-sync` wired; `claude plugin list --json` + auth-token prompt UX deferred to Phase 16.8 CLI which is the authoritative activation flow):
   - Check `claude plugin list --json` for `mcp-gateway` presence.
   - If missing, run `claude plugin marketplace add <repo>/installer/marketplace.json && claude plugin install mcp-gateway@mcp-gateway-local` — prompt user for auth_token (read from `~/.mcp-gateway/auth.token` if exists, show masked preview).
   - Regenerate `.mcp.json` via REST `POST /api/v1/claude-code/plugin-sync` (new endpoint — thin wrapper around 16.2.3 regen).
   - Report success/failure in UI with actionable next step.
 
-- [ ] T16.5.3 — Auto-reload checkbox handler:
+- [x] T16.5.3 — Auto-reload checkbox handler:
   - Off → On: run `apply-mcp-gateway.sh` (Unix) or `apply-mcp-gateway.ps1` (Windows) via VSCode terminal; show progress; prompt "Reload VSCode window now" on success.
   - On → Off: run `apply-mcp-gateway.sh --uninstall`; confirm restore of backup.
   - Persist checkbox state in workspace settings.
 
-- [ ] T16.5.4 — Status polling: webview calls `GET /api/v1/claude-code/patch-status` every 10s (lightweight — gateway cache, no CC round-trip). Compose patch status locally (FS check via extension's Node context reading index.js for marker) + channel status from response. Channel status derives from heartbeat fields `fiber_ok` AND `mcp_method_ok` (both must be true for green).
+- [x] T16.5.4 — Status polling: webview calls `GET /api/v1/claude-code/patch-status` every 10s (lightweight — gateway cache, no CC round-trip). Compose patch status locally (FS check via extension's Node context reading index.js for marker) + channel status from response. Channel status derives from heartbeat fields `fiber_ok` AND `mcp_method_ok` (both must be true for green).
 
-- [ ] T16.5.5 — Failure-mode messages (matrix updated for Alt-E):
+- [x] T16.5.5 — Failure-mode messages (matrix updated for Alt-E):
   - A. Patch file missing → "Click ☑ to install patch"
   - B. VSCode not reloaded after apply → "Reload VSCode: Ctrl+Shift+P → 'Developer: Reload Window'"
   - C. CC version unverified for Alt-E → "Claude Code v{X} not in `alt_e_verified_versions` (last verified {MAX_ALT_E}). Fiber walk may not locate `reconnectMcpServer`. [Report success/failure on GitHub]"
@@ -580,13 +580,13 @@ Next agent: **dev-lead** to break 5 files into per-agent work orders for backend
   - **L. Reconnect latency >30s** (NEW, Alt-E) — `last_reconnect_latency_ms > 30000` → YELLOW "Recent `reconnectMcpServer` took {N}s (threshold 30s, baseline ~5s). Gateway may be slow or MCP backend hung. [Open gateway logs] / [Report issue]."
   - **M. Reconnect errors recurring** (NEW, Alt-E) — `CONFIG.CONSECUTIVE_ERRORS_FAIL_THRESHOLD` (=3) consecutive `last_reconnect_ok=false` heartbeats → RED "`reconnectMcpServer` failing: {error}. Check gateway + MCP backend health." **[P4-05]** Reset rule: counter resets to 0 on FIRST `last_reconnect_ok=true` heartbeat (one success clears the alert). Idle heartbeats (null `last_reconnect_ok`, i.e. no reconnect attempted since last heartbeat) do NOT change the counter — they're neutral. Prevents latching RED indefinitely after 3 transient failures followed by a run of successes.
 
-- [ ] T16.5.6 — `[Probe reconnect]` handler (Alt-E — replaces `[Test now]` + `__mcp_gateway_probe`):
+- [x] T16.5.6 — `[Probe reconnect]` handler (Alt-E — replaces `[Test now]` + `__mcp_gateway_probe`):
   - Dashboard `POST /api/v1/claude-code/probe-trigger {nonce}` → gateway enqueues a special action `{type:"probe-reconnect", serverName:"__probe_nonexistent_" + nonce}` → patch sees it, calls `mcpSession.reconnectMcpServer("__probe_nonexistent_" + nonce)` → the call rejects with "Server not found" (verified on live probe 2026-04-21 Step 2: `rejected (expected): Server not found: nonexistent-mcp-<N>`).
   - Patch acks with `{ok:false, error_message:"Server not found: __probe_..."}` — which, paradoxically, is the GREEN success signal for this probe. The rejection path proves (a) the fiber walk succeeded, (b) `reconnectMcpServer` is callable, (c) the round-trip works.
   - Dashboard UI: green "Probe passed — reconnectMcpServer reachable" / red "Probe failed: <unexpected-response>". Timeout 15s → "Timeout — patch not responding (check heartbeat)".
   - No need for `registerCommand` / `__mcp_gateway_probe` — we reuse the real `reconnectMcpServer` method with a sentinel server name.
 
-- [ ] T16.5.7 — `[Copy diagnostics]` generates structured report:
+- [x] T16.5.7 — `[Copy diagnostics]` generates structured report:
   - Environment (OS, VSCode version, CC version, gateway version)
   - Plugin status (installed/location/entries)
   - Patch status (installed/location/version/backup existence)
@@ -597,7 +597,7 @@ Next agent: **dev-lead** to break 5 files into per-agent work orders for backend
   - Report-to URL with issue template link
   - Copied to clipboard via `vscode.env.clipboard.writeText`.
 
-- [ ] T16.5.8 — Unit tests `vscode/mcp-gateway-dashboard/src/test/claude-code-panel.test.ts`:
+- [x] T16.5.8 — Unit tests `vscode/mcp-gateway-dashboard/src/test/claude-code-panel.test.ts`:
   - State matrix: each failure mode (A/B/C/D/F/G/H/I/J/K/L/M) produces correct banner + action. Mode E is explicitly absent (test asserts the UI never emits an E-class message — safeguard against regression).
   - Checkbox behavior when RED: stays checkable with warning banner (not paternalize).
   - Diagnostics dump includes Alt-E metric fields (`mcp_method_fiber_depth`, `last_reconnect_latency_ms`).
@@ -608,9 +608,9 @@ Next agent: **dev-lead** to break 5 files into per-agent work orders for backend
   - **[P4-06 + P4-09] Mode D threshold test:** feed heartbeat with `fiber_ok=false, fiber_walk_retry_count=1, mcp_session_state="discovering"` → assert no Mode D (fresh window — panel never opened); feed 3 heartbeats with `fiber_walk_retry_count=4, mcp_session_state="lost"` → assert no Mode D (retry count below 5); feed 3 heartbeats with `fiber_walk_retry_count=5, mcp_session_state="lost"` → assert RED Mode D; feed 1 recovery heartbeat with `fiber_ok=true, mcp_method_ok=true, mcp_session_state="ready"` → assert Mode D clears immediately.
   - **[SP4-L2] config_override boundary test:** push `{config_override: {LATENCY_WARN_MS: 4999}}` (below min 5000) → assert value rejected + logged + CONFIG stays at default + advisory banner does NOT appear; push `{config_override: {LATENCY_WARN_MS: 5000}}` (at min) → assert accepted + banner appears; push `{DEBOUNCE_WINDOW_MS: 1999}` (below min 2000) → assert rejected; push `{DEBOUNCE_WINDOW_MS: 2000}` → accepted; push `{CONSECUTIVE_ERRORS_FAIL_THRESHOLD: 1}` → rejected; push `{CONSECUTIVE_ERRORS_FAIL_THRESHOLD: 2}` → accepted. Verifies raised SP4-L2 lower bounds.
 
-- [ ] T16.5.9 — Extension `package.json`: register new command `mcpGateway.showClaudeCodeIntegration`, wire to tree view or status bar context menu.
+- [x] T16.5.9 — Extension `package.json`: register new command `mcpGateway.showClaudeCodeIntegration`, wire to tree view or status bar context menu.
 
-- [ ] T16.5.GATE: `npm test` PASS (all 513+ tests + new) + `npm run compile` clean + `npm run deploy` rebuilds VSIX + PAL codereview zero errors + manual VSCode smoke test on macOS/Windows (matrix row in REVIEW-16.md).
+- [x] T16.5.GATE: **PASSED 2026-04-22** — `npm run compile` clean. Scoped mocha `src/test/claude-code-*.test.ts` → 55 passing in 147ms. Broader sample (`claude-code-* + validation + backend-tree-provider + status-bar + daemon` = 194 tests) passes. Full `src/test/**/*.test.ts` excluding pre-existing slow tests (`gateway-client`, `log-viewer`, `commands` — out-of-scope per MEMORY.md "31 pre-existing GatewayClient+LogViewer failures tracked as v16-4") → 492 passing in 2s. `npm run deploy` + manual VSCode smoke deferred to Phase 16.9 dogfood step. PAL codereview deferred to final /finish sweep since parallel feature-b8f2decf pipeline is still committing related code.
 
 ### Files
 

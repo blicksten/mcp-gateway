@@ -53,6 +53,11 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "mcpGateway.showClaudeCodeIntegration",
+        "title": "MCP Gateway: Show Claude Code Integration",
+        "icon": "$(plug)"
+      },
+      {
         "command": "mcpGateway.addServer",
         "title": "MCP Gateway: Add Server",
         "icon": "$(add)"

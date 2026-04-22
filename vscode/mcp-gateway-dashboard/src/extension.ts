@@ -17,6 +17,7 @@ import { SapDetailPanel } from './webview/sap-detail-panel';
 import { ServerDetailViewProvider } from './webview/server-detail-view-provider';
 import { AddServerPanel } from './webview/add-server-panel';
 import { AddSapPanel } from './webview/add-sap-panel';
+import { ClaudeCodePanel } from './webview/claude-code-panel';
 import { SlashCommandGenerator } from './slash-command-generator';
 import {
 	SERVER_NAME_RE,
@@ -226,6 +227,27 @@ function registerCommands(
 
 	push(vscode.commands.registerCommand('mcpGateway.refresh', () => {
 		cache.refresh(); // Re-fetch from API; all providers update via onDidRefresh.
+	}));
+
+	push(vscode.commands.registerCommand('mcpGateway.showClaudeCodeIntegration', () => {
+		const cfg = vscode.workspace.getConfiguration('mcpGateway');
+		const apiUrl = cfg.get<string>('apiUrl', 'http://localhost:8765');
+		const tokenPath = resolveTokenPath(cfg);
+		ClaudeCodePanel.createOrShow({
+			extensionUri: context.extensionUri,
+			extensionPath: context.extensionPath,
+			getGatewayUrl: () => apiUrl,
+			getAuthToken: () => {
+				try {
+					const header = buildAuthHeader(tokenPath);
+					if (header === undefined) { return undefined; }
+					return header.startsWith('Bearer ') ? header.slice(7) : undefined;
+				} catch {
+					return undefined;
+				}
+			},
+			fetch: globalThis.fetch,
+		});
 	}));
 
 	push(vscode.commands.registerCommand('mcpGateway.startServer', async (item?: BackendItem) => {
