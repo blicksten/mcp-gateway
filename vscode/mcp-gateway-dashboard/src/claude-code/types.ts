@@ -98,7 +98,6 @@ export type FailureMode =
 	| 'G' // No plugin installed
 	| 'H' // Gateway not running
 	| 'I' // VSCode idle
-	| 'J' // Multiple sessions
 	| 'K' // Token rotated since patch install
 	| 'L' // Reconnect latency above threshold
 	| 'M'; // Consecutive reconnect errors

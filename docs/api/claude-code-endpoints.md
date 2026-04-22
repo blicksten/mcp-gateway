@@ -400,11 +400,18 @@ Heartbeat persistence is debounced per `session_id` (30 s) so steady-state
 ```
 backend mutation (POST /servers, DELETE /servers/{name}, PATCH Disabled toggle)
   → TriggerPluginRegen (regenerates .mcp.json)
-  → patchstate.EnqueueReconnectAction("mcp-gateway")   ← 500 ms server-side debounce
+  → patchstate.EnqueueReconnectAction(patchstate.AggregatePluginServerName)
+                                                       ← 500 ms server-side debounce
   → patch polls /pending-actions, dequeues action
-  → patch.session.reconnectMcpServer("mcp-gateway")    ← 10 s webview-side debounce
+  → patch.session.reconnectMcpServer(<AggregatePluginServerName>)
+                                                       ← 10 s webview-side debounce
   → patch POSTs /pending-actions/{id}/ack
 ```
+
+`AggregatePluginServerName` is a Go const in `internal/patchstate/state.go` that
+resolves to the string `"mcp-gateway"` — the P4-08 invariant ties the plugin
+manifest's name, the `plugin-sync` regen target, and the reconnect-action
+`serverName` field to a single source of truth.
 
 The two-stage debounce (500 ms server + 10 s webview) coalesces bursts of
 backend mutations into a single user-visible Claude Code reload.

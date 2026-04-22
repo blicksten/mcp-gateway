@@ -376,7 +376,7 @@ describe('Claude Code failure-mode state machine', () => {
 			assert.equal(colorForMode('L'), 'yellow');
 		});
 		it('maps RED to H, G, A, B, D, F, K, M, J', () => {
-			for (const m of ['H', 'G', 'A', 'B', 'D', 'F', 'K', 'M', 'J'] as const) {
+			for (const m of ['H', 'G', 'A', 'B', 'D', 'F', 'K', 'M'] as const) {
 				assert.equal(colorForMode(m), 'red', `mode ${m} should be red`);
 			}
 		});

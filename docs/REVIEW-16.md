@@ -702,3 +702,82 @@ PAL thinkdeep external expert (`gpt-5.2-pro`) was unresponsive across two contin
 | Scope boundary — zero modifications outside 3 declared files (lifecycle/manager.go added for `SetSession` test helper, same pattern as `SetStatus`/`SetTools`) | PASS with justification |
 
 **Final verdict: APPROVE.** 0 CRITICAL / 0 HIGH / 0 MEDIUM / 0 LOW unresolved. `-race` deferred to CI (no gcc locally; write path is a documented theoretical race over a two-word string store).
+
+## Phase 16 /finish - architect critical analysis
+
+**Auditor:** architect (pipeline checkpoint-finish-44f45055, step 3 of 8)
+**Scope:** 17 commits ahead of origin/main (Phase 16.3 through 16.9 + 16.4 consolidation), 40 files / +9282/-81.
+**Method:** Read contract doc + 6 primary source files + test harness + patch + cross-grep invariants. Full go-test ./... confirmed: 14/14 packages pass.
+**Cross-validation:** Internal (PAL not invoked; pipeline subsequent CV-gate step handles external validation).
+
+### Contract coherence (FROZEN v1.6.0) - handlers match docs/api/claude-code-endpoints.md
+
+All 7 endpoints (patch-heartbeat, patch-status, pending-actions, pending-actions/{id}/ack, probe-trigger, probe-result, plugin-sync, compat-matrix) match the contract doc 1:1 in route, method, auth, and response shape. Nonce minimum-length (>= 16 chars, contract line 277) is enforced at handleClaudeCodeProbeTrigger (claude_code_handlers.go:344). plugin-sync response envelope (status, mcp_json_path, entries_count, action_enqueued, optional action_id) matches contract lines 316-322. compat-matrix returns 503 not 404 when the configs file is missing (contract lines 377-378).
+
+Heartbeat Go struct (internal/patchstate/state.go:83-102) matches the FROZEN field table 1:1. All 14 documented fields map to a Go field with identical JSON tag. No drift. ReceivedAt is a server-side-only addition overwritten in RecordHeartbeat:242 so the wire shape is unchanged.
+
+### Concurrency safety
+
+- **persistAsync snapshot-inside-persistMu** (a7521fa, state.go:601-633): snapshot is taken under s.mu.RLock() INSIDE persistMu.Lock(). Serializes writes (rename-race protection on Windows) and guarantees freshest on-disk image. Delivered actions are correctly skipped. persistWg.Go(func..) is Go 1.25 method; all 14 packages compile and test-pass.
+- **TriggerPluginRegen deep-copy** (server.go:179-212): value-copies each models.ServerConfig under cfgMu.RLock into a new map, releases the lock, passes private snapshot to Regenerate. Severs the PAL-CR-H1 race window. EnqueueReconnectAction(AggregatePluginServerName) called outside cfgMu; no lock inversion.
+- **perBackendServer map** (gateway.go:442-459): mutations take serverMu.Lock(); ServerFor reads use RLock. RebuildTools holds toolsMu.Lock() (outer) plus briefly serverMu.Lock() (inner); consistent ordering. Race-annotated gateway_proxy_test exercises concurrent RebuildTools and ServerFor.
+
+### Security surface
+
+- **CORS preflight-before-authMW** (server.go:288-300): r.Use(claudeCodeCORS) registers first, then r.Use(authMW). claudeCodeCORS short-circuits OPTIONS with 204 before calling next.ServeHTTP, so preflight never reaches auth. Confirmed via OPTIONS tests in claude_code_handlers_test.go:215, 224. Compliant with contract line 34.
+- **Rate-limiter separation** (server.go:147-151): three distinct limiters; heartbeatLimiter keyed on session_id, pendingActionsLimiter keyed on IP, patchStatusLimiter keyed on IP. Separate instances so dashboard polling does not starve patch polling (PAL-CR2). Budget 60/min matches contract line 45.
+- **Auth token handling:** patchstate persist uses filePerm = 0600 (state.go:67) + MkdirAll 0700 + post-tmp-write Chmod. Inlined-token-in-index.js: umask 077 before cp+awk+redirect, chmod 600 belt-and-suspenders (apply.sh:151), PowerShell icacls DACL parity, character-class allowlist [A-Za-z0-9_.-], placeholder-survival guard.
+
+### Cross-phase invariants
+
+- **P4-08 reconnect-scoping:** sole production caller server.go:210 uses patchstate.AggregatePluginServerName (const = "mcp-gateway", state.go:44). All other call sites are test code. HOLDS.
+- **FROZEN-contract Heartbeat struct:** matches contract 1:1 (table above). HOLDS.
+- **Mode E never emitted:** FailureMode type at types.ts:91-104 omits E; evaluateMode has no branch returning E; colorForMode has no case for E. Regression test claude-code-status.test.ts:351-367 sweeps 6 scenarios and asserts notEqual(mode, E). HOLDS.
+
+### Phase 16.4 consolidation commit (e8de700) soundness
+
+Five files (1863 insertions) landed atomically. Verified against backend-dev STEP RESULT promises:
+
+- **porfiry-mcp.js (464 lines):** MCP marker line 1; three placeholders lines 5-7; reconnectMcpServer called at fire-time (line 295 inside executeReconnect); awaitingDiscovery FIFO with AWAITING_DISCOVERY_QUEUE_MAX cap (line 330); MutationObserver (lines 189-198, mirrors porfiry-taskbar.js:93-97 pattern); SP4-M1 state-check-at-fire-time at dispatchReconnect (lines 370-379); SP4-M2 scrub regex covering all 6 documented patterns (line 65).
+- **porfiry-mcp.test.mjs (1036 lines, 24 tests):** Covers T16.4.6 #1-17 + 3 CR-16.4 regressions + 4 pure-helper extras. Test #16 [SP4-M1] debounce-fires-during-lost exercises state-check-at-fire-time. Test #17 [SP4-M2] scrubError covers all six patterns (Unix home+stack, /workspace/, /opt/claude-code/, UNC, /System/Library/, Windows AppData). P4-05/06/09 assertions are in dashboard-side claude-code-status.test.ts, not patch-side; consistent split between webview-patch logic and dashboard FSM.
+- **apply-mcp-gateway.sh (161 lines):** URL allowlist regex (89), token character-class (111), umask-before-write (134), chmod 600 belt-and-suspenders (151), placeholder-survival guard (144). Aligns with commit message promises.
+- **apply-mcp-gateway.ps1 (191 lines):** grep-verified PS env-var parity with .sh ($env:MCP_GATEWAY_URL, $env:MCP_GATEWAY_TOKEN_FILE).
+- **configs/supported_claude_code_versions.json (11 lines):** 9 keys match handleClaudeCodeCompatMatrix schema and documentation at endpoints.md:366-372.
+
+### Findings
+
+| ID | Severity | Area | File:Line | Finding |
+|----|----------|------|-----------|----------|
+| A-FIN-01 | HIGH | security (env pollution) | cmd/mcp-ctl/install_claude_code.go:370-371 | runApplyPatch uses os.Setenv to pass values to the child. os.Setenv mutates the PARENT mcp-ctl process env; values persist for the rest of the process lifetime and are inherited by any further children. The code comment on line 369 promises "Token passed via env so it stays out of argv / shell history" but parent-env pollution defeats that contract. Correct fix: populate exec.Command .Env field on the child only. Impact: token leakage beyond intended child-process scope; violates contract-stated security property. |
+| A-FIN-02 | HIGH | contract mismatch (silent no-op) | cmd/mcp-ctl/install_claude_code.go:370-371 vs installer/patches/apply-mcp-gateway.sh:81,96 + .ps1:98,110 | CLI sets GATEWAY_URL + GATEWAY_AUTH_TOKEN but the apply scripts read MCP_GATEWAY_URL and MCP_GATEWAY_TOKEN_FILE. CLI-set env vars are IGNORED by the scripts. The flow happens to work only because the script defaults (http://127.0.0.1:8765, ~/.mcp-gateway/auth.token) coincide with the canonical install. Any operator overriding --api-url finds the apply step still targets the default URL; no error surfaces. The dry-run output at line 177 prints GATEWAY_URL=apiURL suggesting the override is plumbed, which is false. Additional subtlety: MCP_GATEWAY_TOKEN_FILE is a PATH, not a TOKEN; correct fix passes tokenPath (not authToken) as that var. No integration test asserts that a non-default --api-url reaches the patched index.js. Impact: operators with non-default URLs silently get a patch pointing at the default URL; dashboard Mode H fires after VSCode reload. |
+| A-FIN-03 | MEDIUM | dead branch / orphan mode | vscode/mcp-gateway-dashboard/src/claude-code/status.ts:91-104,197,254 | FailureMode declares J (Multiple sessions) with color red and banner text but evaluateMode never returns J. The test at claude-code-status.test.ts:379 asserts colorForMode(J) equals red which passes trivially because the case exists but no test drives evaluateMode to produce J. Either (a) J is emitted by a higher-level session aggregator not in this audit scope, or (b) it is dead planned-extension code that never landed. If (b): remove from the type; if (a): add an evaluator-path test. Impact: no end-user impact today; latent drift between type declaration and evaluator. |
+| A-FIN-04 | LOW | test-contract gap | internal/api/claude_code_handlers_test.go | No test exercises the ConfigOverride field in heartbeatResponse. Contract line 113 documents field as omitted in default build; absence by design. When a future phase wires config-override plumbing, a round-trip test will be needed to avoid a silent mismatch between gateway typed fields at claude_code_handlers.go:264-266 and patch range table at porfiry-mcp.js:29-32. Flagged for Phase 17. |
+| A-FIN-05 | LOW | docs consistency | docs/api/claude-code-endpoints.md:400-407 | Action-enqueue flow diagram shows patchstate.EnqueueReconnectAction("mcp-gateway") with the literal string; consistent with P4-08 but inconsistent with Go-side usage pattern which always uses the constant AggregatePluginServerName. Minor: add a parenthetical. Impact: docs-maintenance clarity only; zero runtime impact. |
+
+### Blocking-severity summary (threshold = low per CLAUDE_GATE_MIN_BLOCKING_SEVERITY)
+
+Under the strict default gate (zero findings of any severity), Phase 16 fails at A-FIN-01 and A-FIN-02 (same root cause in install_claude_code.go:runApplyPatch; both naming AND scoping are wrong). Fix is one small commit: in runApplyPatch, replace the two os.Setenv calls with a child-scoped cmd.Env = append(os.Environ(), "MCP_GATEWAY_URL=apiURL", "MCP_GATEWAY_TOKEN_FILE=tokenPath") plumbed through the commandRunner abstraction, correct the dry-run string at line 177, and add an integration test that overrides --api-url and greps the patched index.js for that URL.
+
+**Architect verdict: DISPUTE / HALT before final commit.** Recommend the next pipeline step route to backend-dev for a focused patch to cmd/mcp-ctl/install_claude_code.go, or (if the user accepts the debt) defer as Phase 16.10 / 17.0 carry-over and proceed to doc-writer with this section documenting the known defect. The remaining 15 commits are coherent, contract-faithful, and concurrency-safe.
+
+**Tests:** go test ./... returns 14/14 packages PASS (verified locally during this review).
+
+### Resolution (backend-dev in-cycle fix, 2026-04-22)
+
+All 5 architect findings FIXED before final commit:
+
+| ID | Fix |
+|----|-----|
+| A-FIN-01 | `runApplyPatch` replaced `os.Setenv` with `cmd.Env = append(os.Environ(), …)` via type-assertion on `*exec.Cmd`. Token leak into parent process eliminated. Regression test `TestInstallClaudeCode_RunApplyPatch_ChildScopedEnv` asserts parent env is untouched. |
+| A-FIN-02 | Env var names corrected to `MCP_GATEWAY_URL` + `MCP_GATEWAY_TOKEN_FILE` (matching apply-mcp-gateway.sh:81,96 + .ps1:98,110). Signature changed from `runApplyPatch(apiURL, authToken, …)` → `runApplyPatch(apiURL, tokenPath, …)` because `MCP_GATEWAY_TOKEN_FILE` expects a PATH, not token bytes. Both call sites updated (run normal flow + runRefreshToken). Dry-run output updated. Regression test asserts MCP_GATEWAY_URL carries the CLI-provided value and MCP_GATEWAY_TOKEN_FILE carries the tokenPath; old `GATEWAY_URL`/`GATEWAY_AUTH_TOKEN` names verified absent. |
+| A-FIN-03 | Mode `'J'` removed from `FailureMode` type, `colorForMode` switch, `renderBanner` case. Test `colorForMode — maps RED to …` updated to drop `'J'`. Multi-session UX handled by the per-session rendering loop (dashboard lists one SessionStatus per session); no top-level J is needed. |
+| A-FIN-04 | `TestHeartbeatStoreAndRetrieve` extended with round-trip assertion: decode response → re-marshal → assert `"config_override"` key absent when ConfigOverride is nil (omitempty contract). Guards against future refactors emitting `"config_override":null`. |
+| A-FIN-05 | `docs/api/claude-code-endpoints.md` action-enqueue flow diagram updated to reference `patchstate.AggregatePluginServerName` const with a trailing paragraph explaining the single-source-of-truth invariant ties plugin manifest + plugin-sync regen + reconnect-action serverName together. |
+
+**Gate evidence (post-fix):**
+- `go test ./... -count=1` → 14/14 packages green.
+- `go test ./cmd/mcp-ctl/ -run TestInstallClaudeCode_RunApplyPatch_ChildScopedEnv` → PASS (new regression guard).
+- `npm run compile` clean.
+- Scoped mocha `src/test/claude-code-*.test.ts + slash-command-generator.test.ts` → 86 passing.
+
+**Final architect verdict: APPROVE.** Zero blocking findings remaining at threshold `low`.

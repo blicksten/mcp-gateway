@@ -194,7 +194,6 @@ export function colorForMode(mode: FailureMode): StatusColor {
 		case 'H':
 		case 'K':
 		case 'M':
-		case 'J':
 			return 'red';
 	}
 }
@@ -251,11 +250,6 @@ export function renderBanner(
 			};
 		case 'I':
 			return { banner: '⏸ Claude Code idle' };
-		case 'J':
-			return {
-				banner: 'Multiple Claude Code sessions active',
-				action: 'Per-session status shown above.',
-			};
 		case 'K':
 			return {
 				banner: 'Gateway token rotated since patch install — inlined token is stale.',

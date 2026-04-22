@@ -81,6 +81,20 @@ func TestHeartbeatStoreAndRetrieve(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	assert.True(t, resp.Acked)
 	assert.Greater(t, resp.NextHeartbeatInMs, 0)
+	// A-FIN-04 (architect review, checkpoint-finish-44f45055): ensure the
+	// heartbeatResponse wire shape round-trips cleanly even when
+	// ConfigOverride is nil (v1.6.0 default). The FROZEN contract
+	// (docs/api/claude-code-endpoints.md) declares config_override as
+	// optional; the `omitempty` tag must keep it out of the JSON payload.
+	// Re-marshal the decoded response and confirm the string doesn't
+	// contain the key — prevents future refactors from accidentally
+	// emitting `"config_override":null`, which would exercise a different
+	// code path in the webview patch's CONFIG merger.
+	roundTrip, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.NotContains(t, string(roundTrip), "config_override",
+		"config_override must stay out of the payload when the server has nothing to push (omitempty contract)")
+	assert.Nil(t, resp.ConfigOverride, "default response must not populate ConfigOverride")
 
 	// GET /patch-status returns our heartbeat.
 	rr2 := doClaudeCodeRequest(t, h, "GET", "/api/v1/claude-code/patch-status", "", nil, ccTestBearer)

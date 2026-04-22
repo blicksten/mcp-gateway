@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -290,6 +291,96 @@ func TestInstallClaudeCode_NoPatchFlagSkipsApplyScript(t *testing.T) {
 	// /bin/sh or powershell.exe must NOT be called when --no-patch is set.
 	assert.Equal(t, 0, fr.callsFor("/bin/sh"))
 	assert.Equal(t, 0, fr.callsFor("powershell.exe"))
+}
+
+// TestInstallClaudeCode_RunApplyPatch_ChildScopedEnv is the regression guard
+// for architect-review findings A-FIN-01 + A-FIN-02 (checkpoint-finish-
+// 44f45055). Previously, `runApplyPatch` mutated the PARENT process env
+// via os.Setenv and used the wrong env var names. The fix puts env on
+// *exec.Cmd.Env (child-scoped) and uses `MCP_GATEWAY_URL` +
+// `MCP_GATEWAY_TOKEN_FILE` — the names the apply scripts actually read.
+//
+// This test constructs a real *exec.Cmd (not a fake) so Env assignment
+// is observable, then verifies:
+//   (1) the parent process env is NOT mutated by runApplyPatch
+//   (2) the child's Env contains the correct MCP_GATEWAY_* variable
+//       names — NOT the old GATEWAY_URL / GATEWAY_AUTH_TOKEN names
+func TestInstallClaudeCode_RunApplyPatch_ChildScopedEnv(t *testing.T) {
+	// Only runs when an apply script is on disk — otherwise runApplyPatch
+	// short-circuits with a "missing script" error before reaching the env
+	// setup. On the mcp-gateway repo the script IS committed at
+	// installer/patches/apply-mcp-gateway.sh.
+	scriptOverride := filepath.Join("..", "..", "installer", "patches", "apply-mcp-gateway.sh")
+	if runtime.GOOS == "windows" {
+		scriptOverride = filepath.Join("..", "..", "installer", "patches", "apply-mcp-gateway.ps1")
+	}
+	if _, err := os.Stat(scriptOverride); err != nil {
+		t.Skipf("apply script not on disk at %s — skipping child-env regression guard", scriptOverride)
+	}
+	t.Setenv("GATEWAY_APPLY_SCRIPT", scriptOverride)
+
+	// Snapshot parent env BEFORE calling runApplyPatch. A-FIN-01 asserts
+	// these two variables are NOT set in the parent after the call.
+	parentBefore := map[string]string{
+		"MCP_GATEWAY_URL":        os.Getenv("MCP_GATEWAY_URL"),
+		"MCP_GATEWAY_TOKEN_FILE": os.Getenv("MCP_GATEWAY_TOKEN_FILE"),
+		"GATEWAY_URL":            os.Getenv("GATEWAY_URL"),
+		"GATEWAY_AUTH_TOKEN":     os.Getenv("GATEWAY_AUTH_TOKEN"),
+	}
+
+	// Custom runner that captures the *exec.Cmd pointer so the test can
+	// inspect .Env AFTER runApplyPatch returns (runApplyPatch sets the env
+	// between runner return and CombinedOutput invocation).
+	var capturedCmd *exec.Cmd
+	capturingRunner := func(name string, args ...string) commandHandle {
+		cmd := exec.Command(name, args...) // #nosec G204 — test-only, args come from runApplyPatch
+		capturedCmd = cmd
+		return cmd
+	}
+	ins := &installer{runner: capturingRunner}
+	// We don't care whether the underlying shell succeeds — the script
+	// may reject our fake token path — we only care about what Env landed
+	// on the Cmd. The call returns an error on non-zero exit, which we
+	// intentionally ignore.
+	_ = ins.runApplyPatch("http://127.0.0.1:8765", "/tmp/fake-token-path", false)
+	var capturedEnv []string
+	if capturedCmd != nil {
+		capturedEnv = capturedCmd.Env
+	}
+
+	// A-FIN-01: parent env untouched.
+	for k, want := range parentBefore {
+		got := os.Getenv(k)
+		assert.Equal(t, want, got,
+			"parent env var %s must not be mutated by runApplyPatch (A-FIN-01 regression)", k)
+	}
+
+	// A-FIN-02: child env carries the CORRECT names pointing at the
+	// CLI-provided values, and NOT the old wrong names.
+	if capturedEnv == nil {
+		t.Skip("runner wasn't invoked (script existence check may have short-circuited)")
+	}
+	envMap := make(map[string]string, len(capturedEnv))
+	for _, kv := range capturedEnv {
+		if idx := strings.Index(kv, "="); idx > 0 {
+			envMap[kv[:idx]] = kv[idx+1:]
+		}
+	}
+	assert.Equal(t, "http://127.0.0.1:8765", envMap["MCP_GATEWAY_URL"],
+		"child env must carry MCP_GATEWAY_URL — the var name apply-mcp-gateway.sh reads (A-FIN-02 regression)")
+	assert.Equal(t, "/tmp/fake-token-path", envMap["MCP_GATEWAY_TOKEN_FILE"],
+		"child env must carry MCP_GATEWAY_TOKEN_FILE as a PATH, not the old GATEWAY_AUTH_TOKEN name (A-FIN-02 regression)")
+	_, hasOldURL := envMap["GATEWAY_URL"]
+	_, hasOldToken := envMap["GATEWAY_AUTH_TOKEN"]
+	// The old names are allowed IF they already existed in the parent env
+	// (via os.Environ() in the child); the test's parentBefore guard
+	// ensures we didn't set them. So in a clean test env they must be absent.
+	if parentBefore["GATEWAY_URL"] == "" {
+		assert.False(t, hasOldURL, "stale GATEWAY_URL must not leak into child env")
+	}
+	if parentBefore["GATEWAY_AUTH_TOKEN"] == "" {
+		assert.False(t, hasOldToken, "stale GATEWAY_AUTH_TOKEN must not leak into child env")
+	}
 }
 
 func TestInstallClaudeCode_ApplyScriptPath_WindowsVariant(t *testing.T) {

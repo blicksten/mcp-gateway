@@ -174,7 +174,7 @@ func (ins *installer) run(cmd *cobra.Command, opts installOpts) error {
 		ins.logf(cmd, "  3. POST %s/api/v1/claude-code/plugin-sync", apiURL)
 		if !opts.NoPatch {
 			applyScript := applyScriptPath()
-			ins.logf(cmd, "  4. %s --auto (GATEWAY_URL=%s, token via env)", applyScript, apiURL)
+			ins.logf(cmd, "  4. %s --auto (MCP_GATEWAY_URL=%s, MCP_GATEWAY_TOKEN_FILE=%s — child-scoped env)", applyScript, apiURL, tokenPath)
 		} else {
 			ins.logf(cmd, "  4. (skipped — --no-patch)")
 		}
@@ -204,7 +204,7 @@ func (ins *installer) run(cmd *cobra.Command, opts installOpts) error {
 	ins.logf(cmd, "✓ plugin .mcp.json synced with current backends")
 
 	if !opts.NoPatch {
-		if err := ins.runApplyPatch(apiURL, authToken, false); err != nil {
+		if err := ins.runApplyPatch(apiURL, tokenPath, false); err != nil {
 			return ins.rollbackAndExit(cmd, err)
 		}
 		ins.logf(cmd, "✓ webview patch applied — reload VSCode to activate")
@@ -247,7 +247,7 @@ func (ins *installer) runCheckOnly(cmd *cobra.Command) error {
 }
 
 // runRefreshToken implements the REVIEW-16 M-03 re-registration flow.
-func (ins *installer) runRefreshToken(cmd *cobra.Command, apiURL, authToken, _ string) error {
+func (ins *installer) runRefreshToken(cmd *cobra.Command, apiURL, authToken, tokenPath string) error {
 	ins.logf(cmd, "refreshing plugin + patch with current auth.token…")
 	// Re-invoke plugin install path which re-registers the user_config.auth_token.
 	if err := ins.runPluginInstall(cmd); err != nil {
@@ -256,8 +256,10 @@ func (ins *installer) runRefreshToken(cmd *cobra.Command, apiURL, authToken, _ s
 	if err := ins.triggerPluginSync(apiURL, authToken); err != nil {
 		return exitErr(installExitDriftUnresolved, fmt.Errorf("plugin-sync failed: %w", err))
 	}
-	// Re-apply patch so the inlined token in index.js is refreshed.
-	if err := ins.runApplyPatch(apiURL, authToken, false); err != nil {
+	// Re-apply patch so the inlined token in index.js is refreshed. Pass
+	// tokenPath (not the token bytes) — the apply script reads MCP_GATEWAY_TOKEN_FILE
+	// as a path and validates the token bytes itself.
+	if err := ins.runApplyPatch(apiURL, tokenPath, false); err != nil {
 		return exitErr(installExitDriftUnresolved, fmt.Errorf("patch re-apply failed: %w", err))
 	}
 	ins.logf(cmd, "✓ plugin + patch refreshed with current token")
@@ -347,7 +349,23 @@ func (ins *installer) triggerPluginSync(apiURL, authToken string) error {
 
 // runApplyPatch runs apply-mcp-gateway.sh (Unix) or apply-mcp-gateway.ps1
 // (Windows) with --auto. When uninstall=true, adds --uninstall.
-func (ins *installer) runApplyPatch(apiURL, authToken string, uninstall bool) error {
+//
+// The apply scripts read `MCP_GATEWAY_URL` and `MCP_GATEWAY_TOKEN_FILE`
+// (a PATH to the token file — they read the bytes themselves with
+// appropriate validation). We pass:
+//
+//	MCP_GATEWAY_URL       = apiURL
+//	MCP_GATEWAY_TOKEN_FILE = tokenPath
+//
+// A-FIN-01 / A-FIN-02 (architect review, checkpoint-finish-44f45055):
+// previous implementation used os.Setenv which mutates the PARENT process
+// environment — the token would persist in the daemon's env long after
+// the spawned apply script exited. It also used the wrong env var names
+// (`GATEWAY_URL` / `GATEWAY_AUTH_TOKEN`), so the scripts silently fell
+// back to defaults and ignored the CLI-provided `--api-url` flag. Fixed
+// by attaching env to the *exec.Cmd directly via Env[] — child-scoped
+// only, and the names now match what the scripts actually read.
+func (ins *installer) runApplyPatch(apiURL, tokenPath string, uninstall bool) error {
 	script := applyScriptPath()
 	// Check script exists before invoking so the error is actionable.
 	if _, err := os.Stat(script); err != nil {
@@ -366,10 +384,17 @@ func (ins *installer) runApplyPatch(apiURL, authToken string, uninstall bool) er
 	if uninstall {
 		argv = append(argv, "--uninstall")
 	}
-	// Token passed via env so it stays out of argv / shell history.
-	_ = os.Setenv("GATEWAY_URL", apiURL)
-	_ = os.Setenv("GATEWAY_AUTH_TOKEN", authToken)
 	h := ins.runner(name, argv...)
+	// Env scoped to the child process only. Type-assert for the production
+	// path; fake runners in tests don't need env (they don't exec). A
+	// type-assertion miss is benign — the apply script will read its own
+	// defaults.
+	if cmd, ok := h.(*exec.Cmd); ok {
+		cmd.Env = append(os.Environ(),
+			"MCP_GATEWAY_URL="+apiURL,
+			"MCP_GATEWAY_TOKEN_FILE="+tokenPath,
+		)
+	}
 	out, err := h.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("apply script failed: %w (output: %s)", err, string(out))
