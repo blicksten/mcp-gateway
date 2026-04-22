@@ -1,0 +1,11 @@
+{
+  "min": "2.0.0",
+  "max_tested": "2.5.8",
+  "known_broken": [],
+  "last_verified": "2026-04-21",
+  "alt_e_verified_versions": ["2.1.114"],
+  "observed_fiber_depths": {"2.1.114": 2},
+  "max_accepted_fiber_depth": 80,
+  "observed_reconnect_latency_ms_p50": 5400,
+  "observed_reconnect_latency_note": "Single-point measurement on 2026-04-21 (server='pal'). Expand to p50/p95/p99 over accumulated heartbeat telemetry once the patch ships; update this field weekly via `mcp-ctl stats versions` (Phase 17 candidate)."
+}
