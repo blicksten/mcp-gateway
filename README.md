@@ -241,6 +241,88 @@ Every `server_name` in `commands.json` must resolve to an entry in `servers.json
 
 Catalog-enriched slash-command files carry a magic-header marker on line 1. When the server re-transitions to `running`, the file is regenerated in full and any edits **below** line 1 are silently overwritten. To preserve operator edits, delete the line-1 marker — the generator treats markerless files as operator-owned and leaves them alone. A hash-augmented marker that tolerates below-line-1 edits is a v1.6 candidate.
 
+## Connecting Claude Code to the Gateway
+
+> Available in v1.6.0+.
+
+Two-line install (requires the gateway daemon to be running):
+
+```bash
+mcp-ctl install-claude-code --mode proxy
+# Open Claude Code. In the /mcp panel you should see
+# `plugin:mcp-gateway:<backend>` entries for every registered backend.
+```
+
+What the installer does:
+
+1. Verifies the gateway is running (`GET /api/v1/health`).
+2. Reads `~/.mcp-gateway/auth.token`.
+3. Runs `claude plugin marketplace add <repo>/installer/marketplace.json`
+   (idempotent) and `claude plugin install mcp-gateway@mcp-gateway-local`.
+4. POSTs `/api/v1/claude-code/plugin-sync` to regenerate `.mcp.json` with
+   the current backend list.
+5. Unless `--no-patch`, applies `installer/patches/apply-mcp-gateway.sh`
+   (or `.ps1` on Windows) to enable automatic reconnect on backend
+   changes. The patch walks Claude Code's React fiber tree to capture a
+   reference to `session.reconnectMcpServer` — the same native method
+   Claude Code's `/mcp` panel "Reconnect" button calls.
+
+**Dry-run** first if you want to see the plan without writes:
+
+```bash
+mcp-ctl install-claude-code --dry-run
+```
+
+**Auto-reload opt-in.** The webview patch is optional. What it does:
+
+- Listens for reconnect actions the gateway enqueues after `POST
+  /api/v1/servers` mutations.
+- Calls `session.reconnectMcpServer("mcp-gateway")` so Claude Code picks
+  up the new backend list without a restart.
+- Modifies `~/.vscode/extensions/anthropic.claude-code-*/webview/index.js`
+  in place with a backup (`index.js.bak`). File mode locked to 0600 on
+  POSIX; DACL-restricted on Windows.
+
+**Manual path (patch declined).** You can skip the patch with
+`--no-patch`. After adding a backend, open Claude Code's `/mcp` panel →
+right-click the `mcp-gateway` entry → **Reconnect**. Claude Code 2.1.114
+does NOT ship a `/reload-plugins` slash command; the per-server
+Reconnect action in the `/mcp` panel UI is the native primitive and is
+what the auto-reload patch calls programmatically under the hood.
+
+**Uninstall:**
+
+```bash
+mcp-ctl uninstall-claude-code
+# or, manually:
+claude plugin uninstall mcp-gateway
+bash installer/patches/apply-mcp-gateway.sh --uninstall
+```
+
+**Dashboard shortcut.** The VSCode extension exposes the same flow
+via the command palette → `MCP Gateway: Show Claude Code Integration`.
+The panel displays plugin + patch + channel status, a 12-mode failure
+matrix, and `[Activate]` / `[Probe reconnect]` / `[Copy diagnostics]`
+buttons.
+
+## Commands vs MCP servers
+
+Two different things live under `.claude/`, both are markdown, both are
+managed by mcp-gateway — and they are NOT interchangeable:
+
+- **`.claude/commands/*.md`** are **prompt templates** — slash-command
+  helpers for the user (e.g. `/context7`). They are NOT MCP server
+  registrations. The mcp-gateway extension auto-generates these from
+  registered backends with an AUTO-GENERATED marker + disclaimer on the
+  first three lines.
+- **`claude plugin install mcp-gateway@mcp-gateway-local`** is the MCP
+  registration path — it registers our plugin with Claude Code's MCP
+  client so backends show up in the `/mcp` panel and `tools/list` cache.
+
+See the [Claude Code plugin docs](https://docs.claude.com/en/docs/claude-code/)
+for the authoritative distinction between slash-command plugins and MCP
+plugins.
+
 ## CLI Reference
 
 ```

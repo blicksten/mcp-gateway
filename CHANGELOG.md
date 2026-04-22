@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-04-22
+
+### Added
+
+- **Dual-mode gateway** — `/mcp` aggregate + `/mcp/{backend}` per-backend MCP surfaces from a single daemon. Unblocks Claude Code plugin packaging where each backend registers as its own `.mcp.json` entry without breaking clients that depend on the aggregate endpoint.
+- **Claude Code Plugin packaging** — `installer/plugin/` ships an installable plugin with `.claude-plugin/plugin.json` (userConfig: `gateway_url` + `auth_token`) and `installer/marketplace.json` for one-command install. The plugin's `.mcp.json` is regenerated from the gateway's live backend list on every REST mutation (atomic tmp+rename, 0600 POSIX / DACL Windows).
+- **`mcp-ctl install-claude-code`** — headless bootstrap CLI. Flags: `--mode|--scope|--no-patch|--dry-run|--refresh-token|--check-only`. LIFO rollback on partial failure. Exit codes 0/1/2/3/4 distinguishing usage / gateway-down / token-drift / rollback-executed.
+- **Webview patch with native MCP reconnect (Alt-E pattern)** — opt-in. Walks Claude Code's React fiber tree to capture a reference to `session.reconnectMcpServer` (the same native method the `/mcp` panel's Reconnect button calls) and invokes it when the gateway enqueues a reconnect action. Closes the "tools/list caching" bug class (#13646) without patching `extension.js`.
+- **`gateway.invoke` universal fallback tool** + `gateway.list_servers` / `gateway.list_tools` meta-tools on the aggregate endpoint. Callable even when the specific tool isn't in the client's current `tools/list` cache.
+- **Supported-versions map** — `configs/supported_claude_code_versions.json` tracks `alt_e_verified_versions`. Served via `GET /api/v1/claude-code/compat-matrix`. Dashboard surfaces Mode C (yellow advisory) when the running CC version is unverified.
+- **`/api/v1/claude-code/*` REST endpoints** — `patch-heartbeat`, `patch-status`, `pending-actions`, `pending-actions/{id}/ack`, `probe-trigger`, `probe-result`, `plugin-sync`, `compat-matrix`. FROZEN v1.6.0 contract in `docs/api/claude-code-endpoints.md`.
+- **VSCode dashboard "Claude Code Integration" panel** — new command `mcpGateway.showClaudeCodeIntegration`. Displays plugin + patch + channel status with a 12-mode failure matrix (A-M, E obsoleted under Alt-E). Buttons: `[Activate for Claude Code]`, `[Probe reconnect]`, `[Copy diagnostics]`. Diagnostics report includes Alt-E metrics (p50/p95 reconnect latency, fiber depth history, dedup recent errors).
+- **Slash-command disclaimer** — every auto-generated `.claude/commands/*.md` carries two disclaimer lines below the AUTO-GENERATED marker stating "this is a slash-command prompt template, NOT an MCP server registration" + pointer to the mcp-gateway plugin install path. Closes operator-confusion bug class (#16143). Regression-pinned by test.
+
+### Security
+
+- **CORS policy for `vscode-webview://`** narrowly scoped to `/api/v1/claude-code/*`; rest of `/api/v1` retains existing csrf-protected origin policy. OPTIONS preflight runs BEFORE bearer auth so browsers can preflight without `Authorization` (REVIEW-16 L-02). Unknown origins get 204 WITHOUT `Access-Control-Allow-Origin` — deny by omission.
+- **Rate limits** — separate token-bucket limiters on `/patch-heartbeat` (5/min per session_id), `/pending-actions` (60/min per IP), `/patch-status` (60/min per IP). Amortized idle-bucket eviction.
+- **Patch state durability (REVIEW-16 M-01)** — pending reconnect actions + recent heartbeats persist to `~/.mcp-gateway/patch-state.json` (0600, atomic tmp+rename) on every mutation. TTL-filtered on daemon startup. Graceful-shutdown path flushes in-flight persists before `lm.StopAll`.
+- **Inlined auth token in patched index.js locked to 0600 on POSIX / DACL on Windows** (REVIEW-16 L-03). `mcp-ctl install-claude-code --refresh-token` re-registers plugin + re-applies patch after gateway token rotation (REVIEW-16 M-03).
+
+### Documentation
+
+- `docs/ADR-0005-claude-code-integration.md` — architectural decision record for the hybrid dual-mode + plugin + Alt-E webview-patch approach.
+- `docs/api/claude-code-endpoints.md` — FROZEN v1.6.0 REST contract.
+- `docs/TESTING-PHASE-16.md` — four-tier test documentation.
+- README §"Connecting Claude Code to the Gateway" + §"Commands vs MCP servers".
+
+### Breaking
+
+None. All additions are backward-compatible.
+
+### Known limitations
+
+- **Webview patch is opt-in** and modifies Claude Code's own `webview/index.js`. Operators who decline still get full functionality via manual `/mcp` panel Reconnect.
+- **CC version drift** mitigated via `configs/supported_claude_code_versions.json` + dashboard Mode C advisory — unverified versions are warnings, not errors.
+
 ## [1.5.0] - 2026-04-20
 
 ### Added

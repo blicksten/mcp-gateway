@@ -1,0 +1,112 @@
+# Phase 16.9 T16.9.4.a — dogfood smoke test.
+#
+# Runs on PRs that touch `.mcp.json` or `config.json`. Starts the gateway
+# with the repo's own config, waits for /health, asserts the three
+# dogfood backends (context7, orchestrator, playwright) register as
+# `running`, then shuts down cleanly. Guards against bit-rot on the
+# dogfood config when the gateway itself evolves.
+#
+# This CI is intentionally a smoke test — it does NOT run through Claude
+# Code; it just proves the daemon + configured MCPs come up healthy.
+
+name: dogfood-smoke
+
+on:
+  pull_request:
+    paths:
+      - '.mcp.json'
+      - 'config.json'
+      - 'configs/**'
+      - 'cmd/mcp-gateway/**'
+      - 'internal/**'
+  push:
+    branches: [main]
+    paths:
+      - '.mcp.json'
+      - 'config.json'
+      - 'configs/**'
+      - 'cmd/mcp-gateway/**'
+      - 'internal/**'
+
+jobs:
+  dogfood-smoke:
+    # Smoke test requires a full Linux runtime with curl + jq. macOS /
+    # Windows duplicate the same surface; Linux is sufficient.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Build gateway
+        run: go build -o ./mcp-gateway ./cmd/mcp-gateway
+
+      - name: Build mcp-ctl
+        run: go build -o ./mcp-ctl ./cmd/mcp-ctl
+
+      - name: Start gateway in background
+        run: |
+          # --no-auth is safe for this smoke run: the daemon binds to
+          # 127.0.0.1 only, and the job runner is ephemeral + network-
+          # isolated. Production config is covered by the full test suite.
+          MCP_GATEWAY_I_UNDERSTAND_NO_AUTH=1 ./mcp-gateway --no-auth > gateway.log 2>&1 &
+          echo $! > gateway.pid
+
+      - name: Wait for gateway health (timeout 10s)
+        run: |
+          for i in $(seq 1 20); do
+            if curl -sf http://127.0.0.1:8765/api/v1/health > /dev/null; then
+              echo "gateway ready after ${i}x 500ms polls"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "::error::gateway did not become healthy within 10s"
+          echo "--- gateway.log ---"
+          cat gateway.log
+          exit 1
+
+      - name: Assert all configured backends registered running
+        run: |
+          running=$(curl -s http://127.0.0.1:8765/api/v1/servers | \
+            jq '[.[] | select(.status=="running")] | length')
+          echo "running backends: ${running}"
+          if [ "${running}" -lt 3 ]; then
+            echo "::error::expected at least 3 running backends, got ${running}"
+            echo "--- /api/v1/servers ---"
+            curl -s http://127.0.0.1:8765/api/v1/servers | jq .
+            echo "--- gateway.log ---"
+            cat gateway.log
+            exit 1
+          fi
+
+      - name: Gateway shutdown (graceful)
+        if: always()
+        run: |
+          if [ -f gateway.pid ]; then
+            pid=$(cat gateway.pid)
+            kill -TERM "${pid}" 2>/dev/null || true
+            # Wait up to 5s for graceful exit.
+            for i in $(seq 1 10); do
+              if ! kill -0 "${pid}" 2>/dev/null; then
+                exit 0
+              fi
+              sleep 0.5
+            done
+            kill -KILL "${pid}" 2>/dev/null || true
+          fi
+
+      - name: Upload gateway log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dogfood-smoke-log
+          path: gateway.log

@@ -6,7 +6,12 @@ import { createTmpDir, cleanupTmpDir } from './helpers/tmpdir';
 import { fireConfigChange, mockVscode, mockConfigValues, resetMockState } from './mock-vscode';
 import { _resetSchemaCacheForTests } from '../catalog';
 import { ServerDataCache, type CacheRefreshPayload } from '../server-data-cache';
-import { SlashCommandGenerator, MARKER } from '../slash-command-generator';
+import {
+	SlashCommandGenerator,
+	MARKER,
+	DISCLAIMER_LINE_2,
+	DISCLAIMER_LINE_3,
+} from '../slash-command-generator';
 import type { ServerView } from '../types';
 
 function makeServer(name: string, status: string, tools?: Array<{ name: string; description?: string }>): ServerView {
@@ -86,6 +91,10 @@ describe('SlashCommandGenerator', () => {
 			assert.ok(fs.existsSync(filePath), 'file should be created');
 			const content = fs.readFileSync(filePath, 'utf8');
 			assert.equal(content.split('\n')[0], MARKER);
+			// T16.9.3 — disclaimer lines pinned on lines 2 and 3.
+			const lines = content.split('\n');
+			assert.equal(lines[1], DISCLAIMER_LINE_2, 'line 2 must be the "prompt template vs MCP server" disclaimer');
+			assert.equal(lines[2], DISCLAIMER_LINE_3, 'line 3 must point users to the mcp-gateway plugin install path');
 			assert.ok(content.includes('# alpha'));
 			assert.ok(content.includes('- tool1'));
 		});
