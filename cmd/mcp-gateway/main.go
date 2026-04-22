@@ -18,6 +18,7 @@ import (
 	"mcp-gateway/internal/health"
 	"mcp-gateway/internal/lifecycle"
 	"mcp-gateway/internal/models"
+	"mcp-gateway/internal/patchstate"
 	"mcp-gateway/internal/plugin"
 	"mcp-gateway/internal/proxy"
 
@@ -144,6 +145,22 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 		logger.Warn("plugin discovery failed", "error", err)
 	}
 
+	// Phase 16.3: Claude Code webview patch state. Persist path mirrors
+	// the auth.token convention — a dot-directory under the user's home
+	// with 0600 on the file. Load() rehydrates state from a previous
+	// daemon run and TTL-filters stale entries. The cleaner goroutine
+	// prunes expired heartbeats/actions/probes every 30 s; it is stopped
+	// during graceful shutdown after the HTTP server closes.
+	patchStatePath := patchStatePersistPath(logger)
+	ps := patchstate.New(patchStatePath, logger)
+	if err := ps.Load(); err != nil {
+		logger.Warn("patch-state load failed; starting fresh", "error", err)
+	}
+	ps.StartCleaner(30 * time.Second)
+	apiServer.SetPatchState(ps)
+	apiServer.InitClaudeCodeLimiters()
+	defer ps.Stop()
+
 	// Context with signal handling.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -224,7 +241,25 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 
 	// Graceful shutdown.
 	logger.Info("shutting down...")
+	// Drain pending patch-state persists BEFORE ps.Stop so the REVIEW-16
+	// M-01 durability guarantee holds across a signal-driven daemon exit:
+	// any action enqueued between the last mutation and SIGTERM arrival
+	// reaches disk before we return. Stop() then terminates the cleaner.
+	ps.FlushPersists()
 	lm.StopAll(context.Background())
 	logger.Info("mcp-gateway stopped")
 	return nil
+}
+
+// patchStatePersistPath resolves the on-disk path for patchstate state.
+// Convention mirrors auth.token: ~/.mcp-gateway/patch-state.json. Falls
+// back to the working directory if HOME cannot be resolved — persistence
+// is best-effort and a failed resolve should not prevent daemon start.
+func patchStatePersistPath(logger *slog.Logger) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		logger.Warn("user home not resolvable; patch-state will persist to cwd", "error", err)
+		return filepath.Join(".", ".mcp-gateway-patch-state.json")
+	}
+	return filepath.Join(home, ".mcp-gateway", "patch-state.json")
 }

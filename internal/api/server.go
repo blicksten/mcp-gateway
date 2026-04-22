@@ -24,6 +24,7 @@ import (
 	"mcp-gateway/internal/health"
 	"mcp-gateway/internal/lifecycle"
 	"mcp-gateway/internal/models"
+	"mcp-gateway/internal/patchstate"
 	"mcp-gateway/internal/plugin"
 	"mcp-gateway/internal/proxy"
 
@@ -54,6 +55,21 @@ type Server struct {
 	// (the plugin was not installed / discovery failed — not fatal).
 	pluginRegen *plugin.Regenerator
 	pluginDir   string
+
+	// Claude Code webview patch state (Phase 16.3). Set via SetPatchState;
+	// when nil, the /api/v1/claude-code/* route group returns 503 for all
+	// endpoints (feature disabled). Rate limiters guard heartbeat and
+	// pending-actions endpoints against misbehaving or compromised patches.
+	patchState            *patchstate.State
+	heartbeatLimiter      *rateLimiter
+	pendingActionsLimiter *rateLimiter
+	// patchStatusLimiter is separate from pendingActionsLimiter so the
+	// dashboard's /patch-status polling (every 10 s per PLAN-16 T16.5.4)
+	// doesn't compete for tokens with the patch's /pending-actions 2-s
+	// polling when they originate from the same host IP (typical dev
+	// loop). Shared bucket → spec violation against docs/api/claude-code-
+	// endpoints.md "independent 60 req/min budgets" (PAL-CR2 fix).
+	patchStatusLimiter *rateLimiter
 
 	// listenerAddr records the bound listener address once ListenAndServe
 	// has successfully called net.Listen. Nil before that point. Used by
@@ -124,6 +140,16 @@ func (s *Server) SetPluginRegen(dir string, regen *plugin.Regenerator) {
 	s.pluginRegen = regen
 }
 
+// InitClaudeCodeLimiters creates the per-session heartbeat limiter and
+// per-IP pending-actions limiter. Called once from NewServer so the
+// patch-state wiring (SetPatchState) can be deferred without separating
+// limiter lifecycle from server lifecycle. See PLAN-16 T16.3.5.
+func (s *Server) InitClaudeCodeLimiters() {
+	s.heartbeatLimiter = newRateLimiter(patchHeartbeatRateLimit, sessionKey)
+	s.pendingActionsLimiter = newRateLimiter(pendingActionsRateLimit, ipKey)
+	s.patchStatusLimiter = newRateLimiter(pendingActionsRateLimit, ipKey)
+}
+
 // TriggerPluginRegen rebuilds the plugin's `.mcp.json` from the current
 // config (Phase 16.2). Best-effort: regen errors are logged but never
 // propagated to the caller — the mutation already succeeded against
@@ -171,6 +197,17 @@ func (s *Server) TriggerPluginRegen() {
 	// different ports).
 	if err := s.pluginRegen.Regenerate(s.pluginDir, snapshot, plugin.DefaultGatewayURLPlaceholder); err != nil {
 		s.logger.Warn("plugin regen failed", "error", err, "plugin_dir", s.pluginDir)
+		return
+	}
+
+	// Phase 16.3 T16.3.3: after a successful regen, enqueue a reconnect
+	// action so the webview patch can reload Claude Code's view of OUR
+	// aggregate plugin. Coalesced at 500 ms on the server side (and again
+	// at 10 s on the webview side, see PLAN-16 T16.4.3). P4-08 invariant:
+	// serverName is always AggregatePluginServerName regardless of which
+	// individual backend inside the gateway mutated.
+	if s.patchState != nil {
+		s.patchState.EnqueueReconnectAction(patchstate.AggregatePluginServerName)
 	}
 }
 
@@ -237,6 +274,29 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/servers/{name}/call", s.handleCallTool)
 			r.Get("/tools", s.handleListTools)
 			r.Get("/metrics", s.handleMetrics)
+		})
+
+		// Claude Code integration group (Phase 16.3).
+		//
+		// CORS + OPTIONS preflight runs BEFORE bearer auth because browsers
+		// do not attach Authorization to preflight (REVIEW-16 L-02). The
+		// CORS middleware short-circuits OPTIONS and passes everything
+		// else through to authMW. csrfProtect is intentionally NOT
+		// applied — the webview patch is not a cookie-auth browser session
+		// and has its own Bearer token; csrf is only relevant to cookie-
+		// bearing requests (ADR-0003 §csrf-scope).
+		r.Route("/claude-code", func(r chi.Router) {
+			r.Use(claudeCodeCORS)
+			r.Use(authMW)
+
+			r.Post("/patch-heartbeat", s.handleClaudeCodeHeartbeat)
+			r.Get("/patch-status", s.handleClaudeCodePatchStatus)
+			r.Get("/pending-actions", s.handleClaudeCodePendingActions)
+			r.Post("/pending-actions/{id}/ack", s.handleClaudeCodePendingActionAck)
+			r.Post("/probe-trigger", s.handleClaudeCodeProbeTrigger)
+			r.Post("/probe-result", s.handleClaudeCodeProbeResult)
+			r.Post("/plugin-sync", s.handleClaudeCodePluginSync)
+			r.Get("/compat-matrix", s.handleClaudeCodeCompatMatrix)
 		})
 	})
 
