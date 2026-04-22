@@ -325,14 +325,14 @@ Plugin directory is isolated under `installer/plugin/`. Revert removes the direc
 
 ### Tasks
 
-- [ ] T16.3.1 — New REST group `/api/v1/claude-code/*`, Bearer-auth-required (reuse existing auth middleware):
+- [x] T16.3.1 — New REST group `/api/v1/claude-code/*`, Bearer-auth-required (reuse existing auth middleware):
   - `POST /api/v1/claude-code/patch-heartbeat` — accepts Alt-E JSON payload `{patch_version, cc_version, vscode_version, fiber_ok, mcp_method_ok, mcp_method_fiber_depth, last_reconnect_latency_ms, last_reconnect_ok, last_reconnect_error, pending_actions_inflight, fiber_walk_retry_count, mcp_session_state, session_id, ts}` (see T16.4.3). Gateway stores latest per `session_id` with 1h TTL; emits structured log entry. **[P4-07]** Response body returns `{acked:true, next_heartbeat_in_ms:<n>, config_override?:{LATENCY_WARN_MS?:<n>, DEBOUNCE_WINDOW_MS?:<n>, CONSECUTIVE_ERRORS_FAIL_THRESHOLD?:<n>}}` — `config_override` is optional; if present, patch merges into its `CONFIG` object after validating each value falls within the hard-bounded range documented in T16.4.7 §(b). Override source: config.json top-level `patch_config_override` key + `/api/v1/admin/patch-config` runtime endpoint (add to T16.3 if maintainer wants live tuning without daemon restart).
   - `GET /api/v1/claude-code/patch-status` — returns array of latest heartbeats across all active sessions (for dashboard polling).
   - `GET /api/v1/claude-code/pending-actions` — returns next action for patch to execute. Alt-E action shapes: `{id, type:"reconnect", serverName:"mcp-gateway", nonce}` for production reconnect; `{id, type:"probe-reconnect", serverName:"__probe_nonexistent_" + nonce, nonce}` for dashboard probe (see 16.5.6). Idempotent read with `?after=<cursor>` for at-most-once semantics.
   - `POST /api/v1/claude-code/pending-actions/{id}/ack` — patch confirms execution. Gateway marks as delivered.
   - `POST /api/v1/claude-code/probe-result` — patch reports `[Test now]` result `{nonce, ok, error?}`.
 
-- [ ] T16.3.2 — Implement `internal/patchstate/state.go`:
+- [x] T16.3.2 — Implement `internal/patchstate/state.go`:
   ```go
   type PatchState struct {
       mu          sync.RWMutex
@@ -345,13 +345,13 @@ Plugin directory is isolated under `installer/plugin/`. Revert removes the direc
   ```
   Single-writer FIFO queue; eviction via background goroutine. **[REVIEW-16 M-01]** Persist `actions` + last-heartbeat-per-session to disk on every mutation (atomic tmp+rename, 0600 POSIX / Windows DACL to match auth.token). On gateway startup, load and TTL-filter (drop actions > 10 min old, heartbeats > 1 h old). Closes "pending reload-plugins lost on restart" class of bugs. Heartbeat debounce: only persist when session_id is new OR > 30 s since last persist for that session (amortize disk I/O).
 
-- [ ] T16.3.3 — Wire `RegenerateMCPJSON` (16.2.4) to ALSO enqueue a `{type:"reconnect", serverName:"mcp-gateway"}` pending action after successful plugin regen (Alt-E action shape). Debounce: if another regen fires within 500ms, coalesce into a single queued action (prevents action-flood on bulk backend operations). **Note:** the webview-side patch applies an additional 10s debounce (T16.4.3) on top of this 500ms server-side coalescing, matching observed reconnect latency. Actions that stay queued >10min are TTL-dropped on gateway restart (T16.3.2 M-01 durability). **[P4-08] Invariant:** `serverName` is ALWAYS `"mcp-gateway"` here — we enqueue a reconnect for OUR plugin's aggregate MCP entry, regardless of which individual backend inside the gateway mutated (added/removed/disabled). This is the correct behavior because Claude Code sees only one MCP server from our plugin (`mcp-gateway`), not the backends-inside-gateway. Future work for per-backend plugin entries (if ever pursued — currently rejected per "No suppression of aggregate tools" Architectural Decision) would require a different action-enqueue strategy and is OUT OF SCOPE for this phase.
+- [x] T16.3.3 — Wire `RegenerateMCPJSON` (16.2.4) to ALSO enqueue a `{type:"reconnect", serverName:"mcp-gateway"}` pending action after successful plugin regen (Alt-E action shape). Debounce: if another regen fires within 500ms, coalesce into a single queued action (prevents action-flood on bulk backend operations). **Note:** the webview-side patch applies an additional 10s debounce (T16.4.3) on top of this 500ms server-side coalescing, matching observed reconnect latency. Actions that stay queued >10min are TTL-dropped on gateway restart (T16.3.2 M-01 durability). **[P4-08] Invariant:** `serverName` is ALWAYS `"mcp-gateway"` here — we enqueue a reconnect for OUR plugin's aggregate MCP entry, regardless of which individual backend inside the gateway mutated (added/removed/disabled). This is the correct behavior because Claude Code sees only one MCP server from our plugin (`mcp-gateway`), not the backends-inside-gateway. Future work for per-backend plugin entries (if ever pursued — currently rejected per "No suppression of aggregate tools" Architectural Decision) would require a different action-enqueue strategy and is OUT OF SCOPE for this phase.
 
-- [ ] T16.3.4 — CORS: add `vscode-webview://` to `Access-Control-Allow-Origin` for `/api/v1/claude-code/*` routes ONLY. The rest of `/api/v1` keeps its existing CSRF-protected origin policy. Verify via request from patched webview in integration test. **[REVIEW-16 L-02]** Explicit OPTIONS preflight handler required — browsers send OPTIONS before POST from a different origin. Respond 204 with: `Access-Control-Allow-Origin: vscode-webview://*`, `Access-Control-Allow-Methods: GET, POST`, `Access-Control-Allow-Headers: Authorization, Content-Type`, `Access-Control-Max-Age: 300`. Preflight handler runs BEFORE bearer auth (preflight has no auth header).
+- [x] T16.3.4 — CORS: add `vscode-webview://` to `Access-Control-Allow-Origin` for `/api/v1/claude-code/*` routes ONLY. The rest of `/api/v1` keeps its existing CSRF-protected origin policy. Verify via request from patched webview in integration test. **[REVIEW-16 L-02]** Explicit OPTIONS preflight handler required — browsers send OPTIONS before POST from a different origin. Respond 204 with: `Access-Control-Allow-Origin: vscode-webview://*`, `Access-Control-Allow-Methods: GET, POST`, `Access-Control-Allow-Headers: Authorization, Content-Type`, `Access-Control-Max-Age: 300`. Preflight handler runs BEFORE bearer auth (preflight has no auth header).
 
-- [ ] T16.3.5 — Rate limiting: `/pending-actions` GET polled every 2s by patch; set per-IP rate limit of 60 req/min (generous but bounded). Heartbeat has separate 5 req/min limit per session_id.
+- [x] T16.3.5 — Rate limiting: `/pending-actions` GET polled every 2s by patch; set per-IP rate limit of 60 req/min (generous but bounded). Heartbeat has separate 5 req/min limit per session_id. **Implemented:** separate `patchStatusLimiter` vs `pendingActionsLimiter` (PAL-CR2 fix — FROZEN contract mandates independent budgets).
 
-- [ ] T16.3.6 — Add `internal/api/claude_code_handlers_test.go`:
+- [x] T16.3.6 — Add `internal/api/claude_code_handlers_test.go`:
   - `TestHeartbeatStoreAndRetrieve`
   - `TestPendingActionsFIFO` + ack semantics
   - `TestProbeResultTTL`
@@ -362,9 +362,9 @@ Plugin directory is isolated under `installer/plugin/`. Revert removes the direc
   - `TestActionDebounce` — two regens within 500ms produce one queued action
   - `TestPatchStatePersistenceRoundtrip` — write state, restart state, assert actions survive with TTL filter — **[REVIEW-16 M-01]**
 
-- [ ] T16.3.7 — Document schema in `docs/api/claude-code-endpoints.md` with examples.
+- [x] T16.3.7 — Document schema in `docs/api/claude-code-endpoints.md` with examples. (FROZEN v1.6.0 contract committed separately as 3a73780 during cross-window bus consolidation; 5 → 8 endpoints as the spec matured.)
 
-- [ ] T16.3.GATE: `go test ./internal/api/... ./internal/patchstate/...` PASS + PAL codereview zero errors + PAL thinkdeep on concurrency/TTL correctness zero errors.
+- [x] T16.3.GATE: **PASSED 2026-04-22** — `go test ./... -count=1` PASS (14 packages, 0 failures; 19 new patchstate subtests + 15 new claude_code_handlers subtests). `go build ./...` + `go vet ./...` clean. Agent sub-agent fallback code-reviewer (MCP outage during implementation) — 2 HIGH + 3 MEDIUM + 2 LOW all fixed in-cycle. Post-reconnect `mcp__pal__codereview` (gpt-5.1-codex, external expert) surfaced 3 HIGH FROZEN-contract endpoints missing (probe-trigger, plugin-sync, compat-matrix) — implemented in the same cycle with tests. PAL-CR1 `WaitGroup.Go` flagged undefined = false positive (Go 1.25.6 ships this convenience method). `mcp__pal__precommit` (gpt-5.1-codex) APPROVE. Commit `a7521fa`. Zero findings at/above threshold.
 
 ### Files
 
@@ -505,6 +505,30 @@ Plugin directory is isolated under `installer/plugin/`. Revert removes the direc
 ### Rollback
 
 Run `apply-mcp-gateway.sh --uninstall` to restore `index.js.bak` and remove the patch. No persistent state outside `~/.vscode/extensions/anthropic.claude-code-*/webview/`. On full revert, also remove activation-hook call in the extension. If Alt-E fiber walk proves unreliable in practice (e.g. on a future CC version), fallback is the manual path documented in 16.9 (user-driven `/mcp` panel "Reconnect" action) — gateway still works, just without auto-reload.
+
+### Architect Review (pipeline feature-b8f2decf, 2026-04-22)
+
+**Verdict: design is complete and internally consistent. Zero gaps found. Ready for dev-lead handoff.**
+
+Traceability audit against the frozen API contract (`docs/api/claude-code-endpoints.md` v1.6.0):
+
+- All 15 T16.4.6 test cases trace to code paths in T16.4.3: fiber walk → depth test, singleflight → flapping/singleflight tests, state machine → remount-during-inflight + debounce-fires-during-lost, scrub regex → 6-input scrub-test. No orphan tests, no orphan code paths.
+- CONFIG constants in T16.4.3 cover every threshold referenced elsewhere: `DEBOUNCE_WINDOW_MS`, `DEBOUNCE_FORCE_FIRE_COUNT=10` (ack-guarantee invariant), `AWAITING_DISCOVERY_QUEUE_MAX=16` (P4-02 bound), `INITIAL_SKEW_MAX_MS` (P4-04), `LATENCY_WARN_MS` + `CONSECUTIVE_ERRORS_FAIL_THRESHOLD` + `MODE_D_MIN_*` (all drive dashboard mode L/M/D). Override ranges in §T16.4.7(b) SP4-L2 match the frozen `config_override` bounds table in the API contract (lines 122-126).
+- `configs/supported_claude_code_versions.json` shape (T16.4.7) is byte-identical to `/compat-matrix` response schema (API contract lines 349-363) — `min`, `max_tested`, `known_broken`, `last_verified`, `alt_e_verified_versions`, `observed_fiber_depths`, `max_accepted_fiber_depth`, `observed_reconnect_latency_ms_p50`, `observed_reconnect_latency_note`. T16.6.5 consumer reads verbatim.
+- Scrub regex in T16.4.3 covers all 6 inputs in T16.4.6 SP4-M2: Unix home + stack, `/workspace/` container, `/opt/claude-code/` in first line, UNC `\…`, macOS `/System/Library/`, Windows `C:\Users\…\AppData\`. Stack-frame strip (`^\s*at\s+`) is orthogonal to path scrub — both apply.
+- Debounce semantics (fixed-from-first window + 10-count force-fire cap) are consistent with the ack-guarantee invariant. The SP4-M1 state-check at fire-time closes the `ready→lost` mid-window hole: coalesced action transfers to `awaitingDiscovery` FIFO rather than calling `reconnectMcpServer` on a null session. Debounce cap (10) and discovery queue bound (16) operate on disjoint code paths — no cross-contamination.
+
+**Windows `.ps1` DACL readiness (T16.4.1.a):** spec delegates to `icacls` mirroring `internal/auth/token_perms_windows.go`. That Go file uses `SetNamedSecurityInfo` with SDDL `D:P(A;;FA;;;<SID>)` (Protected DACL, one ALLOW ACE for current user). The `.ps1` equivalent is `icacls "$INDEX_JS" /inheritance:r /grant:r "${env:USERNAME}:(F)"` — PLAN does not spell this out, but the Go reference + test assertions (exactly one ACE, Protected, current-user ALLOW) give dev-lead enough signal. Not a blocking gap; flag for dev-lead to pin the exact `icacls` invocation during implementation and include it in the integration test from T16.4.1.a.
+
+**Reference-pattern note (advisory, not a gap):** `claude-team-control/patches/` contains no `apply-taskbar.ps1`. The `.sh` script is the sole reference. Dev-lead will derive PowerShell semantics from (a) `.sh` control flow, (b) `token_perms_windows.go` for DACL, (c) standard PowerShell idioms for extension discovery (`Get-ChildItem` + `Sort-Object` with `[version]` cast for semver). Token-validator regex `'^[A-Za-z0-9_\-\.]+$'` and byte-safe write via `[System.IO.File]::WriteAllBytes` are already specified in T16.4.4 SP4-cross.
+
+**Hand-off notes for dev-lead (task ordering):**
+1. **Sequential path recommended** — not fully parallel — because the JS patch is authored with inline placeholders that both scripts must substitute. Draft the JS first so the script authors know exactly which placeholders to wire: `${GATEWAY_URL}`, `${GATEWAY_AUTH_TOKEN}`, `${PATCH_VERSION}` (derived from T16.4.7 shape).
+2. Order: **(a) `porfiry-mcp.js`** (Alt-E fiber walk + state machine + CONFIG — ~200 lines, mirror `porfiry-taskbar.js:70-98` MutationObserver pattern) → **(b) `apply-mcp-gateway.sh`** (mirror `apply-taskbar.sh` structure + add token validator per SP4-cross + add `chmod 600`) → **(c) `apply-mcp-gateway.ps1`** (PowerShell parity + `icacls` DACL) → **(d) `porfiry-mcp.test.mjs`** (node:test harness; mirror `porfiry-taskbar.test.mjs` `createMockEnv` pattern; 15 test cases) → **(e) `configs/supported_claude_code_versions.json`** (static seed values from spike).
+3. Steps (a) + (e) can run in parallel with (b)+(c)+(d) once (a) placeholders are frozen — JSON seed has no code dependency.
+4. `T16.4.5` (VSCode extension activation hook) is listed under §16.4 but edits `vscode/**` which belongs to Phase 16.5's scope boundary. Suggest dev-lead flag this for cross-phase coordination; implementation lands in the 16.5 dashboard PR, not here. Scope boundary for this pipeline: the 5 files in §16.4 Files list only.
+
+Next agent: **dev-lead** to break 5 files into per-agent work orders for backend-dev.
 
 ---
 

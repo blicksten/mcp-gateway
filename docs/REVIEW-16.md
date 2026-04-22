@@ -350,3 +350,38 @@ No CVE-level security concerns: no auth-token leakage (only `${user_config.*}` p
 | Manual end-to-end: start daemon with $GATEWAY_PLUGIN_DIR=./installer/plugin/ + POST backend via curl, verify `.mcp.json` updates | Real filesystem + real REST round-trip | Low — covered by 14 subtests + integration Phase 16.7 |
 | Windows `MoveFileEx`-based rename atomicity | POSIX rename atomicity is spec; Windows "essentially atomic" needs live verification | Low — Go stdlib handles it, 40 packages of prior Windows-tested code |
 
+---
+
+## Phase 16.3 review (backend-dev + claude_code_handlers + patchstate)
+
+**Auditor:** `code-reviewer` Agent (Claude fallback during MCP outage) + `mcp__pal__codereview` (gpt-5.1-codex, external expert) post-recovery + `mcp__pal__precommit` final sign-off.
+
+### Findings table
+
+| ID | Severity | Description | Status | Action taken |
+|----|----------|-------------|--------|--------------|
+| CR1-R1 | HIGH | `go s.persistAsync()` double-wrap in EnqueueProbeAction | Fixed | Removed outer `go`; mirrored EnqueueReconnectAction pattern (Unlock → persistAsync which spawns its own goroutine) |
+| CR2-R1 | HIGH | PendingActions cursor-miss silent empty list (if cursor ID evicted between ack + next poll) | Fixed | Pre-scan `after` for presence; on miss, fall back to returning all undelivered (at-least-once; idempotent reconnects make this safe). TestPendingActions_CursorMiss_FallsBackToAll regression test. |
+| CR3-R1 | MEDIUM | Dead branch in handleClaudeCodeProbeResult (both if/else branches call same writeError) | Fixed | Collapsed to single writeError; removed errNonceRequired sentinel; removed unused `errors` import. |
+| CR4-R1 | MEDIUM | trimActions slice aliasing (`s.actions[:0]` retains GC-pinned pointers in backing array) | Fixed | Allocate fresh `make([]*PendingAction, 0, len)`. Added comment explaining GC rationale. Overflow cap path also uses make+copy for consistency. |
+| CR5-R1 | MEDIUM | Rate limiter 429 path untested | Fixed | Added TestHeartbeatRateLimit_Returns429AfterThreshold + TestPendingActionsRateLimit_Returns429AfterThreshold (shrink limiter, fire requests, assert 429 + Retry-After). |
+| CR6-R1 | LOW | Misleading "completed entries" comment in persistAsync | Fixed | Comment now explains Delivered entries normally trimmed pre-persist; guard handles narrow ack-to-trim window. |
+| CR7-R1 | LOW | Windows 0600 filePerm semantics undocumented | Fixed | Expanded comment noting os.Chmod on Windows toggles only read-only attr; DACL at parent dir from Phase 15.C provides real isolation. |
+| CR1-R2 | MEDIUM | Cursor-skip loop readability: `skipping=false` flag-flip + continue semantics easy to misread | Fixed | Added one-line comment explaining cursor entry is consumed (not returned) before the next iteration reaches the filter branch. |
+| CR2-R2 | LOW | trimActions overflow-cap path uses `s.actions[overflow:]` reslice (same GC-retention trap as CR4-R1) | Fixed | Replaced with `make([]*PendingAction, cap) + copy` matching main trim path. |
+| CR3-R2 | LOW | time.Sleep flake risk in TestPendingActionsFIFO (10 ms margin over 500 ms debounce) | Fixed | Margin bumped to 100 ms; fake-clock is patchstate unit-test scope; api package exercises HTTP round-trip only. |
+| PAL-CR1 | CRITICAL | `sync.WaitGroup.Go` undefined (flagged by gpt-5.1-codex) | Fixed | False positive — Go 1.25.6 shipped WaitGroup.Go convenience method; build + tests pass. Documented in commit message. |
+| PAL-CR2 | MEDIUM | /patch-status shares pendingActionsLimiter (FROZEN-contract violation: "independent 60 req/min budgets") | Fixed | Added dedicated `patchStatusLimiter` field on Server; InitClaudeCodeLimiters constructs both; handleClaudeCodePatchStatus uses the new limiter. |
+| PAL-CR3 | HIGH | Outstanding persists not flushed on shutdown → REVIEW-16 M-01 violation under signal-driven exit | Fixed | cmd/mcp-gateway/main.go graceful-shutdown path now calls ps.FlushPersists() before lm.StopAll. |
+| PAL-CONTRACT-1 | HIGH | POST /probe-trigger declared in FROZEN v1.6.0 contract (3a73780) but not implemented | Fixed | Added handleClaudeCodeProbeTrigger + patchstate.EnqueueProbeActionWithNonce + route wiring + 2 tests. |
+| PAL-CONTRACT-2 | HIGH | POST /plugin-sync declared in FROZEN v1.6.0 contract but not implemented | Fixed | Added handleClaudeCodePluginSync wrapping TriggerPluginRegen; 409 when pluginDir unset; TestPluginSync_ReturnsConflictWhenPluginDirUnset. |
+| PAL-CONTRACT-3 | HIGH | GET /compat-matrix declared in FROZEN v1.6.0 contract but not implemented | Fixed | Added handleClaudeCodeCompatMatrix reading configs/supported_claude_code_versions.json; 503-graceful when file missing (Phase 16.4.7 seeds it); TestCompatMatrix_Returns503WhenFileMissing. |
+
+### Notes
+
+**MCP outage during Phase 16.3 implementation.** PAL + orchestrator MCP disconnected mid-phase. Per CLAUDE.md fallback protocol, used Agent tool sub-agent (`code-reviewer`) for cross-validation. Round 1 surfaced 2 HIGH + 3 MEDIUM + 2 LOW; round 2 returned APPROVED with 1 MEDIUM + 2 LOW carryovers. All ten fallback findings fixed in-cycle.
+
+**Post-MCP-recovery cross-validation.** When PAL reconnected, ran `mcp__pal__codereview` + `mcp__pal__precommit` (gpt-5.1-codex, external expert). Surfaced 3 findings + 3 FROZEN-contract gaps. All fixed in-cycle with tests.
+
+**Final state: zero findings at or above threshold.** 14/14 packages `go test ./...` PASS. `go build ./...` + `go vet ./...` clean. Commit `a7521fa`.
+
