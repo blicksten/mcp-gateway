@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.7.1",
+  "version": "1.7.2",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -235,6 +235,16 @@
           "command": "mcpGateway.showSapDetail",
           "when": "view == mcpSapSystems && viewItem =~ /^(sap-(running|stopped|error|degraded|disabled|starting|restarting)|sap-group-|sap-vsp-|sap-gui-)/",
           "group": "2_info"
+        },
+        {
+          "command": "mcpGateway.showSapDetail",
+          "when": "view == mcpSapSystems && viewItem == sap-imported",
+          "group": "2_info"
+        },
+        {
+          "command": "mcpGateway.addSapSystem",
+          "when": "view == mcpSapSystems && viewItem == sap-imported",
+          "group": "1_lifecycle"
         }
       ]
     },

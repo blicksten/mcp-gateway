@@ -1,5 +1,18 @@
 import type { ServerView, ServerStatus } from './types';
 
+/**
+ * Shared locale-independent string comparator for stable cross-machine
+ * ordering. Default `String.prototype.localeCompare()` honors the host
+ * locale via ICU, which makes ordering non-deterministic across the user
+ * base (same server list can appear in different orders on different
+ * machines or even between refreshes if the runtime locale shifts).
+ *
+ * Fixed to `en` with `sensitivity:'variant'` + `numeric:true` so e.g.
+ * `vsp-2` sorts before `vsp-10` and the order is identical everywhere.
+ */
+const stableCollator = new Intl.Collator('en', { sensitivity: 'variant', numeric: true });
+export const compareByName = (a: string, b: string): number => stableCollator.compare(a, b);
+
 export interface SapComponent {
 	sid: string;
 	client?: string;
@@ -87,7 +100,7 @@ export function synthesizeKeepassSapSystems(
 		});
 	}
 	const out = [...byKey.values()];
-	out.sort((a, b) => a.key.localeCompare(b.key));
+	out.sort((a, b) => compareByName(a.key, b.key));
 	return out;
 }
 
@@ -126,8 +139,9 @@ export function groupSapSystems(servers: ServerView[]): { sap: SapSystem[]; mcp:
 	// Sort by key / name for stable ordering across refreshes — the daemon
 	// returns servers in whatever order its internal map iterates, which
 	// caused the tree rows to jump on every refresh (Phase 17 follow-up).
-	sap.sort((a, b) => a.key.localeCompare(b.key));
-	mcp.sort((a, b) => a.name.localeCompare(b.name));
+	// `compareByName` is locale-pinned so two developers see the same order.
+	sap.sort((a, b) => compareByName(a.key, b.key));
+	mcp.sort((a, b) => compareByName(a.name, b.name));
 
 	return { sap, mcp };
 }

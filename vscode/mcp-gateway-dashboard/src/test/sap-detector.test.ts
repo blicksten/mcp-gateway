@@ -5,6 +5,7 @@ import {
 	groupSapSystems,
 	computeSapStatus,
 	synthesizeKeepassSapSystems,
+	compareByName,
 	type SapSystem,
 } from '../sap-detector';
 import type { ServerView } from '../types';
@@ -264,5 +265,30 @@ describe('synthesizeKeepassSapSystems (Phase 17.5)', () => {
 		const before = [...keys];
 		synthesizeKeepassSapSystems(names, keys);
 		assert.deepEqual([...keys], before);
+	});
+});
+
+describe('compareByName (F-1: locale-pinned stable ordering)', () => {
+	it('puts "abc" before "def" regardless of host locale', () => {
+		assert.ok(compareByName('abc', 'def') < 0);
+		assert.ok(compareByName('def', 'abc') > 0);
+		assert.equal(compareByName('abc', 'abc'), 0);
+	});
+
+	it('sorts numeric suffixes numerically, not lexically (vsp-2 before vsp-10)', () => {
+		// Without numeric:true we would see "vsp-10" < "vsp-2". The pinned
+		// collator opts in to numeric ordering, which is the natural order
+		// for SID-client pairs (DEV-2 before DEV-10).
+		const sorted = ['vsp-10', 'vsp-2', 'vsp-1'].sort(compareByName);
+		assert.deepEqual(sorted, ['vsp-1', 'vsp-2', 'vsp-10']);
+	});
+
+	it('is deterministic across multiple calls with the same inputs', () => {
+		const pairs = [['alpha', 'beta'], ['gamma', 'alpha'], ['zzz', 'aaa']] as const;
+		for (const [a, b] of pairs) {
+			const first = compareByName(a, b);
+			const second = compareByName(a, b);
+			assert.equal(first, second);
+		}
 	});
 });

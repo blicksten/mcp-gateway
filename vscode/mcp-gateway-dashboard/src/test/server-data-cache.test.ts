@@ -410,4 +410,105 @@ describe('ServerDataCache', () => {
 			assert.ok(refreshPayloadSeen, 'onDidRefresh must fire despite provider failure');
 		});
 	});
+
+	describe('F-2 (Phase 17 audit) — re-queue refresh when one is in flight', () => {
+		// The old code returned immediately when refreshInFlight was true,
+		// silently dropping the caller. A config-change driven refresh could
+		// therefore be swallowed by a coincident poll and the toggle effect
+		// would be delayed by up to one poll tick.
+		it('a second refresh() during an in-flight call is re-queued, not dropped', async () => {
+			let resolveFirst: (() => void) | null = null;
+			let callCount = 0;
+			const gatedFirst = new Promise<void>((resolve) => { resolveFirst = resolve; });
+			const client = {
+				listServers: async () => {
+					callCount++;
+					if (callCount === 1) { await gatedFirst; }
+					return [{ name: 'a', status: 'running', transport: 'stdio', restart_count: 0 }];
+				},
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			cache = new ServerDataCache(client as any);
+
+			const first = cache.refresh();
+			const second = cache.refresh(); // hits refreshInFlight guard → must be re-queued, not dropped
+			resolveFirst!();
+			await Promise.all([first, second]);
+
+			assert.equal(callCount, 2, 'the re-queued refresh must run a second listServers call');
+		});
+
+		it('re-queue coalesces multiple waiters: 5 refresh() calls during one in-flight produce one drain', async () => {
+			// Five "toggle" events in a tight window should not cause five extra
+			// listServers calls — the pendingRefresh flag is just a boolean, so
+			// coalescing is the expected behavior.
+			let resolveFirst: (() => void) | null = null;
+			let callCount = 0;
+			const gatedFirst = new Promise<void>((resolve) => { resolveFirst = resolve; });
+			const client = {
+				listServers: async () => {
+					callCount++;
+					if (callCount === 1) { await gatedFirst; }
+					return [];
+				},
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			cache = new ServerDataCache(client as any);
+
+			const first = cache.refresh();
+			const extras = [cache.refresh(), cache.refresh(), cache.refresh(), cache.refresh(), cache.refresh()];
+			resolveFirst!();
+			await Promise.all([first, ...extras]);
+
+			assert.equal(callCount, 2, 'exactly one drain runs despite 5 in-flight colliders');
+		});
+
+		it('dispose during re-queued drain aborts cleanly (no call after dispose)', async () => {
+			let resolveFirst: (() => void) | null = null;
+			let callCount = 0;
+			const gatedFirst = new Promise<void>((resolve) => { resolveFirst = resolve; });
+			const client = {
+				listServers: async () => {
+					callCount++;
+					if (callCount === 1) { await gatedFirst; }
+					return [];
+				},
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			cache = new ServerDataCache(client as any);
+
+			const first = cache.refresh();
+			cache.refresh(); // queues
+			cache.dispose();
+			resolveFirst!();
+			await first;
+			// Assert: the re-queued drain is guarded by `this.disposed` and does
+			// not call listServers again.
+			assert.equal(callCount, 1, 'no drain call after dispose');
+		});
+	});
 });

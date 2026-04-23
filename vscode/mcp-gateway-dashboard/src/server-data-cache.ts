@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import type { IGatewayClient } from './extension';
 import type { ServerView } from './types';
-import { groupSapSystems, synthesizeKeepassSapSystems, type SapSystem } from './sap-detector';
+import { groupSapSystems, synthesizeKeepassSapSystems, compareByName, type SapSystem } from './sap-detector';
 
 export interface CacheRefreshPayload {
 	servers: ServerView[];
@@ -28,6 +28,11 @@ export class ServerDataCache implements vscode.Disposable {
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private disposed = false;
 	private refreshInFlight = false;
+	// F-2 (Phase 17 audit): when a caller triggers refresh() while one is
+	// already in flight, remember it and re-run once the in-flight finishes.
+	// Without this, a config-change triggered refresh can be silently dropped
+	// and the toggle effect is delayed by up to one poll tick.
+	private pendingRefresh = false;
 	private _lastRefreshFailed = false;
 
 	constructor(client: IGatewayClient, importedProvider?: ImportedSystemsProvider) {
@@ -36,7 +41,13 @@ export class ServerDataCache implements vscode.Disposable {
 	}
 
 	async refresh(): Promise<void> {
-		if (this.disposed || this.refreshInFlight) { return; }
+		if (this.disposed) { return; }
+		if (this.refreshInFlight) {
+			// F-2: do not drop the call — re-queue it so a config-change
+			// driven refresh still runs after the currently in-flight poll.
+			this.pendingRefresh = true;
+			return;
+		}
 		this.refreshInFlight = true;
 		try {
 			try {
@@ -74,7 +85,7 @@ export class ServerDataCache implements vscode.Disposable {
 					const existingKeys = new Set(sap.map((s) => s.key));
 					const synthesized = synthesizeKeepassSapSystems(importedNames, existingKeys);
 					this.cachedSap = [...sap, ...synthesized].sort(
-						(a, b) => a.key.localeCompare(b.key),
+						(a, b) => compareByName(a.key, b.key),
 					);
 				} catch {
 					// Non-fatal: keep daemon-only rows. Already assigned above.
@@ -87,6 +98,15 @@ export class ServerDataCache implements vscode.Disposable {
 			});
 		} finally {
 			this.refreshInFlight = false;
+		}
+
+		// F-2: drain a re-queued refresh before returning control. This keeps
+		// the config-change path deterministic ("toggle → next refresh cycle
+		// reflects the new value") instead of silently waiting up to one poll
+		// tick.
+		if (this.pendingRefresh && !this.disposed) {
+			this.pendingRefresh = false;
+			await this.refresh();
 		}
 	}
 
