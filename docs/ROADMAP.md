@@ -17,7 +17,7 @@ Phases 1–16 implemented. Full history preserved locally in `full-history-backu
 
 ---
 
-## Phase 17 — Dashboard UX Polish Round 2 (in-flight)
+## Phase 17 — Dashboard UX Polish Round 2 (COMPLETE, v1.7.2 in local `main`)
 
 Detailed plan: `docs/PLAN.md` (2026-04-22, CV via PAL thinkdeep + Sonnet code-reviewer fallback).
 
@@ -42,7 +42,21 @@ Delivered in one v1.7.0 bundle:
 
 **Files touched:** `package.json`, `src/extension.ts`, `src/sap-detector.ts`, `src/server-data-cache.ts`, `src/sap-item.ts`, `src/sap-tree-provider.ts`, `src/test/mock-vscode.ts`, `src/test/commands.test.ts`, `src/test/sap-detector.test.ts`, `src/test/sap-item.test.ts`, `src/test/server-data-cache.test.ts`. Deleted: `src/webview/server-detail-view-provider.ts`, `src/test/webview/server-detail-view-provider.test.ts`.
 
-**Orchestrator pipeline** `feature-4d1cda14` was halted mid-flight earlier this session due to PAL MCP / orchestrator disconnect. Work completed directly via the standard phase-by-phase loop with main-session verification. Pipeline can be safely abandoned.
+**Orchestrator pipeline** `feature-4d1cda14` was halted mid-flight earlier this session due to PAL MCP / orchestrator disconnect. Work completed directly via the standard phase-by-phase loop with main-session verification. Cancelled during /finish orphan-scan.
+
+**/check pass (2026-04-23):** architect + PAL `gpt-5.2-pro` thinking=high → [C+O] on 3 findings (F-1 LOW `localeCompare` locale, F-2 LOW config-refresh race, F-3 MEDIUM `sap-imported` context menu absent). All fixed in commit `fc76cbc` (v1.7.2):
+- F-1 → shared `compareByName` using `Intl.Collator('en', {sensitivity:'variant', numeric:true})` in `sap-detector.ts`; `vsp-2` now sorts before `vsp-10`.
+- F-2 → `pendingRefresh` flag in `ServerDataCache.refresh()`; drain runs once after in-flight, coalesces colliders, guarded by `disposed`.
+- F-3 → two new `view/item/context` entries on `viewItem == sap-imported` (`showSapDetail` + `addSapSystem`) in `package.json`.
+- +6 new tests (3 compareByName + 3 F-2 re-queue). Tests: 580 → 586 / 31 env-fail unchanged.
+
+**/finish pass (2026-04-23):** orphan-scan cancelled 2 stale pipelines (`feature-4d1cda14` + `checkpoint-check-6753fbb6`). PAL `gpt-5.1-codex` precommit expert review on full 4-commit changeset → READY TO PUSH, zero findings at all severities. VSIX v1.7.2 built (579.92 KB, 585 files), installed.
+
+**Commits on `main` (unpushed at /finish):**
+1. `dffb4b3` v1.7.0 Phase 17 UX polish
+2. `50d342f` v1.7.1 MCP alphabetical sort
+3. `8f405f4` debug-flicker.1 cache preserve (parallel session)
+4. `fc76cbc` v1.7.2 /check audit fixes (F-1 + F-2 + F-3)
 
 ---
 
