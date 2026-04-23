@@ -580,6 +580,20 @@ func TestGatewayUptime(t *testing.T) {
 	assert.True(t, tm.GatewayUptime() >= 5*time.Millisecond)
 }
 
+func TestStartedAt_BeforeNowAndStable(t *testing.T) {
+	before := time.Now()
+	tm := newTestableMonitor(newMockLM())
+
+	sa := tm.StartedAt()
+	assert.True(t, sa.Before(time.Now()) || sa.Equal(time.Now()),
+		"StartedAt() should be at or before now")
+	assert.False(t, sa.Before(before),
+		"StartedAt() should be at or after the moment before construction")
+
+	// Calling again must return the same value (write-once field).
+	assert.Equal(t, sa, tm.StartedAt(), "StartedAt() must be stable across calls")
+}
+
 func TestAllServerMetrics_ResetCircuitClearsMetrics(t *testing.T) {
 	mock := newMockLM()
 	mock.addEntry("s1", models.StatusRunning, models.ServerConfig{Command: "echo"})

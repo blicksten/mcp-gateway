@@ -307,6 +307,10 @@ func (m *Monitor) GatewayUptime() time.Duration {
 	return time.Since(m.startedAt)
 }
 
+// StartedAt returns the wall-clock moment the monitor was constructed.
+// Read without lock: startedAt is written once at construction.
+func (m *Monitor) StartedAt() time.Time { return m.startedAt }
+
 // AllServerMetrics returns metrics for all servers in entries.
 // Uses entries (from lm.Entries()) as the authoritative server list;
 // looks up internal state for crash/uptime data. Servers with no

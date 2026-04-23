@@ -59,7 +59,7 @@ func doRequest(t *testing.T, handler http.Handler, method, path string, body any
 }
 
 func TestHealth(t *testing.T) {
-	srv, _ := setupTestServer(t)
+	srv, _ := setupTestServerWithMonitor(t)
 	handler := srv.Handler()
 
 	rr := doRequest(t, handler, "GET", "/api/v1/health", nil)
@@ -69,6 +69,16 @@ func TestHealth(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	assert.Equal(t, "ok", resp["status"])
 	assert.Equal(t, float64(0), resp["servers"])
+
+	// Phase D.1 — assert new observability fields are present and correctly typed.
+	assert.IsType(t, "", resp["started_at"], "started_at must be a string")
+	assert.NotEmpty(t, resp["started_at"], "started_at must not be empty")
+	// PID is a JSON number; json.Unmarshal into map[string]any gives float64.
+	assert.IsType(t, float64(0), resp["pid"], "pid must be a number")
+	assert.Greater(t, resp["pid"].(float64), float64(0), "pid must be positive")
+	assert.IsType(t, "", resp["version"], "version must be a string")
+	assert.IsType(t, float64(0), resp["uptime_seconds"], "uptime_seconds must be a number")
+	assert.GreaterOrEqual(t, resp["uptime_seconds"].(float64), float64(0), "uptime_seconds must be non-negative")
 }
 
 func TestListServers_Empty(t *testing.T) {
@@ -708,4 +718,122 @@ func TestMetrics_TokenEstimation_Multibyte(t *testing.T) {
 
 	// ListTools returns raw description "日本語テ" = 4 runes → 4/4 = 1 token.
 	assert.Equal(t, 1, resp.Tokens.EstDescTokens)
+}
+
+// --- Phase D.1: handleShutdown tests ---
+
+// newAuthedServerWithShutdown builds a test server with Bearer auth enabled
+// and a real shutdownFn wired in. Returns the handler, the token, and a
+// channel that receives a value when shutdownFn is invoked.
+func newAuthedServerWithShutdown(t *testing.T) (http.Handler, string, <-chan struct{}) {
+	t.Helper()
+	cfg := &models.Config{Servers: make(map[string]*models.ServerConfig)}
+	cfg.ApplyDefaults()
+
+	lm := lifecycle.NewManager(cfg, "test", testLogger())
+	gw := proxy.New(cfg, lm, "test", testLogger())
+	mon := health.NewMonitor(lm, 1*time.Second, testLogger())
+
+	token := "test-shutdown-token"
+	authCfg := AuthConfig{Enabled: true, Token: token}
+	srv := NewServer(lm, gw, mon, cfg, "", testLogger(), authCfg, "test")
+
+	called := make(chan struct{}, 1)
+	srv.SetShutdownFn(func() { called <- struct{}{} })
+
+	return srv.Handler(), token, called
+}
+
+// doShutdownRequest sends POST /api/v1/shutdown with optional bearer token.
+func doShutdownRequest(t *testing.T, h http.Handler, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/shutdown", nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+func TestShutdown_NoAuth_Returns401(t *testing.T) {
+	h, _, _ := newAuthedServerWithShutdown(t)
+	rr := doShutdownRequest(t, h, "")
+	assert.Equal(t, http.StatusUnauthorized, rr.Code)
+}
+
+func TestShutdown_ValidToken_Returns202AndCallsShutdownFn(t *testing.T) {
+	h, token, called := newAuthedServerWithShutdown(t)
+
+	rr := doShutdownRequest(t, h, token)
+	assert.Equal(t, http.StatusAccepted, rr.Code)
+
+	var body map[string]string
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
+	assert.Equal(t, "shutting_down", body["status"])
+
+	// shutdownFn must have been invoked (go fn() is async — give it a moment).
+	select {
+	case <-called:
+		// Good.
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("shutdownFn was not called within 500ms")
+	}
+}
+
+func TestShutdown_NilShutdownFn_IsNoOp(t *testing.T) {
+	cfg := &models.Config{Servers: make(map[string]*models.ServerConfig)}
+	cfg.ApplyDefaults()
+	lm := lifecycle.NewManager(cfg, "test", testLogger())
+	gw := proxy.New(cfg, lm, "test", testLogger())
+	mon := health.NewMonitor(lm, 1*time.Second, testLogger())
+
+	token := "tok"
+	srv := NewServer(lm, gw, mon, cfg, "", testLogger(), AuthConfig{Enabled: true, Token: token}, "test")
+	// SetShutdownFn(nil) — must not panic.
+	srv.SetShutdownFn(nil)
+	h := srv.Handler()
+
+	rr := doShutdownRequest(t, h, token)
+	assert.Equal(t, http.StatusAccepted, rr.Code)
+}
+
+func TestShutdown_Concurrent_InvokesShutdownFnExactlyOnce(t *testing.T) {
+	h, token, _ := newAuthedServerWithShutdown(t)
+
+	const goroutines = 10
+	results := make([]int, goroutines)
+	bodies := make([]string, goroutines)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := range goroutines {
+		go func(i int) {
+			defer wg.Done()
+			rr := doShutdownRequest(t, h, token)
+			results[i] = rr.Code
+			bodies[i] = rr.Body.String()
+		}(i)
+	}
+	wg.Wait()
+
+	// All responses must be 202.
+	for i, code := range results {
+		assert.Equal(t, http.StatusAccepted, code, "goroutine %d got unexpected status", i)
+	}
+
+	// Exactly one response should be "shutting_down"; the rest "already_shutting_down".
+	shutting, already := 0, 0
+	for _, b := range bodies {
+		var resp map[string]string
+		if json.Unmarshal([]byte(b), &resp) == nil {
+			switch resp["status"] {
+			case "shutting_down":
+				shutting++
+			case "already_shutting_down":
+				already++
+			}
+		}
+	}
+	assert.Equal(t, 1, shutting, "expected exactly one 'shutting_down' response")
+	assert.Equal(t, goroutines-1, already, "expected %d 'already_shutting_down' responses", goroutines-1)
 }

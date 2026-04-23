@@ -7,9 +7,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"mcp-gateway/internal/lifecycle"
 	"mcp-gateway/internal/models"
 	"mcp-gateway/internal/patchstate"
+	"mcp-gateway/internal/pidfile"
 	"mcp-gateway/internal/plugin"
 	"mcp-gateway/internal/proxy"
 
@@ -127,6 +130,31 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 	monitor := health.NewMonitor(lm, time.Duration(cfg.Gateway.PingInterval), logger)
 	apiServer := api.NewServer(lm, gw, monitor, cfg, configPath, logger, authCfg, version)
 
+	// Phase D.1: PID file — survives crash, stale-detected via HTTP liveness,
+	// removed on clean exit (AUDIT M-1, M-2). Written before the errgroup so
+	// defer Remove runs after all goroutines stop.
+	//
+	// Build a probe URL from the configured bind address + port + scheme so
+	// stale-reap works after an unclean exit (CV-HIGH fix: without a probe
+	// URL, leftover PID files from crashes would block all subsequent starts).
+	// For 0.0.0.0 bindings we probe via 127.0.0.1 because the listener accepts
+	// on loopback too; https is chosen when both TLS paths are configured.
+	pidPath := pidfile.DefaultPath()
+	probeHost := cfg.Gateway.BindAddress
+	if probeHost == "" || probeHost == "0.0.0.0" {
+		probeHost = "127.0.0.1"
+	}
+	scheme := "http"
+	if cfg.Gateway.TLSCertPath != "" && cfg.Gateway.TLSKeyPath != "" {
+		scheme = "https"
+	}
+	probeURL := fmt.Sprintf("%s://%s/api/v1/health",
+		scheme, net.JoinHostPort(probeHost, strconv.Itoa(cfg.Gateway.HTTPPort)))
+	if err := pidfile.Write(pidPath, probeURL); err != nil {
+		return fmt.Errorf("acquire PID file: %w", err)
+	}
+	defer pidfile.Remove(pidPath) //nolint:errcheck — best-effort cleanup; errors are logged by Remove
+
 	// Phase 16.2: Claude Code plugin regen wiring. Discovery is best-effort
 	// — a missing plugin directory is not a daemon-startup failure, it
 	// simply leaves regen as a no-op on every mutation.
@@ -164,6 +192,10 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 	// Context with signal handling.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Phase D.1: wire the signal-cancel into the REST shutdown endpoint so
+	// POST /api/v1/shutdown triggers the same clean exit path as SIGTERM.
+	apiServer.SetShutdownFn(stop)
 
 	g, ctx := errgroup.WithContext(ctx)
 
@@ -239,14 +271,17 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 		return err
 	}
 
-	// Graceful shutdown.
+	// Graceful shutdown — bounded drain (AUDIT M-4: prevents hung SSE
+	// clients or flush operations from blocking exit forever).
 	logger.Info("shutting down...")
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer drainCancel()
 	// Drain pending patch-state persists BEFORE ps.Stop so the REVIEW-16
 	// M-01 durability guarantee holds across a signal-driven daemon exit:
 	// any action enqueued between the last mutation and SIGTERM arrival
 	// reaches disk before we return. Stop() then terminates the cleaner.
 	ps.FlushPersists()
-	lm.StopAll(context.Background())
+	lm.StopAll(drainCtx)
 	logger.Info("mcp-gateway stopped")
 	return nil
 }

@@ -2,8 +2,8 @@
 package api
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path"
 	"sort"
 	"strconv"
@@ -76,6 +77,14 @@ type Server struct {
 	// tests to reach a random-port (":0") listener.
 	listenerMu   sync.Mutex
 	listenerAddr net.Addr
+
+	// Graceful shutdown (Phase D.1 / AUDIT M-3, M-4).
+	// shutdownFn is the root context cancel from signal.NotifyContext; wired
+	// via SetShutdownFn after the context is created. shutdownMu + shutdownCalled
+	// make handleShutdown idempotent under concurrent requests.
+	shutdownFn     context.CancelFunc
+	shutdownMu     sync.Mutex
+	shutdownCalled bool
 }
 
 // Addr returns the bound listener address, or nil if ListenAndServe has
@@ -138,6 +147,42 @@ func (s *Server) UpdateConfig(cfg *models.Config) {
 func (s *Server) SetPluginRegen(dir string, regen *plugin.Regenerator) {
 	s.pluginDir = dir
 	s.pluginRegen = regen
+}
+
+// SetShutdownFn wires the root context cancel function into the server so
+// that POST /api/v1/shutdown can trigger a graceful daemon exit. Called
+// once from main.go after signal.NotifyContext is created (Phase D.1 / AUDIT M-3).
+func (s *Server) SetShutdownFn(fn context.CancelFunc) {
+	s.shutdownMu.Lock()
+	s.shutdownFn = fn
+	s.shutdownMu.Unlock()
+}
+
+// handleShutdown handles POST /api/v1/shutdown.
+//
+// Idempotent — concurrent requests all receive 202; shutdownFn is called
+// exactly once (AUDIT M-3). The response is flushed before the cancel is
+// triggered so the caller receives its 202 before the listener closes.
+func (s *Server) handleShutdown(w http.ResponseWriter, _ *http.Request) {
+	s.shutdownMu.Lock()
+	already := s.shutdownCalled
+	s.shutdownCalled = true
+	fn := s.shutdownFn
+	s.shutdownMu.Unlock()
+
+	status := "shutting_down"
+	if already {
+		status = "already_shutting_down"
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": status})
+	// Flush before cancelling — ensures the response reaches the caller before
+	// the HTTP listener closes (AUDIT M-3).
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	if !already && fn != nil {
+		go fn()
+	}
 }
 
 // InitClaudeCodeLimiters creates the per-session heartbeat limiter and
@@ -274,6 +319,8 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/servers/{name}/call", s.handleCallTool)
 			r.Get("/tools", s.handleListTools)
 			r.Get("/metrics", s.handleMetrics)
+			// Phase D.1: graceful daemon shutdown (AUDIT M-3 / L-1 — auth-required).
+			r.Post("/shutdown", s.handleShutdown)
 		})
 
 		// Claude Code integration group (Phase 16.3).
@@ -663,11 +710,21 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if !s.authEnabled {
 		authState = "disabled"
 	}
+	var startedAt string
+	var uptimeSeconds int64
+	if s.monitor != nil {
+		startedAt = s.monitor.StartedAt().UTC().Format(time.RFC3339)
+		uptimeSeconds = int64(s.monitor.GatewayUptime().Seconds())
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":  "ok",
-		"servers": total,
-		"running": running,
-		"auth":    authState,
+		"status":         "ok",
+		"servers":        total,
+		"running":        running,
+		"auth":           authState,
+		"started_at":     startedAt,
+		"pid":            os.Getpid(),
+		"version":        s.version,
+		"uptime_seconds": uptimeSeconds,
 	})
 }
 
