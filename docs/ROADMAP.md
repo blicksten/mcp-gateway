@@ -46,6 +46,20 @@ Delivered in one v1.7.0 bundle:
 
 ---
 
+## Debug patches (post-v1.7.1)
+
+Plan: `docs/PLAN-debug-flicker.md` (locked 2026-04-23, PAL `gpt-5.1-codex` thinkdeep+chat APPROVED).
+
+| # | Phase | Status |
+|---|-------|--------|
+| debug-flicker.1 | Fix cache flicker — `ServerDataCache.refresh()` now preserves last-known-good `cachedServers` on API errors (was wiped to `[]`). `_lastRefreshFailed=true` flag is kept so consumers still distinguish daemon-offline from genuinely empty lists. Fingerprint-based tree providers no longer re-fire during transient drops → no visible Backends/SAP Systems sidebar flicker. 21 `ServerDataCache` tests pass (added 3 new invariant tests + rewrote T3.10 cold-start). PAL `codereview` external expert gpt-5.1-codex → PASS, zero findings. | ✅ implemented 2026-04-23 |
+| debug-flicker.2 | Cold-start placeholder in tree providers. | ⏳ pending |
+| debug-flicker.3 | Install Claude Code plugin end-to-end (operator steps). | ⏳ pending |
+| debug-flicker.4B | Wire "Activate for Claude Code" button to `child_process.execFile('mcp-ctl install-claude-code')` with webview log streaming + cancel. | ⏳ pending |
+| debug-flicker.Final | `npm run deploy` + PAL precommit + single commit bundling source + VSIX + plan/tasks/review artifacts. | ⏳ pending |
+
+---
+
 ## Backlog
 
 ### Phase 11 — Extension UX (v1.1.0)

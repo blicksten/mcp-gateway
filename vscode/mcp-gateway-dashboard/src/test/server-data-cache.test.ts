@@ -1,6 +1,6 @@
 import './mock-vscode';
 import { strict as assert } from 'node:assert';
-import { ServerDataCache } from '../server-data-cache';
+import { ServerDataCache, type CacheRefreshPayload } from '../server-data-cache';
 import type { ServerView } from '../types';
 
 function createMockClient(servers: ServerView[] = []) {
@@ -89,16 +89,162 @@ describe('ServerDataCache', () => {
 		cache.refresh();
 	});
 
-	it('offline state: client throws → fires event with empty data', (done) => {
+	it('offline state from cold start: client throws → empty list + flag=true', (done) => {
+		// Cold-start: no successful refresh ever happened. The cache stays at
+		// its initial empty list and flips the flag so consumers can show a
+		// "connecting" placeholder / offline status.
 		cache = new ServerDataCache(createFailingClient() as any);
 		cache.onDidRefresh((payload) => {
-			assert.equal(payload.servers.length, 0);
+			assert.equal(payload.servers.length, 0, 'cold-start cachedServers must be []');
 			assert.equal(payload.lastRefreshFailed, true);
 			assert.equal(cache.getMcpServers().length, 0);
 			assert.equal(cache.getSapSystems().length, 0);
 			done();
 		});
 		cache.refresh();
+	});
+
+	it('preserves last-known-good data on transient error (no flicker)', async () => {
+		// Phase 1 debug-flicker fix: when the daemon momentarily drops (auto-
+		// start race, circuit breaker open, brief network hiccup), the cache
+		// preserves the previous server list instead of wiping it to []. Tree
+		// providers re-compute the same fingerprint and suppress the render —
+		// no visible flicker in the Backends / SAP Systems sidebars.
+		let shouldFail = false;
+		const client = {
+			listServers: async () => {
+				if (shouldFail) { throw new Error('transient: connection refused'); }
+				return mixedServers;
+			},
+			getHealth: async () => ({}),
+			getServer: async () => ({}),
+			addServer: async () => ({}),
+			removeServer: async () => ({}),
+			patchServer: async () => ({}),
+			restartServer: async () => ({}),
+			resetCircuit: async () => ({}),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+		cache = new ServerDataCache(client as any);
+
+		// First refresh succeeds — populate cache.
+		await cache.refresh();
+		assert.equal(cache.getAllServers().length, 3, 'warm cache has 3 servers');
+		assert.equal(cache.lastRefreshFailed, false);
+
+		// Daemon drops: next refresh throws. Data MUST be preserved; flag flips.
+		shouldFail = true;
+		const errorPayload = await new Promise<CacheRefreshPayload>((resolve) => {
+			const sub = cache.onDidRefresh((p) => { sub.dispose(); resolve(p); });
+			cache.refresh();
+		});
+		assert.equal(errorPayload.servers.length, 3, 'preserved last-known-good servers');
+		assert.equal(errorPayload.lastRefreshFailed, true);
+		assert.equal(cache.getAllServers().length, 3, 'getAllServers still returns preserved data');
+		assert.equal(cache.getMcpServers().length, 1, 'MCP view preserved (my-server)');
+		assert.equal(cache.getSapSystems().length, 1, 'SAP view preserved (DEV)');
+	});
+
+	it('recovery clears lastRefreshFailed flag and refreshes data', async () => {
+		// Transient-error → recovery cycle: flag must flip back to false, and
+		// fresh data from the daemon replaces the preserved last-known-good.
+		let shouldFail = true;
+		const firstBatch: ServerView[] = [
+			{ name: 'first', status: 'running', transport: 'stdio', restart_count: 0 },
+		];
+		const secondBatch: ServerView[] = [
+			{ name: 'second-a', status: 'running', transport: 'stdio', restart_count: 0 },
+			{ name: 'second-b', status: 'running', transport: 'stdio', restart_count: 0 },
+		];
+		let phase: 'cold' | 'warm' | 'recovery' = 'cold';
+		const client = {
+			listServers: async () => {
+				if (phase === 'cold') { return firstBatch; }
+				if (phase === 'warm' && shouldFail) { throw new Error('daemon offline'); }
+				return secondBatch;
+			},
+			getHealth: async () => ({}),
+			getServer: async () => ({}),
+			addServer: async () => ({}),
+			removeServer: async () => ({}),
+			patchServer: async () => ({}),
+			restartServer: async () => ({}),
+			resetCircuit: async () => ({}),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+		cache = new ServerDataCache(client as any);
+
+		// Cold successful refresh.
+		await cache.refresh();
+		assert.equal(cache.getAllServers()[0].name, 'first');
+		assert.equal(cache.lastRefreshFailed, false);
+
+		// Error: data preserved, flag=true.
+		phase = 'warm';
+		await cache.refresh();
+		assert.equal(cache.getAllServers()[0].name, 'first', 'preserved during error');
+		assert.equal(cache.lastRefreshFailed, true);
+
+		// Recovery: flag clears, fresh data replaces preserved.
+		shouldFail = false;
+		phase = 'recovery';
+		await cache.refresh();
+		assert.equal(cache.getAllServers().length, 2);
+		assert.equal(cache.getAllServers()[0].name, 'second-a');
+		assert.equal(cache.getAllServers()[1].name, 'second-b');
+		assert.equal(cache.lastRefreshFailed, false);
+	});
+
+	it('fingerprint-stable payload: onDidRefresh fires, servers unchanged during error', async () => {
+		// Contract for fingerprint-based tree providers
+		// (BackendTreeProvider / SapTreeProvider): during a transient error,
+		// the payload carries the SAME ServerView list as the last success, so
+		// the providers' computeFingerprint() returns the same string and they
+		// skip _onDidChangeTreeData.fire() — no visible tree flicker. This
+		// test asserts the payload identity; the providers' own dedup logic
+		// is covered by their own tests.
+		let shouldFail = false;
+		const client = {
+			listServers: async () => {
+				if (shouldFail) { throw new Error('transient'); }
+				return mixedServers;
+			},
+			getHealth: async () => ({}),
+			getServer: async () => ({}),
+			addServer: async () => ({}),
+			removeServer: async () => ({}),
+			patchServer: async () => ({}),
+			restartServer: async () => ({}),
+			resetCircuit: async () => ({}),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+		cache = new ServerDataCache(client as any);
+
+		// Capture the success payload.
+		const successPayload = await new Promise<CacheRefreshPayload>((resolve) => {
+			const sub = cache.onDidRefresh((p) => { sub.dispose(); resolve(p); });
+			cache.refresh();
+		});
+
+		// Capture the next payload (error — same list expected).
+		shouldFail = true;
+		const errorPayload = await new Promise<CacheRefreshPayload>((resolve) => {
+			const sub = cache.onDidRefresh((p) => { sub.dispose(); resolve(p); });
+			cache.refresh();
+		});
+
+		// Same server list (by value) → providers' fingerprint hash is identical
+		// → the tree view does not re-render. The flag differs (that's a
+		// status-bar concern, not a tree concern).
+		assert.equal(errorPayload.servers.length, successPayload.servers.length);
+		for (let i = 0; i < successPayload.servers.length; i++) {
+			assert.deepEqual(errorPayload.servers[i], successPayload.servers[i]);
+		}
+		assert.equal(successPayload.lastRefreshFailed, false);
+		assert.equal(errorPayload.lastRefreshFailed, true);
 	});
 
 	it('lastRefreshFailed getter mirrors refresh outcome', async () => {

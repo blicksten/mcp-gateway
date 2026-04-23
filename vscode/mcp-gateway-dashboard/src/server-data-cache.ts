@@ -44,13 +44,17 @@ export class ServerDataCache implements vscode.Disposable {
 				this.cachedServers = raw as ServerView[];
 				this._lastRefreshFailed = false;
 			} catch {
-				// Deliberate fail-clear: transient API errors clear all views.
-				// This matches the pre-cache BackendTreeProvider behavior and is
-				// specified in T3.10 ("client throws → fires event with empty data").
-				// lastRefreshFailed=true lets consumers distinguish daemon-offline
-				// from genuinely empty server lists (e.g., slash-command orphan
-				// cleanup must not run while the daemon is unreachable).
-				this.cachedServers = [];
+				// Preserve last-known-good data on transient API errors. This
+				// keeps tree views stable (same fingerprint → no re-render) and
+				// avoids flicker when the daemon momentarily drops (auto-start
+				// race, brief network hiccup, circuit breaker open). Cold-start
+				// starts from `cachedServers = []`, so the UI correctly shows
+				// nothing until the first successful refresh.
+				//
+				// Consumers distinguish daemon-offline from genuinely empty
+				// server lists via `lastRefreshFailed=true` (e.g., status bar
+				// flips to "offline", slash-command-generator skips orphan
+				// cleanup).
 				this._lastRefreshFailed = true;
 			}
 			const { sap, mcp } = groupSapSystems(this.cachedServers);
