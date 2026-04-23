@@ -13,6 +13,12 @@ export interface SapSystem {
 	vsp?: ServerView;
 	gui?: ServerView;
 	status: ServerStatus;
+	/**
+	 * Phase 17.5 — true when this row was synthesized from a KeePass/credential
+	 * entry and has no daemon-backed server yet. Lifecycle commands must not
+	 * target imported rows.
+	 */
+	imported?: boolean;
 }
 
 const SAP_VSP_RE = /^vsp-([A-Z0-9]{3})(?:-(\d{3}))?$/;
@@ -48,6 +54,41 @@ export function computeSapStatus(system: SapSystem): ServerStatus {
 		return 'degraded';
 	}
 	return vspStatus; // Both healthy, or VSP still booting — follow VSP
+}
+
+/**
+ * Phase 17.5 — Synthesize "imported" SapSystem rows for KeePass-stored
+ * credentials whose names match the SAP regex but are not already present
+ * in the daemon-reported set.
+ *
+ * These rows are informational: status = 'stopped', vsp/gui undefined.
+ * contextValue='sap-imported' lets the tree view suppress lifecycle
+ * actions that would fail (no daemon row to restart).
+ *
+ * NEVER reads secret values — only credential names.
+ */
+export function synthesizeKeepassSapSystems(
+	credentialNames: readonly string[],
+	existingKeys: ReadonlySet<string>,
+): SapSystem[] {
+	const byKey = new Map<string, SapSystem>();
+	for (const name of credentialNames) {
+		const parsed = parseSapServerName(name);
+		if (!parsed) { continue; }
+		const key = parsed.client ? `${parsed.sid}-${parsed.client}` : parsed.sid;
+		if (existingKeys.has(key)) { continue; }
+		if (byKey.has(key)) { continue; }
+		byKey.set(key, {
+			key,
+			sid: parsed.sid,
+			client: parsed.client,
+			status: 'stopped',
+			imported: true,
+		});
+	}
+	const out = [...byKey.values()];
+	out.sort((a, b) => a.key.localeCompare(b.key));
+	return out;
 }
 
 export function groupSapSystems(servers: ServerView[]): { sap: SapSystem[]; mcp: ServerView[] } {

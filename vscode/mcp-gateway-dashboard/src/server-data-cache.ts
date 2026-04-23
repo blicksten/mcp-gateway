@@ -1,15 +1,24 @@
 import * as vscode from 'vscode';
 import type { IGatewayClient } from './extension';
 import type { ServerView } from './types';
-import { groupSapSystems, type SapSystem } from './sap-detector';
+import { groupSapSystems, synthesizeKeepassSapSystems, type SapSystem } from './sap-detector';
 
 export interface CacheRefreshPayload {
 	servers: ServerView[];
 	lastRefreshFailed: boolean;
 }
 
+/**
+ * Phase 17.5 — Optional provider of credential-backed server names (KeePass,
+ * OS keychain). When provided AND the user has enabled keepass integration,
+ * the cache synthesizes additional SAP rows for names matching the SAP regex
+ * that the daemon does not yet know about.
+ */
+export type ImportedSystemsProvider = () => readonly string[];
+
 export class ServerDataCache implements vscode.Disposable {
 	private readonly client: IGatewayClient;
+	private readonly importedProvider: ImportedSystemsProvider | undefined;
 	private readonly _onDidRefresh = new vscode.EventEmitter<CacheRefreshPayload>();
 	readonly onDidRefresh = this._onDidRefresh.event;
 
@@ -21,8 +30,9 @@ export class ServerDataCache implements vscode.Disposable {
 	private refreshInFlight = false;
 	private _lastRefreshFailed = false;
 
-	constructor(client: IGatewayClient) {
+	constructor(client: IGatewayClient, importedProvider?: ImportedSystemsProvider) {
 		this.client = client;
+		this.importedProvider = importedProvider;
 	}
 
 	async refresh(): Promise<void> {
@@ -46,6 +56,27 @@ export class ServerDataCache implements vscode.Disposable {
 			const { sap, mcp } = groupSapSystems(this.cachedServers);
 			this.cachedMcp = mcp;
 			this.cachedSap = sap;
+
+			// Phase 17.5 — merge KeePass-imported SAP rows (if enabled).
+			// The provider itself gates on the mcpGateway.keepassEnabled setting,
+			// so the cache does not read configuration directly.
+			//
+			// CV-HIGH fix: provider exceptions must never crash refresh — a buggy
+			// credential-store reader or corrupt globalState should degrade to
+			// "daemon rows only" silently, not leave the UI stale with no event.
+			if (this.importedProvider) {
+				try {
+					const importedNames = this.importedProvider();
+					const existingKeys = new Set(sap.map((s) => s.key));
+					const synthesized = synthesizeKeepassSapSystems(importedNames, existingKeys);
+					this.cachedSap = [...sap, ...synthesized].sort(
+						(a, b) => a.key.localeCompare(b.key),
+					);
+				} catch {
+					// Non-fatal: keep daemon-only rows. Already assigned above.
+				}
+			}
+
 			this._onDidRefresh.fire({
 				servers: this.cachedServers,
 				lastRefreshFailed: this._lastRefreshFailed,

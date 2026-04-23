@@ -46,6 +46,10 @@ export class SapTreeProvider implements vscode.TreeDataProvider<SapTreeNode>, vs
 		}
 		if (!this.hierarchical) { return []; }
 		if (element instanceof SapSystemItem) {
+			// Phase 17.5: imported rows have no daemon-backed VSP/GUI components.
+			// Make the contract explicit so future refactors can't accidentally
+			// treat them as expandable.
+			if (element.system.imported) { return []; }
 			const children: SapComponentItem[] = [];
 			if (element.system.vsp) {
 				children.push(new SapComponentItem(element.system, 'vsp', element.system.vsp));
@@ -94,6 +98,7 @@ export class SapTreeProvider implements vscode.TreeDataProvider<SapTreeNode>, vs
 			parts.push([
 				s.key,
 				s.status,
+				s.imported ? 'I' : 'D',
 				s.vsp?.status ?? '',
 				s.gui?.status ?? '',
 				s.vsp ? String(s.vsp.restart_count) : '',

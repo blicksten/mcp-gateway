@@ -17,6 +17,35 @@ Phases 1–16 implemented. Full history preserved locally in `full-history-backu
 
 ---
 
+## Phase 17 — Dashboard UX Polish Round 2 (in-flight)
+
+Detailed plan: `docs/PLAN.md` (2026-04-22, CV via PAL thinkdeep + Sonnet code-reviewer fallback).
+
+Delivered in one v1.7.0 bundle:
+
+| # | Sub-phase | Status |
+|---|-----------|--------|
+| 17.1 | Remove `mcpGateway.serverDetail` sidebar view; keep modal-on-demand (`ServerDetailPanel`). Deleted `server-detail-view-provider.ts` + test. | ✅ implemented |
+| 17.2 | Button audit matrix (31 rows). Cancel-button wiring in source is **correct** end-to-end (`html-builder.ts:307+500`, `add-server-panel.ts:148-151`). User report attributed to stale VSIX install — active instrumentation **deferred**, fresh install this round re-tests. | ⏸️ deferred (test with fresh VSIX first) |
+| 17.3 | New command `mcpGateway.openSettings` → `workbench.action.openSettings('@ext:mcp-gateway.mcp-gateway-dashboard')`; gear icon on both tree title bars (navigation@90). | ✅ implemented |
+| 17.4 | Explicit `navigation@10/@20/@90` priorities on view/title menus (prevents overflow collapse hiding Add); added `[Add SAP System](command:mcpGateway.addSapSystem)` link to `mcpSapSystems` viewsWelcome. | ✅ implemented |
+| 17.5 | New config `mcpGateway.keepassEnabled` (bool, default false); new `synthesizeKeepassSapSystems` helper; `ServerDataCache(client, importedProvider)` 2-arg constructor; union-merge in `refresh()`; `SapSystem.imported` flag; `sap-imported` contextValue; imported-row rendering (cloud-download icon, explanatory tooltip). Config flip triggers immediate refresh. | ✅ implemented |
+
+**CV record:** `mcp__pal__thinkdeep` at design time, `mcp__pal__codereview` fallback via Sonnet sub-agent at implementation time (PAL MCP was disconnected). 1 HIGH (provider exception must not crash refresh) + 2 MEDIUM (flatten merge guard, explicit imported-row short-circuit in `getChildren`) + 1 LOW (provider-throws regression test) — all fixed in-cycle.
+
+**Test deltas (local daemon on :8765 intercepts HTTP → 31 failures are environmental, baseline-identical):**
+- Baseline HEAD: 568 pass / 31 fail
+- After 17.3/17.4: 570 pass / 31 fail (+2 new `openSettings` tests)
+- After 17.1: 555 pass / 31 fail (−15 deleted `ServerDetailViewProvider` tests)
+- After 17.5: 574 pass / 31 fail (+19 synthesize/union/imported-row tests)
+- After CV fixes: 575 pass / 31 fail (+1 provider-throws regression test)
+
+**Files touched:** `package.json`, `src/extension.ts`, `src/sap-detector.ts`, `src/server-data-cache.ts`, `src/sap-item.ts`, `src/sap-tree-provider.ts`, `src/test/mock-vscode.ts`, `src/test/commands.test.ts`, `src/test/sap-detector.test.ts`, `src/test/sap-item.test.ts`, `src/test/server-data-cache.test.ts`. Deleted: `src/webview/server-detail-view-provider.ts`, `src/test/webview/server-detail-view-provider.test.ts`.
+
+**Orchestrator pipeline** `feature-4d1cda14` was halted mid-flight earlier this session due to PAL MCP / orchestrator disconnect. Work completed directly via the standard phase-by-phase loop with main-session verification. Pipeline can be safely abandoned.
+
+---
+
 ## Backlog
 
 ### Phase 11 — Extension UX (v1.1.0)

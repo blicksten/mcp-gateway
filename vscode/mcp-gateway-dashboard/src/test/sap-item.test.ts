@@ -88,6 +88,55 @@ describe('SapSystemItem (hierarchical mode)', () => {
 	});
 });
 
+describe('SapSystemItem (Phase 17.5 — imported KeePass row)', () => {
+	function importedSystem(overrides: Partial<SapSystem> = {}): SapSystem {
+		return {
+			key: 'DEV-001',
+			sid: 'DEV',
+			client: '001',
+			status: 'stopped',
+			imported: true,
+			...overrides,
+		};
+	}
+
+	it('uses sap-imported contextValue regardless of hierarchical mode', () => {
+		const flat = new SapSystemItem(importedSystem());
+		const hier = new SapSystemItem(importedSystem(), true);
+		assert.strictEqual(flat.contextValue, 'sap-imported');
+		assert.strictEqual(hier.contextValue, 'sap-imported');
+	});
+
+	it('imported rows are never collapsible (no daemon-backed children)', () => {
+		const hier = new SapSystemItem(importedSystem(), true);
+		assert.strictEqual(hier.collapsibleState, 0); // None — not Collapsed
+	});
+
+	it('description signals imported source', () => {
+		const item = new SapSystemItem(importedSystem());
+		assert.ok((item.description as string).includes('imported'));
+	});
+
+	it('tooltip explains imported state and points to Add SAP System', () => {
+		const item = new SapSystemItem(importedSystem());
+		const tip = (item.tooltip as unknown as MockMarkdownString).value;
+		assert.ok(tip.includes('KeePass'), `expected 'KeePass' in tooltip, got: ${tip}`);
+		assert.ok(tip.includes('not running'));
+		assert.ok(tip.includes('Add SAP System'));
+	});
+
+	it('imported icon differs from status icon', () => {
+		const imported = new SapSystemItem(importedSystem());
+		const normal = new SapSystemItem({
+			key: 'DEV-001', sid: 'DEV', client: '001', status: 'stopped',
+		});
+		const importedIcon = (imported.iconPath as { id: string }).id;
+		const normalIcon = (normal.iconPath as { id: string }).id;
+		assert.notStrictEqual(importedIcon, normalIcon);
+		assert.strictEqual(importedIcon, 'cloud-download');
+	});
+});
+
 describe('SapComponentItem', () => {
 	const system = makeSystem();
 

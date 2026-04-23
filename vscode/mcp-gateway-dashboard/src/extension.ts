@@ -14,7 +14,6 @@ import { SapSystemItem, SapComponentItem } from './sap-item';
 import { SapStatusBar } from './sap-status-bar';
 import { ServerDetailPanel } from './webview/server-detail-panel';
 import { SapDetailPanel } from './webview/sap-detail-panel';
-import { ServerDetailViewProvider } from './webview/server-detail-view-provider';
 import { AddServerPanel } from './webview/add-server-panel';
 import { AddSapPanel } from './webview/add-sap-panel';
 import { ClaudeCodePanel } from './webview/claude-code-panel';
@@ -78,8 +77,23 @@ export function activate(
 
 	const client: IGatewayClient = injectedClient ?? new GatewayClient(apiUrl, 5000, authHeader);
 
+	// Phase 8.2: credential store — OS keychain via SecretStorage.
+	// Constructed before the cache so the Phase 17.5 keepass-imported provider
+	// closure below can capture it by reference.
+	const credentialStore = new CredentialStore(context);
+	credentialStore.reconcile().catch(() => { /* stale entries pruned on best-effort */ });
+
+	// Phase 17.5 — KeePass-imported SAP rows provider. Reads the toggle fresh on
+	// every refresh so flipping the setting takes effect without a reload.
+	// Returns only credential names (never secret values).
+	const importedProvider = (): readonly string[] => {
+		const cfg = vscode.workspace.getConfiguration('mcpGateway');
+		if (!cfg.get<boolean>('keepassEnabled', false)) { return []; }
+		return credentialStore.listServers();
+	};
+
 	// Phase 8.3: shared data cache — single listServers() call for all consumers.
-	const cache = new ServerDataCache(client);
+	const cache = new ServerDataCache(client, importedProvider);
 	context.subscriptions.push(cache);
 
 	const treeProvider = new BackendTreeProvider(cache);
@@ -111,36 +125,14 @@ export function activate(
 	const logViewer = new LogViewer(apiUrl, { authHeader });
 	context.subscriptions.push(logViewer);
 
-	// Phase 8.2: credential store — OS keychain via SecretStorage.
-	const credentialStore = new CredentialStore(context);
-	credentialStore.reconcile().catch(() => { /* stale entries pruned on best-effort */ });
+	// Phase 17.1: sidebar ServerDetail view removed. Details are shown on demand
+	// via the `mcpGateway.showServerDetail` / `mcpGateway.showSapDetail` context
+	// commands, which open modal `ServerDetailPanel` / `SapDetailPanel` webviews.
 
-	// Phase 11.B: sidebar detail view provider — always-on webview replacing
-	// the click-toggle WebviewPanel UX pitfall (VS Code issues #34130, #51536,
-	// #77418, #85636, #105256). Legacy ServerDetailPanel / SapDetailPanel are
-	// retained for the explicit context-menu "Show Details" action.
-	const detailViewProvider = new ServerDetailViewProvider(context.extensionUri, cache, credentialStore);
-	context.subscriptions.push(detailViewProvider);
-	context.subscriptions.push(vscode.window.registerWebviewViewProvider(
-		ServerDetailViewProvider.viewType,
-		detailViewProvider,
-	));
-	context.subscriptions.push(treeView.onDidChangeSelection((e) => {
-		const first = e.selection[0];
-		if (first instanceof BackendItem) {
-			detailViewProvider.setMcpSelection(first.server);
-		} else {
-			detailViewProvider.setMcpSelection(null);
-		}
-	}));
-	context.subscriptions.push(sapTreeView.onDidChangeSelection((e) => {
-		const first = e.selection[0];
-		// Hierarchical mode: clicking a SapComponentItem child row must surface
-		// the parent system in the detail view, not clear it (fallback fixed H-2).
-		if (first instanceof SapSystemItem || first instanceof SapComponentItem) {
-			detailViewProvider.setSapSelection(first.system);
-		} else {
-			detailViewProvider.setSapSelection(null);
+	// Phase 17.5 — refresh the SAP tree when the KeePass toggle flips.
+	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
+		if (e.affectsConfiguration('mcpGateway.keepassEnabled')) {
+			cache.refresh().catch(() => {});
 		}
 	}));
 
@@ -227,6 +219,13 @@ function registerCommands(
 
 	push(vscode.commands.registerCommand('mcpGateway.refresh', () => {
 		cache.refresh(); // Re-fetch from API; all providers update via onDidRefresh.
+	}));
+
+	push(vscode.commands.registerCommand('mcpGateway.openSettings', () => {
+		void vscode.commands.executeCommand(
+			'workbench.action.openSettings',
+			'@ext:mcp-gateway.mcp-gateway-dashboard',
+		);
 	}));
 
 	push(vscode.commands.registerCommand('mcpGateway.showClaudeCodeIntegration', () => {

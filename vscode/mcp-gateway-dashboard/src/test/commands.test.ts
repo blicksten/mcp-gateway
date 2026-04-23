@@ -1,5 +1,5 @@
 // Import mock BEFORE production modules (CommonJS require order).
-import { dialogResponses, mockCalls, mockOutputChannels, mockWebviewPanels, resetMockState, getRegisteredCommands, MockSecretStorage, MockMemento } from './mock-vscode';
+import { dialogResponses, dispatchedCommands, mockCalls, mockOutputChannels, mockWebviewPanels, resetMockState, getRegisteredCommands, MockSecretStorage, MockMemento } from './mock-vscode';
 
 import * as assert from 'node:assert';
 import { describe, it, beforeEach } from 'mocha';
@@ -135,6 +135,7 @@ describe('Commands', () => {
 			'mcpGateway.showSapGuiLogs',
 			'mcpGateway.showSapDetail',
 			'mcpGateway.addSapSystem',
+			'mcpGateway.openSettings',
 		];
 
 		for (const cmd of expectedCommands) {
@@ -206,6 +207,21 @@ describe('Commands', () => {
 			await commands.get('mcpGateway.removeServer')!(item);
 			// Client removeServer would cause a connection error since no real server;
 			// but since Cancel was chosen, no HTTP call should be attempted.
+			assert.deepStrictEqual(mockCalls.errorMessages, []);
+		});
+	});
+
+	describe('mcpGateway.openSettings', () => {
+		it('dispatches workbench.action.openSettings with extension filter', async () => {
+			await commands.get('mcpGateway.openSettings')!();
+			const settingsCalls = dispatchedCommands.filter(
+				(c) => c.id === 'workbench.action.openSettings',
+			);
+			assert.equal(settingsCalls.length, 1, 'expected exactly one openSettings dispatch');
+			assert.deepStrictEqual(
+				settingsCalls[0].args,
+				['@ext:mcp-gateway.mcp-gateway-dashboard'],
+			);
 			assert.deepStrictEqual(mockCalls.errorMessages, []);
 		});
 	});

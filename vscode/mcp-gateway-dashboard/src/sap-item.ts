@@ -36,7 +36,8 @@ export class SapSystemItem extends vscode.TreeItem {
 	constructor(system: SapSystem, hierarchical: boolean = false) {
 		super(
 			system.key,
-			hierarchical
+			// Imported rows never expand — there are no daemon-backed components.
+			hierarchical && !system.imported
 				? vscode.TreeItemCollapsibleState.Collapsed
 				: vscode.TreeItemCollapsibleState.None,
 		);
@@ -44,19 +45,25 @@ export class SapSystemItem extends vscode.TreeItem {
 		this.hierarchical = hierarchical;
 
 		// Icon based on composite status.
-		const iconId = STATUS_ICONS[system.status] ?? 'question';
+		const iconId = system.imported
+			? 'cloud-download'
+			: (STATUS_ICONS[system.status] ?? 'question');
 		this.iconPath = new vscode.ThemeIcon(iconId);
 
 		// Description: component status dots (kept in hierarchical mode as a
 		// quick glance even when the children are collapsed).
-		const parts: string[] = [];
-		if (system.vsp) {
-			parts.push(`vsp ${STATUS_DOTS[system.vsp.status] ?? '?'}`);
+		if (system.imported) {
+			this.description = 'imported (KeePass)';
+		} else {
+			const parts: string[] = [];
+			if (system.vsp) {
+				parts.push(`vsp ${STATUS_DOTS[system.vsp.status] ?? '?'}`);
+			}
+			if (system.gui) {
+				parts.push(`gui ${STATUS_DOTS[system.gui.status] ?? '?'}`);
+			}
+			this.description = parts.join('  ');
 		}
-		if (system.gui) {
-			parts.push(`gui ${STATUS_DOTS[system.gui.status] ?? '?'}`);
-		}
-		this.description = parts.join('  ');
 
 		// Tooltip with details (MarkdownString for rich rendering).
 		const md = new vscode.MarkdownString();
@@ -64,26 +71,38 @@ export class SapSystemItem extends vscode.TreeItem {
 		md.supportHtml = false;
 		md.appendMarkdown(`**SAP System:** ${escapeMd(system.sid)}\n\n`);
 		if (system.client) { md.appendMarkdown(`- Client: \`${escapeMd(system.client)}\`\n`); }
-		if (system.vsp) {
-			md.appendMarkdown(`- VSP: \`${escapeMd(system.vsp.name)}\` (${system.vsp.status})\n`);
-			if (system.vsp.pid) { md.appendMarkdown(`  - PID: \`${system.vsp.pid}\`\n`); }
-			if (system.vsp.restart_count > 0) { md.appendMarkdown(`  - Restarts: ${system.vsp.restart_count}\n`); }
-			if (system.vsp.last_error) { md.appendMarkdown(`  - Error: ${escapeMd(system.vsp.last_error)}\n`); }
-		}
-		if (system.gui) {
-			md.appendMarkdown(`- GUI: \`${escapeMd(system.gui.name)}\` (${system.gui.status})\n`);
-			if (system.gui.pid) { md.appendMarkdown(`  - PID: \`${system.gui.pid}\`\n`); }
-			if (system.gui.restart_count > 0) { md.appendMarkdown(`  - Restarts: ${system.gui.restart_count}\n`); }
-			if (system.gui.last_error) { md.appendMarkdown(`  - Error: ${escapeMd(system.gui.last_error)}\n`); }
+		if (system.imported) {
+			md.appendMarkdown(`- Source: KeePass-imported credential\n`);
+			md.appendMarkdown(`- Status: not running (no daemon-backed server)\n\n`);
+			md.appendMarkdown(`_Use **Add SAP System** to register this system with the daemon._\n`);
+		} else {
+			if (system.vsp) {
+				md.appendMarkdown(`- VSP: \`${escapeMd(system.vsp.name)}\` (${system.vsp.status})\n`);
+				if (system.vsp.pid) { md.appendMarkdown(`  - PID: \`${system.vsp.pid}\`\n`); }
+				if (system.vsp.restart_count > 0) { md.appendMarkdown(`  - Restarts: ${system.vsp.restart_count}\n`); }
+				if (system.vsp.last_error) { md.appendMarkdown(`  - Error: ${escapeMd(system.vsp.last_error)}\n`); }
+			}
+			if (system.gui) {
+				md.appendMarkdown(`- GUI: \`${escapeMd(system.gui.name)}\` (${system.gui.status})\n`);
+				if (system.gui.pid) { md.appendMarkdown(`  - PID: \`${system.gui.pid}\`\n`); }
+				if (system.gui.restart_count > 0) { md.appendMarkdown(`  - Restarts: ${system.gui.restart_count}\n`); }
+				if (system.gui.last_error) { md.appendMarkdown(`  - Error: ${escapeMd(system.gui.last_error)}\n`); }
+			}
 		}
 		this.tooltip = md;
 
-		// contextValue distinguishes flat (sap-<status>) from hierarchical parent
-		// (sap-group-<status>) so package.json when-clauses can gate VSP/GUI
-		// actions off the group parent and onto SapComponentItem children.
-		this.contextValue = hierarchical
-			? `sap-group-${system.status}`
-			: `sap-${system.status}`;
+		// contextValue:
+		// - `sap-imported` — Phase 17.5 synthetic row, no daemon component;
+		//   package.json when-clauses exclude lifecycle actions on this tag.
+		// - `sap-group-<status>` — hierarchical parent of a daemon-backed system.
+		// - `sap-<status>` — flat-mode daemon-backed row.
+		if (system.imported) {
+			this.contextValue = 'sap-imported';
+		} else {
+			this.contextValue = hierarchical
+				? `sap-group-${system.status}`
+				: `sap-${system.status}`;
+		}
 	}
 }
 

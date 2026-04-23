@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.0.0",
+  "version": "1.7.0",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -38,11 +38,6 @@
         {
           "id": "mcpSapSystems",
           "name": "SAP Systems"
-        },
-        {
-          "id": "mcpGateway.serverDetail",
-          "name": "Server Detail",
-          "type": "webview"
         }
       ]
     },
@@ -130,6 +125,11 @@
         "command": "mcpGateway.addSapSystem",
         "title": "MCP Gateway: Add SAP System",
         "icon": "$(add)"
+      },
+      {
+        "command": "mcpGateway.openSettings",
+        "title": "MCP Gateway: Open Settings",
+        "icon": "$(gear)"
       }
     ],
     "menus": {
@@ -137,17 +137,27 @@
         {
           "command": "mcpGateway.refresh",
           "when": "view == mcpBackends",
-          "group": "navigation"
+          "group": "navigation@10"
         },
         {
           "command": "mcpGateway.addServer",
           "when": "view == mcpBackends",
-          "group": "navigation"
+          "group": "navigation@20"
+        },
+        {
+          "command": "mcpGateway.openSettings",
+          "when": "view == mcpBackends",
+          "group": "navigation@90"
         },
         {
           "command": "mcpGateway.addSapSystem",
           "when": "view == mcpSapSystems",
-          "group": "navigation"
+          "group": "navigation@20"
+        },
+        {
+          "command": "mcpGateway.openSettings",
+          "when": "view == mcpSapSystems",
+          "group": "navigation@90"
         }
       ],
       "view/item/context": [
@@ -235,7 +245,7 @@
       },
       {
         "view": "mcpSapSystems",
-        "contents": "No SAP systems detected.\nServers with vsp-* or sap-gui-* prefixes appear here automatically."
+        "contents": "No SAP systems detected.\nServers with vsp-* or sap-gui-* prefixes appear here automatically.\n[Add SAP System](command:mcpGateway.addSapSystem)"
       }
     ],
     "configuration": {
@@ -283,6 +293,11 @@
           "default": "",
           "description": "Path to the Bearer auth token file (default ~/.mcp-gateway/auth.token). MCP_GATEWAY_AUTH_TOKEN env var overrides this.",
           "scope": "machine"
+        },
+        "mcpGateway.keepassEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, the SAP Systems tree shows the union of daemon-detected SAP systems and systems whose credentials have been imported from KeePass. Imported entries appear as stopped until the daemon knows about them."
         },
         "mcpGateway.keepassPath": {
           "type": "string",

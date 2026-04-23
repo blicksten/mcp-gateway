@@ -273,8 +273,11 @@ export class MockMemento {
 	}
 }
 
+export const dispatchedCommands: Array<{ id: string; args: unknown[] }> = [];
+
 export function resetMockState(): void {
 	registeredCommands.clear();
+	dispatchedCommands.length = 0;
 	dialogResponses.showInformationMessage = undefined;
 	dialogResponses.showWarningMessage = undefined;
 	dialogResponses.showErrorMessage = undefined;
@@ -324,6 +327,7 @@ export const mockVscode = {
 			return { dispose: () => { registeredCommands.delete(id); } };
 		},
 		executeCommand: async (id: string, ...args: unknown[]) => {
+			dispatchedCommands.push({ id, args });
 			const handler = registeredCommands.get(id);
 			if (handler) { return handler(...args); }
 		},

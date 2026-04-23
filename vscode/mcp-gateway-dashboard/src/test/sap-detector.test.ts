@@ -1,6 +1,12 @@
 import './mock-vscode';
 import { strict as assert } from 'node:assert';
-import { parseSapServerName, groupSapSystems, computeSapStatus, type SapSystem } from '../sap-detector';
+import {
+	parseSapServerName,
+	groupSapSystems,
+	computeSapStatus,
+	synthesizeKeepassSapSystems,
+	type SapSystem,
+} from '../sap-detector';
 import type { ServerView } from '../types';
 
 describe('parseSapServerName', () => {
@@ -156,5 +162,78 @@ describe('groupSapSystems', () => {
 		const { sap } = groupSapSystems(servers);
 		assert.equal(sap[0].key, 'AAA');
 		assert.equal(sap[1].key, 'ZZZ');
+	});
+});
+
+describe('synthesizeKeepassSapSystems (Phase 17.5)', () => {
+	it('returns empty when no credential name matches the SAP regex', () => {
+		const rows = synthesizeKeepassSapSystems(['context7', 'pal', 'other'], new Set());
+		assert.deepEqual(rows, []);
+	});
+
+	it('returns empty when every matching name is already daemon-backed', () => {
+		const rows = synthesizeKeepassSapSystems(
+			['vsp-DEV-001', 'sap-gui-DEV-001'],
+			new Set(['DEV-001']),
+		);
+		assert.deepEqual(rows, []);
+	});
+
+	it('synthesizes one imported row per SID/client pair with imported=true', () => {
+		const rows = synthesizeKeepassSapSystems(['vsp-QAS-100'], new Set());
+		assert.equal(rows.length, 1);
+		assert.equal(rows[0].key, 'QAS-100');
+		assert.equal(rows[0].sid, 'QAS');
+		assert.equal(rows[0].client, '100');
+		assert.equal(rows[0].status, 'stopped');
+		assert.strictEqual(rows[0].imported, true);
+		assert.strictEqual(rows[0].vsp, undefined);
+		assert.strictEqual(rows[0].gui, undefined);
+	});
+
+	it('deduplicates when both vsp-<SID> and sap-gui-<SID> are imported for the same key', () => {
+		const rows = synthesizeKeepassSapSystems(
+			['vsp-PRD-400', 'sap-gui-PRD-400'],
+			new Set(),
+		);
+		assert.equal(rows.length, 1);
+		assert.equal(rows[0].key, 'PRD-400');
+	});
+
+	it('sorts output by key for stable ordering', () => {
+		const rows = synthesizeKeepassSapSystems(
+			['vsp-ZZZ', 'vsp-AAA-100', 'vsp-MMM-200'],
+			new Set(),
+		);
+		assert.deepEqual(
+			rows.map((r) => r.key),
+			['AAA-100', 'MMM-200', 'ZZZ'],
+		);
+	});
+
+	it('client-less (no-client) entry is distinct from a clientful entry with same SID', () => {
+		const rows = synthesizeKeepassSapSystems(
+			['vsp-DEV', 'vsp-DEV-001'],
+			new Set(),
+		);
+		assert.equal(rows.length, 2);
+		assert.deepEqual(rows.map((r) => r.key).sort(), ['DEV', 'DEV-001']);
+	});
+
+	it('non-matching names co-existing with matching names is fine', () => {
+		const rows = synthesizeKeepassSapSystems(
+			['context7', 'vsp-ABC', 'pal', 'sap-gui-ABC-900'],
+			new Set(),
+		);
+		assert.equal(rows.length, 2);
+		assert.deepEqual(rows.map((r) => r.key).sort(), ['ABC', 'ABC-900']);
+	});
+
+	it('readonly inputs — function does not mutate credentialNames or existingKeys', () => {
+		const names = Object.freeze(['vsp-DEV']);
+		const keys = new Set(['X-999']);
+		const before = [...keys];
+		synthesizeKeepassSapSystems(names, keys);
+		assert.deepEqual([...keys], before);
 	});
 });
