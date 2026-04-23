@@ -107,6 +107,7 @@ func newRootCmd() *cobra.Command {
 
 	// Register subcommands.
 	root.AddCommand(newHealthCmd())
+	root.AddCommand(newDaemonCmd())
 	root.AddCommand(newServersCmd())
 	root.AddCommand(newToolsCmd())
 	root.AddCommand(newLogsCmd())

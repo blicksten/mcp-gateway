@@ -73,10 +73,18 @@ func (c *Client) attachAuthHeader(req *http.Request) error {
 // --- API response types (mirrors api.ServerView) ---
 
 // HealthResponse is the response from GET /api/v1/health.
+// Fields added in D.1 are tagged omitempty so that this struct can decode
+// responses from older daemons gracefully (AUDIT L-2: decoder does NOT use
+// DisallowUnknownFields, so new fields on the daemon side are also safe).
 type HealthResponse struct {
-	Status  string `json:"status"`
-	Servers int    `json:"servers"`
-	Running int    `json:"running"`
+	Status        string `json:"status"`
+	Servers       int    `json:"servers"`
+	Running       int    `json:"running"`
+	Auth          string `json:"auth,omitempty"`
+	StartedAt     string `json:"started_at,omitempty"`
+	PID           int    `json:"pid,omitempty"`
+	Version       string `json:"version,omitempty"`
+	UptimeSeconds int64  `json:"uptime_seconds,omitempty"`
 }
 
 // ServerView is the API response for a server entry.
@@ -229,6 +237,31 @@ func (c *Client) RestartServer(ctx context.Context, name string) error {
 // ResetCircuit calls POST /api/v1/servers/{name}/reset-circuit.
 func (c *Client) ResetCircuit(ctx context.Context, name string) error {
 	return c.post(ctx, "/api/v1/servers/"+url.PathEscape(name)+"/reset-circuit", nil, nil)
+}
+
+// Shutdown calls POST /api/v1/shutdown to request a graceful daemon exit.
+// A 202 Accepted response is treated as success. Auth is forwarded via the
+// same provider used by all other mutation endpoints.
+func (c *Client) Shutdown(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/v1/shutdown", nil)
+	if err != nil {
+		return err
+	}
+	if err := c.attachAuthHeader(req); err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return &ConnectionError{URL: c.baseURL, Err: err}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusAccepted {
+		return nil
+	}
+	return c.parseErrorBody(resp)
 }
 
 // ListTools calls GET /api/v1/tools.

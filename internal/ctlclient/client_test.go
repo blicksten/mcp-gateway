@@ -364,6 +364,113 @@ func TestStreamLogs_Reconnect_StopsOn404(t *testing.T) {
 	assert.Equal(t, []string{"first"}, lines)
 }
 
+func TestHealth_ExtendedFields(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":         "ok",
+			"servers":        5,
+			"running":        4,
+			"auth":           "enabled",
+			"started_at":     "2026-04-23T14:02:17Z",
+			"pid":            12345,
+			"version":        "v1.7.0",
+			"uptime_seconds": int64(8057),
+		})
+	}))
+	defer ts.Close()
+
+	c := newTestClient(ts)
+	h, err := c.Health(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", h.Status)
+	assert.Equal(t, 5, h.Servers)
+	assert.Equal(t, 4, h.Running)
+	assert.Equal(t, "enabled", h.Auth)
+	assert.Equal(t, "2026-04-23T14:02:17Z", h.StartedAt)
+	assert.Equal(t, 12345, h.PID)
+	assert.Equal(t, "v1.7.0", h.Version)
+	assert.Equal(t, int64(8057), h.UptimeSeconds)
+}
+
+func TestHealth_OlderDaemon_MissingFields(t *testing.T) {
+	// Older daemon only returns status/servers/running — new fields must be zero-valued.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok", "servers": 1, "running": 1,
+		})
+	}))
+	defer ts.Close()
+
+	c := newTestClient(ts)
+	h, err := c.Health(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", h.Status)
+	assert.Equal(t, "", h.StartedAt)
+	assert.Equal(t, 0, h.PID)
+	assert.Equal(t, "", h.Version)
+	assert.Equal(t, int64(0), h.UptimeSeconds)
+}
+
+func TestShutdown_Success(t *testing.T) {
+	var gotAuth string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "POST", r.Method)
+		assert.Equal(t, "/api/v1/shutdown", r.URL.Path)
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]string{"status": "shutting_down"})
+	}))
+	defer ts.Close()
+
+	c := NewAuthed(ts.URL, func() (string, error) { return "Bearer test-token", nil })
+	err := c.Shutdown(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer test-token", gotAuth)
+}
+
+func TestShutdown_Unauthorized(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+	}))
+	defer ts.Close()
+
+	c := newTestClient(ts)
+	err := c.Shutdown(ctx)
+	require.Error(t, err)
+	var apiErr *APIError
+	require.True(t, errors.As(err, &apiErr))
+	assert.Equal(t, 401, apiErr.StatusCode)
+}
+
+func TestShutdown_ServerError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
+	}))
+	defer ts.Close()
+
+	c := newTestClient(ts)
+	err := c.Shutdown(ctx)
+	require.Error(t, err)
+	var apiErr *APIError
+	require.True(t, errors.As(err, &apiErr))
+	assert.Equal(t, 500, apiErr.StatusCode)
+}
+
+func TestShutdown_ConnectionError(t *testing.T) {
+	c := New("http://127.0.0.1:1")
+	err := c.Shutdown(ctx)
+	require.Error(t, err)
+	var connErr *ConnectionError
+	require.True(t, errors.As(err, &connErr))
+}
+
 func TestConnectionError(t *testing.T) {
 	// Connect to a port that's not listening.
 	c := New("http://127.0.0.1:1")
