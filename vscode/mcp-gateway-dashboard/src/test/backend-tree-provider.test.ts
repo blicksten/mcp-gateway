@@ -98,14 +98,25 @@ describe('BackendTreeProvider', () => {
 	});
 
 	describe('getChildren (root)', () => {
-		it('returns BackendItem for each server', async () => {
+		it('returns BackendItem for each server in alphabetical order (stable across refreshes)', async () => {
 			cache = new ServerDataCache(createMockClient(sampleServers) as any);
 			await cache.refresh();
 			provider = new BackendTreeProvider(cache);
 			const items = provider.getChildren();
 			assert.strictEqual(items.length, 7);
 			assert.ok(items[0] instanceof BackendItem);
-			assert.strictEqual((items[0] as BackendItem).server.name, 'ctx7');
+			// Phase 17 follow-up: MCP rows are sorted by name so the tree does not
+			// jump on each daemon poll. Expected alphabetical order below.
+			const names = items.map((i) => (i as BackendItem).server.name);
+			assert.deepStrictEqual(names, [
+				'booting',
+				'ctx7',
+				'cycling',
+				'disabled-srv',
+				'flaky',
+				'orch',
+				'pal',
+			]);
 		});
 
 		it('returns empty when cache has no data', () => {

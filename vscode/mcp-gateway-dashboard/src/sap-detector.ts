@@ -123,8 +123,11 @@ export function groupSapSystems(servers: ServerView[]): { sap: SapSystem[]; mcp:
 		sap.push(system);
 	}
 
-	// Sort by key for stable ordering.
+	// Sort by key / name for stable ordering across refreshes — the daemon
+	// returns servers in whatever order its internal map iterates, which
+	// caused the tree rows to jump on every refresh (Phase 17 follow-up).
 	sap.sort((a, b) => a.key.localeCompare(b.key));
+	mcp.sort((a, b) => a.name.localeCompare(b.name));
 
 	return { sap, mcp };
 }

@@ -163,6 +163,35 @@ describe('groupSapSystems', () => {
 		assert.equal(sap[0].key, 'AAA');
 		assert.equal(sap[1].key, 'ZZZ');
 	});
+
+	it('sorts MCP servers alphabetically by name (stops row-jumping across refreshes)', () => {
+		// Daemon returns servers in whatever order its internal map iterates —
+		// without a sort, the tree rows jump on every refresh. Regression guard
+		// for the Phase 17 follow-up fix.
+		const servers: ServerView[] = [
+			{ name: 'zzz-server', status: 'running', transport: 'stdio', restart_count: 0 },
+			{ name: 'abc-server', status: 'running', transport: 'stdio', restart_count: 0 },
+			{ name: 'middle', status: 'stopped', transport: 'http', restart_count: 0 },
+		];
+		const { mcp } = groupSapSystems(servers);
+		assert.deepEqual(mcp.map((s) => s.name), ['abc-server', 'middle', 'zzz-server']);
+	});
+
+	it('MCP sort is deterministic regardless of input order', () => {
+		const a: ServerView = { name: 'alpha', status: 'running', transport: 'stdio', restart_count: 0 };
+		const b: ServerView = { name: 'beta', status: 'running', transport: 'stdio', restart_count: 0 };
+		const c: ServerView = { name: 'gamma', status: 'running', transport: 'stdio', restart_count: 0 };
+		const orderings: ServerView[][] = [
+			[a, b, c],
+			[c, b, a],
+			[b, a, c],
+			[a, c, b],
+		];
+		for (const input of orderings) {
+			const { mcp } = groupSapSystems(input);
+			assert.deepEqual(mcp.map((s) => s.name), ['alpha', 'beta', 'gamma']);
+		}
+	});
 });
 
 describe('synthesizeKeepassSapSystems (Phase 17.5)', () => {
