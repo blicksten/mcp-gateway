@@ -363,6 +363,75 @@ See the [Claude Code plugin docs](https://docs.claude.com/en/docs/claude-code/)
 for the authoritative distinction between slash-command plugins and MCP
 plugins.
 
+## Managing the daemon
+
+The gateway daemon is a separate, long-lived process. That is the whole
+point — it outlives any single Claude Code / VSCode session so backends
+stay warm across `/clear`, reload window, and closing the editor. The
+trade-off is that "long-lived" needs **explicit operator control** so the
+daemon is never a black box.
+
+### From the CLI (`mcp-ctl daemon ...`)
+
+```
+mcp-ctl daemon start     [--daemon-path PATH] [--wait 10s]
+mcp-ctl daemon stop      [--timeout 10s]
+mcp-ctl daemon restart   [--daemon-path PATH] [--timeout 10s] [--wait 10s]
+mcp-ctl daemon status                  # alias: info
+```
+
+- **`start`** works when no daemon is running. It resolves the binary
+  from `--daemon-path` → `MCP_GATEWAY_BIN` → `PATH` in priority order,
+  spawns detached (`DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP` on
+  Windows, `Setpgid` on POSIX), then polls `GET /api/v1/health` until
+  reachable or `--wait` times out.
+- **`stop`** prefers a graceful `POST /api/v1/shutdown` (auth-gated,
+  202 + drain). If the REST endpoint is unreachable it falls back to
+  reading the PID from `$XDG_RUNTIME_DIR/mcp-gateway.pid` (Linux) or
+  `%TEMP%\mcp-gateway.pid` (Windows) and sending a signal — SIGTERM
+  first, SIGKILL after 2 s on POSIX; `Kill()` on Windows.
+- **`status`** prints a compact table with PID, version, RFC3339 start
+  time, human-readable uptime (e.g. `2h 14m`), and server counts.
+  Returns exit code 2 (`exitUnreachable`) when the daemon is offline.
+
+### From the VSCode extension
+
+The **Gateway** tree view at the top of the MCP Gateway activity bar
+shows live daemon status:
+
+- Root row: "Gateway" with an uptime description (e.g. `2h 3m`) and a
+  status icon. Offline daemons show `offline` and collapse their detail
+  rows.
+- Expandable children: `PID`, `Version`, `Started`, `Uptime`.
+- Inline action buttons on the root:
+  - `▶` **Start** when the daemon is unreachable
+  - `■` **Stop** when the daemon is running
+  - `↻` **Restart** when the daemon is running — REST-based, so it works
+    even when the extension does NOT own the child process (i.e. you
+    started the daemon via `mcp-ctl daemon start` earlier).
+
+The aggregate **MCP: N/M** status bar item tooltip now leads with a
+`**Gateway**: 2h 3m · v1.7.3 · pid 12345` line so uptime is visible at a
+glance without opening the sidebar.
+
+### Graceful shutdown semantics
+
+`POST /api/v1/shutdown` and `SIGTERM` share the same exit path:
+1. Response flushes (Flusher.Flush) with 202 before cancel fires.
+2. Root context cancels — the errgroup that runs HTTP, config watcher,
+   health monitor, and backend lifecycles drains.
+3. A bounded 8-second `context.WithTimeout` wraps the post-`Wait`
+   cleanup (`ps.FlushPersists` + `lm.StopAll`) so a hung SSE client or
+   patch-state flush cannot keep the daemon alive indefinitely.
+4. PID file is removed. Process exits with code 0.
+
+**`--no-auth` caveat.** When the daemon runs with `--no-auth` (opt-in via
+`MCP_GATEWAY_I_UNDERSTAND_NO_AUTH=1`), `POST /api/v1/shutdown` is
+reachable by any local process on the host. This matches the existing
+"local trust" stance documented in ADR-0003 §no-auth-escape-hatch — if
+you disable authentication you accept that anything on the loopback can
+stop the daemon. Do not combine `--no-auth` with `allow_remote`.
+
 ## CLI Reference
 
 ```

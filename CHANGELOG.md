@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-04-24
+
+### Added — Daemon lifecycle control
+
+- **`POST /api/v1/shutdown`** — auth-gated graceful shutdown endpoint. Returns 202 + `{"status":"shutting_down"}`, flushes response via `http.Flusher` before triggering the root `context.CancelFunc`, idempotent under concurrent requests (returns `already_shutting_down` for re-entry). Wired to the same signal-handler path as `SIGTERM`, so the in-flight errgroup drain and the new 8-second bounded `context.WithTimeout` apply to both exit paths.
+- **Extended `/api/v1/health`** — response now includes `started_at` (RFC3339 UTC), `pid`, `version`, and `uptime_seconds` alongside the existing `status`/`servers`/`running`/`auth` fields. All new fields `omitempty` — older clients decode unchanged.
+- **`internal/pidfile` package** — atomic PID file acquisition (`O_CREAT|O_EXCL|O_WRONLY` + post-write `Lstat` non-symlink verification, `ErrAlreadyRunning` sentinel). Liveness probe is HTTP-based (`GET /api/v1/health` with 500ms timeout, TLS-aware with `InsecureSkipVerify` for self-signed loopback certs), so stale-reap works identically on Linux and Windows. `DefaultPath` prefers `$XDG_RUNTIME_DIR/mcp-gateway.pid` on Linux, falls back to `os.TempDir()` on other platforms.
+- **`mcp-ctl daemon` CLI subcommands** — `start` (spawns detached via `DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP` on Windows, `Setpgid` on POSIX; polls `/health` for reachability), `stop` (REST `/shutdown` → PID-file-based OS kill fallback with SIGTERM → 2 s wait → SIGKILL escalation on POSIX), `restart` (composed stop + start with connection-error tolerance), `status` (tabwriter table: STATUS / PID / VERSION / STARTED / UPTIME / SERVERS / RUNNING). Uptime formatter handles `Ns` / `Nm Ss` / `Nh Mm Ss` / `Nd Hh Mm` ranges.
+
+### Added — VSCode extension
+
+- **`mcpGateway.restartDaemon` command** — REST-based (works for daemons started externally via `mcp-ctl daemon start`, not just extension-owned children). `DaemonManager.restart()` flow: `shutdown()` → poll `/health` unreachable → cleanup own child handle if any → spawn fresh. Serialised by a new `restarting` mutex with `start()`/`stop()` to prevent auto-start + user-restart races.
+- **Gateway tree view** — new `mcpGatewayDaemon` view at the top of the MCP Gateway activity container. Root "Gateway" row with status icon + uptime description, expandable into `PID` / `Version` / `Started` / `Uptime` detail rows. Inline action buttons: start (when offline), stop + restart (when running). Fingerprint collapses uptime into 5-second buckets so the tree doesn't re-render every poll tick.
+- **Status bar tooltip** now leads with `**Gateway**: 2h 3m · v1.7.3 · pid 12345` line when `/health` metadata is available. Missing fields are skipped rather than printed as `unknown`.
+- **`ServerDataCache.gatewayHealth`** — cache fetches `/servers` and `/health` in parallel via `Promise.allSettled` on the same refresh cycle. `/health` failures don't mark the cache as offline (only `/servers` does); consumers get `gatewayHealth: null` and render "offline".
+
+### Security
+
+- `POST /api/v1/shutdown` is mounted inside the Bearer-auth-required router group alongside all other mutating endpoints. Rejected with 401 without a valid token.
+- PID file mode `0600` with post-write `Lstat` check — world-writable `/tmp` symlink attacks rejected.
+- `--no-auth` mode caveat documented: with auth disabled, any local process can POST `/shutdown`. Acceptable per existing `MCP_GATEWAY_I_UNDERSTAND_NO_AUTH=1` operator attestation (ADR-0003 §no-auth-escape-hatch).
+
+### Documentation
+
+- `README.md` — new "Managing the daemon" section covering CLI, extension UI, status bar tooltip, and graceful shutdown semantics.
+
+### Breaking
+
+None. All additions are backward-compatible — `HealthResponse` fields use JSON `omitempty` and TypeScript `?`; `DaemonManager.start()`/`stop()` signatures unchanged.
+
 ## [1.6.0] - 2026-04-22
 
 ### Added
