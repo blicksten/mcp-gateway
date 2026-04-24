@@ -2,6 +2,7 @@ import './mock-vscode';
 import { strict as assert } from 'node:assert';
 import { SapTreeProvider } from '../sap-tree-provider';
 import { SapSystemItem, SapComponentItem } from '../sap-item';
+import { PlaceholderTreeItem } from '../tree-placeholder';
 import { ServerDataCache } from '../server-data-cache';
 import type { ServerView } from '../types';
 import { mockConfigValues, fireConfigChange, resetMockState } from './mock-vscode';
@@ -272,14 +273,17 @@ describe('SapTreeProvider', () => {
 			provider = new SapTreeProvider(cache);
 			provider.refresh();
 			const flatFp = provider.getFingerprint();
-			assert.ok(flatFp && flatFp.startsWith('F;'));
+			// Phase 2 (debug-flicker): placeholder-state prefix ('N'=normal,
+			// 'P'=placeholder) now precedes the hierarchy marker. Non-empty
+			// systems list → 'N;F;' for flat mode.
+			assert.ok(flatFp && flatFp.startsWith('N;F;'));
 
 			// Flip the live config to hierarchical and fire the VS Code change event.
 			mockConfigValues['mcpGateway.sapGroupBySid'] = true;
 			fireConfigChange('mcpGateway.sapGroupBySid');
 			provider.refresh();
 			const hierFp = provider.getFingerprint();
-			assert.ok(hierFp && hierFp.startsWith('H;'));
+			assert.ok(hierFp && hierFp.startsWith('N;H;'));
 			assert.notStrictEqual(hierFp, flatFp);
 		});
 
@@ -333,6 +337,143 @@ describe('SapTreeProvider', () => {
 			provider = new SapTreeProvider(cache);
 			const roots = provider.getChildren() as SapSystemItem[];
 			assert.deepStrictEqual(provider.getChildren(roots[0]), []);
+		});
+	});
+
+	describe('cold-start placeholder (Phase 2)', () => {
+		it('returns PlaceholderTreeItem when lastRefreshFailed=true AND no SAP systems are cached', async () => {
+			const throwingClient = {
+				listServers: async () => { throw new Error('daemon unreachable'); },
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			cache = new ServerDataCache(throwingClient as any);
+			await cache.refresh();
+			provider = new SapTreeProvider(cache);
+
+			const items = provider.getChildren();
+			assert.strictEqual(items.length, 1);
+			assert.ok(items[0] instanceof PlaceholderTreeItem);
+		});
+
+		it('does NOT return placeholder when preserved SAP rows exist', async () => {
+			const snapshots: (ServerView[] | Error)[] = [
+				[
+					{ name: 'vsp-DEV', status: 'running', transport: 'stdio', restart_count: 0 },
+					{ name: 'sap-gui-DEV', status: 'running', transport: 'http', restart_count: 0 },
+				],
+				new Error('transient'),
+			];
+			const client = {
+				calls: 0,
+				listServers: async function () {
+					const snap = snapshots[Math.min(this.calls++, snapshots.length - 1)];
+					if (snap instanceof Error) { throw snap; }
+					return snap;
+				},
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			cache = new ServerDataCache(client as any);
+			await cache.refresh();
+			await cache.refresh();
+			provider = new SapTreeProvider(cache);
+
+			const items = provider.getChildren();
+			assert.strictEqual(cache.lastRefreshFailed, true);
+			assert.strictEqual(items.length, 1);
+			assert.ok(items[0] instanceof SapSystemItem);
+		});
+
+		it('does NOT return placeholder when refresh succeeds with no SAP servers (healthy MCP-only)', async () => {
+			// Healthy daemon with only non-SAP backends → 0 SAP systems, no placeholder.
+			cache = new ServerDataCache(createMockClient([
+				{ name: 'ctx7', status: 'running', transport: 'http', restart_count: 0 },
+			]) as any);
+			await cache.refresh();
+			provider = new SapTreeProvider(cache);
+
+			const items = provider.getChildren();
+			assert.strictEqual(cache.lastRefreshFailed, false);
+			assert.strictEqual(items.length, 0);
+		});
+
+		it('fires onDidChangeTreeData on transition cold-start-failed → first-success-empty', async () => {
+			const snapshots: (ServerView[] | Error)[] = [new Error('daemon starting'), []];
+			const client = {
+				calls: 0,
+				listServers: async function () {
+					const snap = snapshots[Math.min(this.calls++, snapshots.length - 1)];
+					if (snap instanceof Error) { throw snap; }
+					return snap;
+				},
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			cache = new ServerDataCache(client as any);
+			provider = new SapTreeProvider(cache);
+			let fireCount = 0;
+			provider.onDidChangeTreeData(() => { fireCount++; });
+
+			await cache.refresh(); // fail → 'P;F;'
+			await cache.refresh(); // success empty → 'N;F;'
+			assert.strictEqual(fireCount, 2);
+		});
+
+		it('placeholder fingerprint distinct from healthy-empty fingerprint', async () => {
+			// First exercise the failed path.
+			const throwingClient = {
+				listServers: async () => { throw new Error('no daemon'); },
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			cache = new ServerDataCache(throwingClient as any);
+			await cache.refresh();
+			provider = new SapTreeProvider(cache);
+			provider.refresh();
+			const failedFp = provider.getFingerprint();
+			assert.ok(failedFp && failedFp.startsWith('P;'),
+				`failed state fingerprint should start with P;, got ${failedFp}`);
+			provider.dispose();
+			cache.dispose();
+
+			// Then exercise the healthy-empty path.
+			cache = new ServerDataCache(createMockClient([]) as any);
+			await cache.refresh();
+			provider = new SapTreeProvider(cache);
+			provider.refresh();
+			const healthyFp = provider.getFingerprint();
+			assert.ok(healthyFp && healthyFp.startsWith('N;'),
+				`healthy state fingerprint should start with N;, got ${healthyFp}`);
+			assert.notStrictEqual(failedFp, healthyFp);
 		});
 	});
 });

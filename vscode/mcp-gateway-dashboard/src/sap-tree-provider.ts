@@ -1,11 +1,14 @@
 import * as vscode from 'vscode';
 import type { ServerDataCache } from './server-data-cache';
 import { SapSystemItem, SapComponentItem } from './sap-item';
+import { PlaceholderTreeItem } from './tree-placeholder';
 import type { SapSystem } from './sap-detector';
 
-type SapTreeNode = SapSystemItem | SapComponentItem;
-
-export class SapTreeProvider implements vscode.TreeDataProvider<SapTreeNode>, vscode.Disposable {
+// Phase 2 (debug-flicker): class generic widened to `vscode.TreeItem` so the
+// tree can surface a `PlaceholderTreeItem` at root during cold-start offline.
+// SapSystemItem + SapComponentItem remain subtypes, so existing hierarchical
+// logic (`element instanceof SapSystemItem`) keeps working unchanged.
+export class SapTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem>, vscode.Disposable {
 	private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
 	readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
@@ -36,13 +39,17 @@ export class SapTreeProvider implements vscode.TreeDataProvider<SapTreeNode>, vs
 		});
 	}
 
-	getTreeItem(element: SapTreeNode): SapTreeNode {
+	getTreeItem(element: vscode.TreeItem): vscode.TreeItem {
 		return element;
 	}
 
-	getChildren(element?: SapTreeNode): SapTreeNode[] {
+	getChildren(element?: vscode.TreeItem): vscode.TreeItem[] {
 		if (!element) {
-			return this.cache.getSapSystems().map((sys) => new SapSystemItem(sys, this.hierarchical));
+			const systems = this.cache.getSapSystems();
+			if (this.cache.lastRefreshFailed && systems.length === 0) {
+				return [new PlaceholderTreeItem()];
+			}
+			return systems.map((sys) => new SapSystemItem(sys, this.hierarchical));
 		}
 		if (!this.hierarchical) { return []; }
 		if (element instanceof SapSystemItem) {
@@ -64,7 +71,8 @@ export class SapTreeProvider implements vscode.TreeDataProvider<SapTreeNode>, vs
 
 	refresh(): void {
 		if (this._disposed) { return; }
-		const next = this.computeFingerprint(this.cache.getSapSystems());
+		const systems = this.cache.getSapSystems();
+		const next = this.computeFingerprint(systems, this.cache.lastRefreshFailed);
 		if (next === this.lastFingerprint) { return; }
 		this.lastFingerprint = next;
 		this._onDidChangeTreeData.fire();
@@ -88,12 +96,18 @@ export class SapTreeProvider implements vscode.TreeDataProvider<SapTreeNode>, vs
 		}
 	}
 
-	private computeFingerprint(systems: readonly SapSystem[]): string {
+	private computeFingerprint(systems: readonly SapSystem[], lastRefreshFailed: boolean): string {
 		// Mirrors BackendTreeProvider: must cover every render-affecting field on
 		// the sub-servers so a silent process restart (new pid with same status)
 		// still refreshes the tooltip. Hierarchical mode is part of the
 		// fingerprint because it changes collapsibleState.
-		const parts: string[] = [this.hierarchical ? 'H' : 'F'];
+		//
+		// Phase 2 (debug-flicker): placeholder-state prefix distinguishes
+		// "cold-start offline + empty" (shows PlaceholderTreeItem) from
+		// "no SAP rows found" (empty tree). Ensures the tree re-fires on
+		// recovery even when the recovered list is also empty.
+		const placeholder = lastRefreshFailed && systems.length === 0;
+		const parts: string[] = [placeholder ? 'P' : 'N', this.hierarchical ? 'H' : 'F'];
 		for (const s of systems) {
 			parts.push([
 				s.key,

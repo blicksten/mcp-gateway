@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { ServerDataCache } from './server-data-cache';
 import { BackendItem } from './backend-item';
+import { PlaceholderTreeItem } from './tree-placeholder';
 import type { ServerView } from './types';
 
 export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem>, vscode.Disposable {
@@ -19,7 +20,8 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 
 	refresh(): void {
 		if (this._disposed) { return; }
-		const next = this.computeFingerprint(this.cache.getMcpServers());
+		const servers = this.cache.getMcpServers();
+		const next = this.computeFingerprint(servers, this.cache.lastRefreshFailed);
 		if (next === this.lastFingerprint) { return; }
 		this.lastFingerprint = next;
 		this._onDidChangeTreeData.fire();
@@ -28,6 +30,9 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 	getChildren(element?: vscode.TreeItem): vscode.TreeItem[] {
 		if (element) { return []; }
 		const servers = this.cache.getMcpServers();
+		if (this.cache.lastRefreshFailed && servers.length === 0) {
+			return [new PlaceholderTreeItem()];
+		}
 		return servers.map((s) => new BackendItem(s));
 	}
 
@@ -40,12 +45,20 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 		return this.lastFingerprint;
 	}
 
-	private computeFingerprint(servers: readonly ServerView[]): string {
+	private computeFingerprint(servers: readonly ServerView[], lastRefreshFailed: boolean): string {
 		// Render-affecting fields only: tree rows depend on name, status, transport,
 		// restart_count (shown in description), pid and last_error (tooltip), and
 		// tools count (tooltip "Tools: N"). Full tools array is excluded to keep
 		// the fingerprint cheap on large backends.
-		const parts: string[] = [];
+		//
+		// Phase 2 (debug-flicker): placeholder-state prefix distinguishes
+		// "cold-start offline + empty" (shows PlaceholderTreeItem) from
+		// "healthy daemon with 0 backends" (shows empty tree). Without this,
+		// the cache transition from cold-start-failed to first-success-empty
+		// would produce the same fingerprint and suppress the re-fire,
+		// leaving the placeholder visible over an implicitly-empty list.
+		const placeholder = lastRefreshFailed && servers.length === 0;
+		const parts: string[] = [placeholder ? 'P' : 'N'];
 		for (const s of servers) {
 			parts.push([
 				s.name,

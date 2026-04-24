@@ -6,6 +6,7 @@ import * as assert from 'node:assert';
 import { describe, it, beforeEach, afterEach } from 'mocha';
 import { BackendTreeProvider } from '../backend-tree-provider';
 import { BackendItem } from '../backend-item';
+import { PlaceholderTreeItem } from '../tree-placeholder';
 import { ServerDataCache } from '../server-data-cache';
 import type { ServerView } from '../types';
 
@@ -207,6 +208,141 @@ describe('BackendTreeProvider', () => {
 			assert.notStrictEqual(provider.getFingerprint(), null);
 			provider.dispose();
 			assert.strictEqual(provider.getFingerprint(), null);
+		});
+	});
+
+	describe('cold-start placeholder (Phase 2)', () => {
+		it('returns PlaceholderTreeItem when lastRefreshFailed=true AND servers list is empty (cold-start offline)', async () => {
+			const throwingClient = {
+				listServers: async () => { throw new Error('daemon unreachable'); },
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			cache = new ServerDataCache(throwingClient as any);
+			await cache.refresh(); // fails → lastRefreshFailed=true, cached list still []
+			provider = new BackendTreeProvider(cache);
+
+			const items = provider.getChildren();
+			assert.strictEqual(items.length, 1, 'exactly one placeholder item expected');
+			assert.ok(items[0] instanceof PlaceholderTreeItem, 'item should be PlaceholderTreeItem');
+		});
+
+		it('does NOT return placeholder when cache has last-known-good data (preservation wins)', async () => {
+			// Simulate: first refresh succeeds with servers; subsequent refresh fails.
+			// Phase 1 preservation keeps cachedServers populated + flag=true.
+			// Placeholder must not appear — tree shows preserved data.
+			const snapshots: (ServerView[] | Error)[] = [sampleServers, new Error('transient')];
+			const client = {
+				calls: 0,
+				listServers: async function () {
+					const snap = snapshots[Math.min(this.calls++, snapshots.length - 1)];
+					if (snap instanceof Error) { throw snap; }
+					return snap;
+				},
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			cache = new ServerDataCache(client as any);
+			await cache.refresh(); // success
+			await cache.refresh(); // error → preserved data + flag=true
+			provider = new BackendTreeProvider(cache);
+
+			const items = provider.getChildren();
+			assert.strictEqual(cache.lastRefreshFailed, true);
+			assert.ok(items.length > 0, 'preserved data should render');
+			for (const item of items) {
+				assert.ok(!(item instanceof PlaceholderTreeItem),
+					'PlaceholderTreeItem must not appear when preserved data exists');
+				assert.ok(item instanceof BackendItem);
+			}
+		});
+
+		it('does NOT return placeholder when refresh succeeds with zero servers (healthy but empty)', async () => {
+			cache = new ServerDataCache(createMockClient([]) as any);
+			await cache.refresh(); // success → lastRefreshFailed=false, list empty
+			provider = new BackendTreeProvider(cache);
+
+			const items = provider.getChildren();
+			assert.strictEqual(cache.lastRefreshFailed, false);
+			assert.strictEqual(items.length, 0, 'empty-but-healthy yields empty tree, no placeholder');
+		});
+
+		it('fires onDidChangeTreeData when transitioning from cold-start-failed to first-success-empty', async () => {
+			// Cold start: listServers throws on call 1, returns [] on call 2.
+			const snapshots: (ServerView[] | Error)[] = [new Error('daemon starting'), []];
+			const client = {
+				calls: 0,
+				listServers: async function () {
+					const snap = snapshots[Math.min(this.calls++, snapshots.length - 1)];
+					if (snap instanceof Error) { throw snap; }
+					return snap;
+				},
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			cache = new ServerDataCache(client as any);
+			provider = new BackendTreeProvider(cache);
+			let fireCount = 0;
+			provider.onDidChangeTreeData(() => { fireCount++; });
+
+			await cache.refresh(); // fails → fingerprint 'P' — fires
+			await cache.refresh(); // succeeds empty → fingerprint 'N' — fires (state transition)
+
+			assert.strictEqual(fireCount, 2,
+				'state transition placeholder→empty must re-fire even with identical (empty) server list');
+		});
+
+		it('fires onDidChangeTreeData when transitioning from first-success-empty to cold-start-failed (daemon death)', async () => {
+			// First success is empty, then daemon dies: transition empty → placeholder.
+			const snapshots: (ServerView[] | Error)[] = [[], new Error('daemon died')];
+			const client = {
+				calls: 0,
+				listServers: async function () {
+					const snap = snapshots[Math.min(this.calls++, snapshots.length - 1)];
+					if (snap instanceof Error) { throw snap; }
+					return snap;
+				},
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			cache = new ServerDataCache(client as any);
+			provider = new BackendTreeProvider(cache);
+			let fireCount = 0;
+			provider.onDidChangeTreeData(() => { fireCount++; });
+
+			await cache.refresh(); // success empty → fingerprint 'N' — fires
+			await cache.refresh(); // fails → fingerprint 'P' — fires (state transition)
+
+			assert.strictEqual(fireCount, 2,
+				'empty→placeholder state change must re-fire');
 		});
 	});
 
