@@ -36,6 +36,17 @@ const (
 	installExitRollback       = 4
 )
 
+// ErrPluginDirNotConfigured is returned by triggerPluginSync when the
+// gateway responds with HTTP 409, meaning the daemon has no plugin
+// directory configured at startup. This is recoverable — the plugin is
+// already installed on disk; the operator just needs to restart the
+// daemon once so its Discover() picks up the new plugin cache entry.
+// The install flow treats this as a non-fatal warning, not a trigger
+// for rollback (REVIEW-4B-F1 — rolling back a successful install just
+// because the operator-side sync is not wired is worse UX than leaving
+// the plugin in place with a hint).
+var ErrPluginDirNotConfigured = errors.New("gateway plugin directory not configured")
+
 // commandRunner abstracts exec.Command so tests can inject fakes
 // without spawning real `claude` / `apply-mcp-gateway.sh`.
 type commandRunner func(name string, args ...string) commandHandle
@@ -204,9 +215,20 @@ func (ins *installer) run(cmd *cobra.Command, opts installOpts) error {
 	ins.logf(cmd, "✓ plugin installed")
 
 	if err := ins.triggerPluginSync(apiURL, authToken); err != nil {
-		return ins.rollbackAndExit(cmd, err)
+		if errors.Is(err, ErrPluginDirNotConfigured) {
+			// Non-fatal — plugin is installed on disk. Restarting the
+			// daemon (`mcp-ctl daemon restart`) will let Discover()
+			// pick up ~/.claude/plugins/cache/mcp-gateway@* and enable
+			// regen for future mutations. Keep going with the patch
+			// step so the webview install still happens.
+			ins.logf(cmd, "⚠ plugin .mcp.json sync skipped: %v", err)
+			ins.logf(cmd, "  hint: run `mcp-ctl daemon restart` once the daemon has seen the freshly installed plugin")
+		} else {
+			return ins.rollbackAndExit(cmd, err)
+		}
+	} else {
+		ins.logf(cmd, "✓ plugin .mcp.json synced with current backends")
 	}
-	ins.logf(cmd, "✓ plugin .mcp.json synced with current backends")
 
 	if !opts.NoPatch {
 		if err := ins.runApplyPatch(apiURL, tokenPath, false); err != nil {
@@ -296,14 +318,23 @@ func (ins *installer) claudeCLIPresent() bool {
 
 // runPluginMarketplaceAdd runs `claude plugin marketplace add`. Idempotent
 // — the subcommand exits 0 if already added.
+//
+// Path resolution (REVIEW-4B-F2): always passes an ABSOLUTE path to the
+// `claude` CLI. Relative paths are interpreted by `claude` as git URLs
+// (owner/repo shorthand) and trigger SSH/HTTPS clone attempts — not a
+// file read. Resolution order:
+//  1. $GATEWAY_MARKETPLACE_JSON (operator override) — treated as-is if
+//     absolute, else resolved relative to CWD.
+//  2. Walk CWD upward looking for `installer/.claude-plugin/marketplace.json`.
+//     Matches any git-checkout of the gateway repo regardless of which
+//     subdirectory the operator invoked us from.
+//  3. Fallback: `<CWD>/installer/.claude-plugin/marketplace.json` (absolute).
+//     Will fail the subsequent file-existence check if not present —
+//     producing a clear error instead of the misleading SSH-clone attempt.
 func (ins *installer) runPluginMarketplaceAdd(_ *cobra.Command) error {
-	// The marketplace.json path is resolved at the call site — for CI use
-	// it's typically the path inside the gateway repo. Operators can
-	// override via $GATEWAY_MARKETPLACE_JSON. We pass a sentinel path so
-	// tests can observe the call shape.
-	marketplace := os.Getenv("GATEWAY_MARKETPLACE_JSON")
-	if marketplace == "" {
-		marketplace = "installer/marketplace.json"
+	marketplace, err := resolveMarketplacePath()
+	if err != nil {
+		return fmt.Errorf("marketplace.json path resolution failed: %w", err)
 	}
 	h := ins.runner("claude", "plugin", "marketplace", "add", marketplace)
 	out, err := h.CombinedOutput()
@@ -311,6 +342,46 @@ func (ins *installer) runPluginMarketplaceAdd(_ *cobra.Command) error {
 		return fmt.Errorf("marketplace add failed: %w (output: %s)", err, string(out))
 	}
 	return nil
+}
+
+// resolveMarketplacePath returns an absolute path to marketplace.json.
+// See runPluginMarketplaceAdd for resolution order.
+func resolveMarketplacePath() (string, error) {
+	relPath := filepath.Join("installer", ".claude-plugin", "marketplace.json")
+	if override := os.Getenv("GATEWAY_MARKETPLACE_JSON"); override != "" {
+		abs, err := filepath.Abs(override)
+		if err != nil {
+			return "", fmt.Errorf("$GATEWAY_MARKETPLACE_JSON=%q: %w", override, err)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return "", fmt.Errorf("$GATEWAY_MARKETPLACE_JSON=%q does not exist: %w", abs, err)
+		}
+		return abs, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	// Walk upward from CWD looking for installer/.claude-plugin/marketplace.json.
+	dir := cwd
+	for {
+		candidate := filepath.Join(dir, relPath)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break // reached filesystem root
+		}
+		dir = parent
+	}
+	// Last resort: fall back to <CWD>/<relPath> as absolute. Existence
+	// check follows so we surface a clear error.
+	abs := filepath.Join(cwd, relPath)
+	if _, err := os.Stat(abs); err != nil {
+		return "", fmt.Errorf("marketplace.json not found at %s nor in any ancestor of %s; set $GATEWAY_MARKETPLACE_JSON to override", relPath, cwd)
+	}
+	return abs, nil
 }
 
 func (ins *installer) runPluginInstall(_ *cobra.Command) error {
@@ -344,7 +415,7 @@ func (ins *installer) triggerPluginSync(apiURL, authToken string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusConflict {
-		return fmt.Errorf("gateway reports plugin directory not configured (409); set GATEWAY_PLUGIN_DIR on the daemon or install via `claude plugin install` first")
+		return fmt.Errorf("%w: set GATEWAY_PLUGIN_DIR on the daemon or restart it so Discover() sees the freshly installed plugin cache entry", ErrPluginDirNotConfigured)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("plugin-sync returned HTTP %d", resp.StatusCode)

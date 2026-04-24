@@ -10,10 +10,14 @@
   "license": "MIT",
   "userConfig": {
     "gateway_url": {
+      "type": "string",
+      "title": "Gateway URL",
       "description": "Gateway base URL (default http://127.0.0.1:8765). No trailing slash.",
       "sensitive": false
     },
     "auth_token": {
+      "type": "string",
+      "title": "Auth Token",
       "description": "Bearer token from ~/.mcp-gateway/auth.token. Stored in OS keychain when sensitive=true.",
       "sensitive": true
     }
