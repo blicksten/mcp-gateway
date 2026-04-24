@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.1] - 2026-04-24
+
+### Added — VSCode extension
+
+- **Pin Claude Code Integration to view title bars** — the `mcpGateway.showClaudeCodeIntegration` command (`$(plug)` icon) is now in the `view/title` menu of all three sidebar views (Gateway daemon, Backends, SAP Systems) at `navigation@50`. Pure discoverability fix — the command itself was already there but only reachable from the command palette.
+
+### Fixed — `mcp-ctl install-claude-code`
+
+- **Marketplace JSON schema** updated for Claude Code CLI 2.1.x: `owner: {name, email?}` as a top-level field, `metadata.{version,description}` nested (not flat), and the file relocated to `installer/.claude-plugin/marketplace.json` so relative plugin `source` paths resolve against the marketplace root.
+- **Plugin userConfig fields** in `installer/plugin/.claude-plugin/plugin.json` now carry `type` + `title` so the Claude Code installer renders the configuration prompt.
+- **`mcp-ctl` resolves marketplace paths to absolute** (`resolveMarketplacePath()`) before passing to `claude plugin marketplace add`. Previously a relative arg was treated as a `github.com/<owner>/<repo>` shorthand and Claude attempted (and failed) to clone it over SSH.
+- **409 ALREADY_INSTALLED** is now a non-fatal branch — the install flow no longer rolls the marketplace back when the plugin is already present.
+
 ## [1.9.0] - 2026-04-24
 
 ### Added — VSCode extension
