@@ -36,6 +36,46 @@ Without Gateway:                 With Gateway:
 | Too many tools in context | All tools always loaded | Namespace filtering, tool budgets, disable on the fly |
 | Debug failing MCP | Read logs manually | `GET /api/servers/name/logs` — streaming SSE |
 
+## Why It Matters at Scale
+
+Classical stdio MCP spawns a dedicated subprocess tree **for every Claude Code CLI process**. With the Claude Code VSCode extension behavior observed around 2026-04 — each chat tab is its own CLI process — 3 windows with 5 + 8 + 3 = **16 tabs** and 6 MCP servers configured means **96 subprocesses** running in parallel. Under this load operators typically hit three failure modes: memory swap, stdio-pipe deadlocks, and long MCP cold-starts when opening a new tab.
+
+Gateway keeps **one** subprocess per backend on the whole machine and proxies all 16 tabs through it over HTTP:
+
+| Metric | Classical (16 tabs × 6 servers) | Gateway (1 per backend) | Reduction |
+|--------|--------------------------------:|------------------------:|----------:|
+| MCP subprocesses | 96 | 6 (+ 1 daemon) | **−93%** |
+| Warm RSS (~200 MB avg) | ~19.2 GB | ~1.2 GB | **−94%** |
+| File descriptors | ~288 | ~20 | **−93%** |
+| Cold-start per new tab | 6 process spawns | 0 (already warm) | 100% |
+| Disk I/O on tab open | 6× read `node_modules`/venv | 0 | 100% |
+
+### Concurrent-call safety
+
+16 tabs issuing tool calls simultaneously do **not** interfere with each other. Four independent multiplexing layers keep requests isolated:
+
+1. **Client ↔ Gateway (HTTP Streamable)** — each tab holds its own HTTP connection with its own `mcp-session-id`.
+2. **Gateway internal routing** — lock-free on the hot path; mutexes only engage during config reload.
+3. **Gateway ↔ Backend** — a single JSON-RPC 2.0 session multiplexes all calls by request id; out-of-order backend responses route correctly.
+4. **Inside the backend process** — the only real bottleneck. Async backends (Python/Node asyncio) process concurrently; single-threaded backends (Playwright, KeePass) serialize inside the process — gateway consolidates the queue but does not change the serial constraint.
+
+### Disconnect resilience
+
+Operator pain with classical mode: **a crashed MCP server is gone until the VSCode window is reloaded**. High-frequency servers like a pipeline orchestrator or a cross-model reviewer (PAL) fail often under memory pressure; when they die, automated flows silently proceed without their gates.
+
+Gateway runs an active health monitor (`internal/health/monitor.go`): periodic ping, 3 consecutive failures → auto-restart, 5 restarts in 300 s → circuit breaker opens, 60 s stuck-restart timeout. **Clients never see the backend go away** — the client's HTTP session to gateway stays alive across backend restarts; at most one in-flight tool call returns an error and the next call hits the fresh backend transparently. The circuit breaker is one-way — once it opens, the backend is marked `Disabled` and stays there until an operator resets it via `mcp-ctl servers reset-circuit <name>` or the dashboard Reset action (this is by design: a genuinely flapping backend should not silently self-reset into another burst of failures). On Windows a Job Object guarantees child-process reaping on daemon exit — no zombie subprocesses.
+
+Largest single operational win: **stateful infrastructure servers** — orchestrators, review/audit services, persistent session managers — become reliably available where classical stdio would flap under memory pressure.
+
+### Trade-offs
+
+- **Stateful backends shared across tabs.** If a backend keeps per-session state (Playwright browser, shell with `cwd`), all tabs share that state. Define named instances in the gateway config — `Servers` is a name-keyed map, so two entries `playwright-main` / `playwright-aux` with the same command and distinct `args`/`cwd`/`env` (e.g. separate `--user-data-dir`) are supported today — or leave stateful backends in classical `.mcp.json` alongside gateway (hybrid mode is fully supported).
+- **Gateway is a single point of failure.** If the daemon itself crashes, all tabs lose MCP at once. Gateway is a thin Go proxy with a small crash surface; supervise it with systemd/launchd/Windows service.
+- **Security surface concentrates.** 96 subprocesses collapse to one gateway process — fewer listening surfaces, but any breach of the gateway's auth (Bearer token, loopback binding) now affects every backend. Keep the default loopback-only binding, audit token-file permissions, and review the auth policy matrix in [`docs/ADR-0003-bearer-token-auth.md`](docs/ADR-0003-bearer-token-auth.md) before exposing the gateway beyond `127.0.0.1`.
+- **Circuit breaker is explicit and one-way.** If a backend flaps badly, gateway returns clear "server unavailable" errors instead of hiding the state, and it keeps the backend disabled until you reset it — by design, so automated workflows don't silently proceed with a broken gate and a flapping backend doesn't cycle between restart bursts.
+
+Full analysis including code references and empirical validation plan: [`docs/spikes/2026-04-24-scalability-vs-classical-mcp.md`](docs/spikes/2026-04-24-scalability-vs-classical-mcp.md).
+
 ## Architecture
 
 All MCP transports supported — both for serving clients and connecting to backends:

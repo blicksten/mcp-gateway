@@ -17,6 +17,15 @@ Phases 1–16 implemented. Full history preserved locally in `full-history-backu
 
 ---
 
+## Operator-facing analysis
+
+- `docs/spikes/2026-04-24-scalability-vs-classical-mcp.md` — multi-window scalability vs classical stdio MCP (resource math for 3 windows × 16 tabs, 4-layer concurrency analysis, orchestrator/PAL disconnect-resilience, hybrid-mode recommendations). Summary section in `docs/ANALYSIS.md`.
+- `docs/spikes/2026-04-14-toolc-mcp-gateway-analysis.md` — context-window cost / staged tool loading (complementary; different axis).
+- `docs/spikes/2026-04-20-reload-plugins-probe.md` — Claude Code webview reconnect-mcp-server probe (Phase 16.0 gate, live DevTools verification).
+- `docs/spikes/2026-04-19-windows-latest-impersonate.md` — Windows DACL enforcement tier (Phase 15.C).
+
+---
+
 ## Phase 17 — Dashboard UX Polish Round 2 (COMPLETE, v1.7.2 in local `main`)
 
 Detailed plan: `docs/PLAN.md` (2026-04-22, CV via PAL thinkdeep + Sonnet code-reviewer fallback).
