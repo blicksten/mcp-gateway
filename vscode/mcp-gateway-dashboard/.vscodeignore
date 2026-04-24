@@ -5,6 +5,7 @@ node_modules/**
 .gitignore
 package-lock.json
 *.vsix
+*.log
 out/**/*.js.map
 out/**/*.d.ts
 out/test/**

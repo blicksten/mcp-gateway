@@ -69,6 +69,14 @@ Delivered in one v1.7.0 bundle:
 
 ---
 
+## UX toggles (post-v1.7.x)
+
+| # | Phase | Status |
+|---|-------|--------|
+| ux-sap-toggle | `mcpGateway.sapSystemsEnabled` (bool, default **false**, scope `window`). Hides the SAP Systems view + gates `SapTreeProvider`/`sapTreeView`/`SapStatusBar`/`SapDetailPanel.updateAll` construction. SAP commands stay palette-reachable as operator escape hatch. `onDidChangeConfiguration` updates the context key live + shows a "Reload Window" toast. Agent-sonnet CV fallback (PAL disconnected): 3 LOW findings (F-1 + T-1 + T-2) all fixed in-cycle. Tests 634 / 31 env-fail. VSIX v1.9.0 (591 KB / 587 files) installed. | ✅ implemented 2026-04-24 |
+
+---
+
 ## Debug patches (post-v1.7.1)
 
 Plan: `docs/PLAN-debug-flicker.md` (locked 2026-04-23, PAL `gpt-5.1-codex` thinkdeep+chat APPROVED).

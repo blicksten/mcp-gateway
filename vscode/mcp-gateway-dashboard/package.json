@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -41,7 +41,8 @@
         },
         {
           "id": "mcpSapSystems",
-          "name": "SAP Systems"
+          "name": "SAP Systems",
+          "when": "mcpGateway.sapSystemsEnabled"
         }
       ]
     },
@@ -291,7 +292,8 @@
       },
       {
         "view": "mcpSapSystems",
-        "contents": "No SAP systems detected.\nServers with vsp-* or sap-gui-* prefixes appear here automatically.\n[Add SAP System](command:mcpGateway.addSapSystem)"
+        "contents": "No SAP systems detected.\nServers with vsp-* or sap-gui-* prefixes appear here automatically.\n[Add SAP System](command:mcpGateway.addSapSystem)",
+        "when": "mcpGateway.sapSystemsEnabled"
       }
     ],
     "configuration": {
@@ -318,6 +320,12 @@
           "default": 5000,
           "minimum": 1000,
           "description": "Status polling interval in milliseconds"
+        },
+        "mcpGateway.sapSystemsEnabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Show the SAP Systems view in the MCP Gateway activity bar. Off by default because SAP is a team-specific feature most users do not need. Flipping this setting requires running 'Developer: Reload Window' for the provider and status-bar lifecycle to catch up."
         },
         "mcpGateway.sapGroupBySid": {
           "type": "boolean",

@@ -51,6 +51,15 @@ export function activate(
 	const pollInterval = Math.max(rawInterval, 1000);
 	const autoStart = config.get<boolean>('autoStart', true);
 	const daemonPath = config.get<string>('daemonPath', '');
+	const sapSystemsEnabled = config.get<boolean>('sapSystemsEnabled', false);
+
+	// Seed the context key BEFORE any view registration so the `when` clause
+	// on `mcpSapSystems` in package.json is correct on first paint.
+	void vscode.commands.executeCommand(
+		'setContext',
+		'mcpGateway.sapSystemsEnabled',
+		sapSystemsEnabled,
+	);
 
 	// T12A.8/T12A.10: Bearer auth provider (env > file) shared by
 	// GatewayClient REST requests and LogViewer SSE connections.
@@ -114,18 +123,28 @@ export function activate(
 	});
 
 	// Phase 8.3: SAP tree view — auto-detected SAP systems.
-	const sapTreeProvider = new SapTreeProvider(cache);
-	const sapTreeView = vscode.window.createTreeView('mcpSapSystems', {
-		treeDataProvider: sapTreeProvider,
-	});
+	// Gated by `mcpGateway.sapSystemsEnabled` (default false) because SAP is a
+	// team-specific feature. Also gates the `SapStatusBar` below to avoid the
+	// status-bar item appearing when KeePass-imported systems populate the cache.
+	let sapTreeProvider: SapTreeProvider | undefined;
+	let sapTreeView: vscode.TreeView<unknown> | undefined;
+	if (sapSystemsEnabled) {
+		sapTreeProvider = new SapTreeProvider(cache);
+		sapTreeView = vscode.window.createTreeView('mcpSapSystems', {
+			treeDataProvider: sapTreeProvider,
+		});
+	}
 
 	// Register disposables before starting side effects (A6 fix).
 	context.subscriptions.push(treeView);
 	context.subscriptions.push({ dispose: () => treeProvider.dispose() });
 	context.subscriptions.push(gatewayTreeView);
 	context.subscriptions.push({ dispose: () => gatewayTreeProvider.dispose() });
-	context.subscriptions.push(sapTreeView);
-	context.subscriptions.push({ dispose: () => sapTreeProvider.dispose() });
+	if (sapTreeView) { context.subscriptions.push(sapTreeView); }
+	if (sapTreeProvider) {
+		const provider = sapTreeProvider;
+		context.subscriptions.push({ dispose: () => provider.dispose() });
+	}
 
 	// Phase 2.4: command registration (daemon passed for start/stop wiring)
 	const daemon = injectedDaemon ?? new DaemonManager(client, daemonPath);
@@ -148,6 +167,28 @@ export function activate(
 		}
 	}));
 
+	// Update the SAP view context key when the setting flips. Full provider/
+	// status-bar lifecycle still requires a window reload — surface that via
+	// an informational toast with a one-click reload action.
+	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
+		if (!e.affectsConfiguration('mcpGateway.sapSystemsEnabled')) { return; }
+		const next = vscode.workspace.getConfiguration('mcpGateway')
+			.get<boolean>('sapSystemsEnabled', false);
+		void vscode.commands.executeCommand(
+			'setContext',
+			'mcpGateway.sapSystemsEnabled',
+			next,
+		);
+		void vscode.window.showInformationMessage(
+			`MCP Gateway: SAP Systems view ${next ? 'enabled' : 'disabled'}. Reload the window to finish applying.`,
+			'Reload Window',
+		).then((pick) => {
+			if (pick === 'Reload Window') {
+				void vscode.commands.executeCommand('workbench.action.reloadWindow');
+			}
+		});
+	}));
+
 	registerCommands(context, client, cache, daemon, logViewer, credentialStore);
 
 	// Phase 8.3: shared listServers() timer in cache (replaces per-provider timers).
@@ -155,9 +196,15 @@ export function activate(
 	cache.startAutoRefresh(pollInterval);
 
 	// Phase 8.4: auto-update open webview panels on cache refresh.
+	// SAP detail panel updates are gated on `sapSystemsEnabled`: when the view
+	// is hidden no SapDetailPanel can be opened (the `showSapDetail` command
+	// requires an item arg from the hidden tree), so the call is a no-op in
+	// practice — the explicit guard makes intent clear and avoids per-poll work.
 	context.subscriptions.push(cache.onDidRefresh(() => {
 		ServerDetailPanel.updateAll(cache.getAllServers()).catch(() => {});
-		SapDetailPanel.updateAll(cache.getSapSystems()).catch(() => {});
+		if (sapSystemsEnabled) {
+			SapDetailPanel.updateAll(cache.getSapSystems()).catch(() => {});
+		}
 	}));
 
 	// Phase 2.6: daemon auto-start (after tree view, before status bar)
@@ -170,9 +217,13 @@ export function activate(
 	const statusBar = new McpStatusBar(cache);
 	context.subscriptions.push(statusBar);
 
-	// Phase 8.3: SAP status bar.
-	const sapStatusBar = new SapStatusBar(cache);
-	context.subscriptions.push(sapStatusBar);
+	// Phase 8.3: SAP status bar. Gated on the same setting as the SAP view so
+	// disabled users never see the status-bar indicator (even when KeePass has
+	// populated the cache with imported systems).
+	if (sapSystemsEnabled) {
+		const sapStatusBar = new SapStatusBar(cache);
+		context.subscriptions.push(sapStatusBar);
+	}
 
 	// Phase 11.E: slash command auto-generation.
 	// catalog.C: pass extensionUri so the generator can resolve the bundled

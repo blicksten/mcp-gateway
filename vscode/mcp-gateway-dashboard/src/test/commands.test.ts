@@ -1,5 +1,5 @@
 // Import mock BEFORE production modules (CommonJS require order).
-import { dialogResponses, dispatchedCommands, mockCalls, mockOutputChannels, mockWebviewPanels, resetMockState, getRegisteredCommands, MockSecretStorage, MockMemento } from './mock-vscode';
+import { dialogResponses, dispatchedCommands, fireConfigChange, mockCalls, mockConfigValues, mockOutputChannels, mockWebviewPanels, resetMockState, getRegisteredCommands, MockSecretStorage, MockMemento } from './mock-vscode';
 
 import * as assert from 'node:assert';
 import { describe, it, beforeEach } from 'mocha';
@@ -148,6 +148,80 @@ describe('Commands', () => {
 			// treeView + treeProvider dispose + 10 commands + daemon + logViewer
 			assert.ok(context.subscriptions.length >= 12,
 				`Expected at least 12 subscriptions, got ${context.subscriptions.length}`);
+		});
+	});
+
+	describe('mcpGateway.sapSystemsEnabled gating', () => {
+		// Activation seeds the `setContext` command with the current value of
+		// `mcpGateway.sapSystemsEnabled` so the `when` clause on the view entry
+		// is correct on first paint. Default is `false` (team-specific feature).
+
+		function seedSetContextDispatches(): Array<{ id: string; args: unknown[] }> {
+			return dispatchedCommands.filter((c) => c.id === 'setContext');
+		}
+
+		it('seeds context key with false when setting is absent (default)', () => {
+			// beforeEach already ran activate() once with mockConfigValues empty,
+			// so the default `false` path is already under test here.
+			const setContextCalls = seedSetContextDispatches();
+			const sapCall = setContextCalls.find((c) => c.args[0] === 'mcpGateway.sapSystemsEnabled');
+			assert.ok(sapCall, 'expected setContext dispatch for mcpGateway.sapSystemsEnabled');
+			assert.strictEqual(sapCall!.args[1], false);
+		});
+
+		it('seeds context key with true when setting is enabled', () => {
+			resetMockState();
+			_pendingOps.clear();
+			mockConfigValues['mcpGateway.sapSystemsEnabled'] = true;
+			const ctx = createMockContext();
+			const daemon = createMockDaemon({});
+			activate(ctx as any, undefined, daemon);
+			const sapCall = dispatchedCommands
+				.filter((c) => c.id === 'setContext')
+				.find((c) => c.args[0] === 'mcpGateway.sapSystemsEnabled');
+			assert.ok(sapCall, 'expected setContext dispatch for mcpGateway.sapSystemsEnabled');
+			assert.strictEqual(sapCall!.args[1], true);
+		});
+
+		it('still registers SAP commands even when view is disabled (palette fallback)', () => {
+			// SAP commands must be reachable via the command palette regardless of
+			// view visibility — palette is the operator escape hatch when the tab
+			// is hidden.
+			for (const cmd of [
+				'mcpGateway.restartSapVsp',
+				'mcpGateway.restartSapGui',
+				'mcpGateway.showSapVspLogs',
+				'mcpGateway.showSapGuiLogs',
+				'mcpGateway.showSapDetail',
+				'mcpGateway.addSapSystem',
+			]) {
+				assert.ok(commands.has(cmd), `Command ${cmd} not registered`);
+			}
+		});
+
+		it('onDidChangeConfiguration re-fires setContext and prompts window reload', () => {
+			// Precondition: activate() ran with default false — dispatch history
+			// already contains one setContext(..., false) entry from beforeEach.
+			const beforeCount = dispatchedCommands
+				.filter((c) => c.id === 'setContext')
+				.filter((c) => c.args[0] === 'mcpGateway.sapSystemsEnabled').length;
+			assert.ok(beforeCount >= 1);
+
+			// Operator flips the setting from false → true in a live window.
+			mockConfigValues['mcpGateway.sapSystemsEnabled'] = true;
+			fireConfigChange('mcpGateway.sapSystemsEnabled');
+
+			const afterCalls = dispatchedCommands
+				.filter((c) => c.id === 'setContext')
+				.filter((c) => c.args[0] === 'mcpGateway.sapSystemsEnabled');
+			assert.strictEqual(afterCalls.length, beforeCount + 1,
+				'expected one additional setContext dispatch after config change');
+			assert.strictEqual(afterCalls[afterCalls.length - 1].args[1], true,
+				'expected the new setContext call to carry the new value (true)');
+			assert.ok(
+				mockCalls.infoMessages.some((m) => /reload/i.test(m)),
+				'expected an informational toast mentioning reload',
+			);
 		});
 	});
 

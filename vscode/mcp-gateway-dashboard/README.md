@@ -41,6 +41,7 @@ code --install-extension mcp-gateway-dashboard-0.1.0.vsix
 | `mcpGateway.autoStart` | `true` | Auto-start daemon when VS Code opens |
 | `mcpGateway.daemonPath` | (empty = PATH) | Path to `mcp-gateway` executable |
 | `mcpGateway.pollInterval` | `5000` | Status polling interval (ms, minimum 1000) |
+| `mcpGateway.sapSystemsEnabled` | `false` | Show the SAP Systems view (team-specific; reload window after flipping) |
 
 ## Commands
 
