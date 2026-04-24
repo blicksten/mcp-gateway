@@ -19,7 +19,7 @@ function makeServer(name: string, status: string, tools?: Array<{ name: string; 
 }
 
 function makePayload(servers: ServerView[], lastRefreshFailed = false): CacheRefreshPayload {
-	return { servers, lastRefreshFailed };
+	return { servers, lastRefreshFailed, gatewayHealth: null };
 }
 
 describe('SlashCommandGenerator', () => {

@@ -31,6 +31,19 @@ export interface HealthResponse {
 	status: string;
 	servers: number;
 	running: number;
+	// Phase D.1 additions — all optional so older daemons remain compatible.
+	//
+	// AUDIT A-M2 NOTE: these fields are marked optional because we cannot
+	// enforce that every deployed daemon is >= D.1 (pre-D.1 daemons omit
+	// them). Consumers rendering uptime/pid/version MUST use a fallback
+	// (e.g. `h.uptime_seconds ?? 0` or `h.version ?? 'unknown'`) rather
+	// than assume presence. D.4 tree view / status bar tooltip code must
+	// treat undefined as "metadata unavailable — old daemon version".
+	auth?: string;
+	started_at?: string;      // RFC3339 UTC
+	pid?: number;
+	version?: string;
+	uptime_seconds?: number;
 }
 
 export interface ServerConfig {

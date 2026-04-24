@@ -1,11 +1,12 @@
 import * as vscode from 'vscode';
 import type { IGatewayClient } from './extension';
-import type { ServerView } from './types';
+import type { HealthResponse, ServerView } from './types';
 import { groupSapSystems, synthesizeKeepassSapSystems, compareByName, type SapSystem } from './sap-detector';
 
 export interface CacheRefreshPayload {
 	servers: ServerView[];
 	lastRefreshFailed: boolean;
+	gatewayHealth: HealthResponse | null;
 }
 
 /**
@@ -25,6 +26,10 @@ export class ServerDataCache implements vscode.Disposable {
 	private cachedServers: ServerView[] = [];
 	private cachedMcp: ServerView[] = [];
 	private cachedSap: SapSystem[] = [];
+	// Phase D.3: gateway daemon metadata (pid/version/uptime) fetched alongside
+	// the server list so downstream consumers (status bar tooltip, gateway tree
+	// view) do not need a second refresh cycle.
+	private cachedGatewayHealth: HealthResponse | null = null;
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private disposed = false;
 	private refreshInFlight = false;
@@ -50,11 +55,26 @@ export class ServerDataCache implements vscode.Disposable {
 		}
 		this.refreshInFlight = true;
 		try {
-			try {
-				const raw = await this.client.listServers();
-				this.cachedServers = raw as ServerView[];
+			// Phase D.3: fetch /servers and /health in parallel so the gateway
+			// metadata (pid/version/uptime) is available on the same refresh
+			// event that carries the server list. Health failures do not mark
+			// the cache as failed — /health is the original endpoint and is
+			// always present; only the extended metadata fields (pid, version,
+			// uptime_seconds, started_at) are new and optional in HealthResponse,
+			// so older daemons degrade to "no uptime displayed" rather than error.
+			const [serversResult, healthResult] = await Promise.allSettled([
+				this.client.listServers(),
+				this.client.getHealth(),
+			]);
+
+			if (serversResult.status === 'fulfilled') {
+				// Cast required: IGatewayClient.listServers is typed as Promise<unknown[]>
+				// for test-injectability; the concrete GatewayClient returns ServerView[].
+				// AUDIT A-L2 recommended removing the cast, but that breaks compile —
+				// the interface is intentionally loose to support mock clients in tests.
+				this.cachedServers = serversResult.value as ServerView[];
 				this._lastRefreshFailed = false;
-			} catch {
+			} else {
 				// Preserve last-known-good data on transient API errors. This
 				// keeps tree views stable (same fingerprint → no re-render) and
 				// avoids flicker when the daemon momentarily drops (auto-start
@@ -67,6 +87,17 @@ export class ServerDataCache implements vscode.Disposable {
 				// flips to "offline", slash-command-generator skips orphan
 				// cleanup).
 				this._lastRefreshFailed = true;
+			}
+
+			if (healthResult.status === 'fulfilled') {
+				// Cast required: same reason as listServers — IGatewayClient.getHealth
+				// returns Promise<unknown> for test mocks. AUDIT A-L2 was incorrect
+				// for this codebase.
+				this.cachedGatewayHealth = healthResult.value as HealthResponse;
+			} else {
+				// Clear health so consumers render "offline" uptime instead of
+				// a stale "2h 14m" after the daemon has gone away.
+				this.cachedGatewayHealth = null;
 			}
 			const { sap, mcp } = groupSapSystems(this.cachedServers);
 			this.cachedMcp = mcp;
@@ -95,6 +126,7 @@ export class ServerDataCache implements vscode.Disposable {
 			this._onDidRefresh.fire({
 				servers: this.cachedServers,
 				lastRefreshFailed: this._lastRefreshFailed,
+				gatewayHealth: this.cachedGatewayHealth,
 			});
 		} finally {
 			this.refreshInFlight = false;
@@ -124,6 +156,12 @@ export class ServerDataCache implements vscode.Disposable {
 
 	get lastRefreshFailed(): boolean {
 		return this._lastRefreshFailed;
+	}
+
+	// Phase D.3: expose daemon metadata so status bar + gateway tree view
+	// can render uptime/pid/version without doing their own /health fetch.
+	get gatewayHealth(): HealthResponse | null {
+		return this.cachedGatewayHealth;
 	}
 
 	startAutoRefresh(intervalMs: number): void {

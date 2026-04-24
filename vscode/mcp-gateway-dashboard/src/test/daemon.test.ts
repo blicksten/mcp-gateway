@@ -15,6 +15,7 @@ function createMockClient(online = false): IGatewayClient & { online: boolean } 
 			if (!mock.online) { throw new Error('connection refused'); }
 			return { status: 'ok', servers: 0, running: 0 };
 		},
+		shutdown: async () => ({ status: 'shutting_down' }),
 		listServers: async () => [],
 		getServer: async () => ({}),
 		addServer: async () => ({ status: 'ok' }),
@@ -274,6 +275,150 @@ describe('DaemonManager', () => {
 			(mockChild as any).emit('error', new Error('EPIPE'));
 			assert.strictEqual(daemon.running, false);
 			assert.ok(output.lines.some((l) => l.includes('Process error: EPIPE')));
+		});
+	});
+
+	describe('restart (Phase D.3, AUDIT A-L4 coverage)', () => {
+		// 4 scenarios per T3.6 spec: owned-child, externally-started,
+		// shutdown-404 (REST error), timeout (daemon never exits).
+
+		it('owned-child: shutdown + poll + respawn succeeds', async () => {
+			// Start offline so start() spawns a real child; flip to online
+			// to simulate "daemon now bound to port"; restart then exercises
+			// the full REST-shutdown → poll-unreachable → respawn flow.
+			let shutdownCalled = 0;
+			let healthCallCount = 0;
+			const shutdownClient: IGatewayClient & { online: boolean } = {
+				online: false, // initial: offline → start() will spawn
+				getHealth: async () => {
+					healthCallCount++;
+					if (!shutdownClient.online) { throw new Error('connection refused'); }
+					return { status: 'ok', servers: 0, running: 0 };
+				},
+				shutdown: async () => {
+					shutdownCalled++;
+					shutdownClient.online = false; // daemon "dies" after shutdown
+					return { status: 'shutting_down' };
+				},
+				listServers: async () => [],
+				getServer: async () => ({}),
+				addServer: async () => ({ status: 'ok' }),
+				removeServer: async () => ({ status: 'ok' }),
+				patchServer: async () => ({ status: 'ok' }),
+				restartServer: async () => ({ status: 'ok' }),
+				resetCircuit: async () => ({ status: 'ok' }),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+
+			daemon = new DaemonManager(shutdownClient as any, 'mcp-gateway', output as any, mockSpawn);
+			// Pre-seed an owned child by spawning.
+			await daemon.start();
+			const childBefore = (daemon as any).child;
+			assert.ok(childBefore, 'owned child expected after start');
+			// Simulate daemon becoming reachable on its port.
+			shutdownClient.online = true;
+
+			const result = await daemon.restart(500);
+			assert.strictEqual(shutdownCalled, 1, 'REST shutdown called once');
+			assert.ok(healthCallCount >= 1, 'poll loop issued at least one getHealth');
+			assert.ok(spawnCount >= 2, 'restart should spawn once more (initial start + respawn)');
+			assert.strictEqual(typeof result, 'boolean');
+		});
+
+		it('externally-started: REST shutdown works even without owned child', async () => {
+			// No prior start() — this.child is undefined.
+			const clientOnline = createMockClient(true);
+			let shutdownCalled = 0;
+			(clientOnline as any).shutdown = async () => {
+				shutdownCalled++;
+				clientOnline.online = false;
+				return { status: 'shutting_down' };
+			};
+
+			daemon = new DaemonManager(clientOnline as any, 'mcp-gateway', output as any, mockSpawn);
+			assert.strictEqual((daemon as any).child, undefined, 'no owned child at start');
+
+			const result = await daemon.restart(500);
+			assert.strictEqual(shutdownCalled, 1, 'REST shutdown called even without owned child');
+			// Since daemon went offline after shutdown, start() spawns a fresh one.
+			assert.strictEqual(spawnCount, 1, 'exactly one spawn — for the respawn');
+			assert.strictEqual(result, true, 'restart returns true when respawn succeeded');
+		});
+
+		it('shutdown-404: logs error and continues polling (old daemons without REST endpoint)', async () => {
+			// Simulate older daemon that returns 404 on /shutdown but still
+			// responds to /health. Then simulate the poll timeout.
+			const clientOnline = createMockClient(true);
+			(clientOnline as any).shutdown = async () => {
+				throw new Error('HTTP 404 from POST /api/v1/shutdown');
+			};
+
+			daemon = new DaemonManager(clientOnline as any, 'mcp-gateway', output as any, mockSpawn);
+			const result = await daemon.restart(300);
+			// Daemon stayed online → poll loop hits deadline → restart aborts.
+			assert.strictEqual(result, false, 'restart aborts when daemon stays reachable');
+			assert.ok(
+				output.lines.some((l) => l.includes('REST shutdown failed')),
+				'error kind logged to OutputChannel (AUDIT CV-LOW fix)',
+			);
+			assert.ok(
+				output.lines.some((l) => l.includes('Restart aborted')),
+				'deadline-exceeded warning logged',
+			);
+		});
+
+		it('timeout: returns false without overshooting deadline by > client timeout', async () => {
+			// Daemon responds to shutdown (pretends) but stays up forever.
+			const clientOnline = createMockClient(true);
+			(clientOnline as any).shutdown = async () => ({ status: 'shutting_down' });
+			// getHealth keeps returning online — simulates a wedged daemon.
+
+			daemon = new DaemonManager(clientOnline as any, 'mcp-gateway', output as any, mockSpawn);
+			const t0 = Date.now();
+			const result = await daemon.restart(400);
+			const elapsed = Date.now() - t0;
+			assert.strictEqual(result, false, 'restart returns false on timeout');
+			// deadline-respecting poll exit: total elapsed should be close to
+			// timeoutMs (not timeoutMs + GatewayClient HTTP timeout 5s).
+			// Allow up to 600ms grace for the shutdown call + scheduling.
+			assert.ok(elapsed < 1500, `restart took ${elapsed}ms, expected < 1500ms (CV-LOW fix: no extra final probe)`);
+		});
+
+		it('mutex: restart rejects re-entry while already running', async () => {
+			// Start a restart with a slow shutdown that never resolves, then
+			// call restart again — second call should immediately return false.
+			const slowClient = createMockClient(true);
+			let shutdownResolve: () => void = () => {};
+			(slowClient as any).shutdown = () => new Promise<{ status: string }>((resolve) => {
+				shutdownResolve = () => resolve({ status: 'shutting_down' });
+			});
+
+			daemon = new DaemonManager(slowClient as any, 'mcp-gateway', output as any, mockSpawn);
+			const firstRestart = daemon.restart(500); // hangs on shutdown
+			// Micro-tick to let restart set this.restarting=true.
+			await new Promise((r) => setImmediate(r));
+			const secondRestart = await daemon.restart(500);
+			assert.strictEqual(secondRestart, false, 'second restart rejected while first in flight (AUDIT A-H1 mutex)');
+			// Unblock the first restart to let the test finish cleanly.
+			shutdownResolve();
+			await firstRestart;
+		});
+
+		it('mutex: start() rejected while restart in flight', async () => {
+			const slowClient = createMockClient(true);
+			let shutdownResolve: () => void = () => {};
+			(slowClient as any).shutdown = () => new Promise<{ status: string }>((resolve) => {
+				shutdownResolve = () => resolve({ status: 'shutting_down' });
+			});
+
+			daemon = new DaemonManager(slowClient as any, 'mcp-gateway', output as any, mockSpawn);
+			const restartP = daemon.restart(500);
+			await new Promise((r) => setImmediate(r));
+			const startResult = await daemon.start();
+			assert.strictEqual(startResult, false, 'start() rejected while restart in flight (AUDIT A-H1 mutex)');
+			shutdownResolve();
+			await restartP;
 		});
 	});
 

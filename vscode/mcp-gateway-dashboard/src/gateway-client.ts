@@ -2,7 +2,6 @@ import * as http from 'node:http';
 import { AuthTokenError } from './auth-header';
 import type {
 	ApiError,
-	CallToolRequest,
 	CallToolResult,
 	HealthResponse,
 	ServerConfig,
@@ -51,6 +50,13 @@ export class GatewayClient {
 
 	async getHealth(): Promise<HealthResponse> {
 		return this.request<HealthResponse>('GET', '/api/v1/health');
+	}
+
+	// Phase D.3: graceful daemon shutdown via REST (auth-required).
+	// Returns on 202 Accepted; translates connection-refused into a
+	// GatewayError('connection', ...) the caller can inspect.
+	async shutdown(): Promise<StatusResponse> {
+		return this.request<StatusResponse>('POST', '/api/v1/shutdown');
 	}
 
 	// --- Servers ---

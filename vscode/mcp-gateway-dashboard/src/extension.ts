@@ -27,6 +27,7 @@ import {
 // Accepted client interface — allows dependency injection for tests.
 export interface IGatewayClient {
 	getHealth(): Promise<unknown>;
+	shutdown(): Promise<unknown>;
 	listServers(): Promise<unknown[]>;
 	getServer(name: string): Promise<unknown>;
 	addServer(name: string, config: Record<string, unknown>): Promise<unknown>;
@@ -384,6 +385,28 @@ function registerCommands(
 			vscode.window.showInformationMessage('MCP Gateway daemon stopped.');
 		} else {
 			vscode.window.showInformationMessage('No daemon process to stop.');
+		}
+	}));
+
+	// Phase D.3: restart the daemon via REST shutdown + poll + respawn.
+	// Works for both extension-owned children and externally-started daemons
+	// (mcp-ctl daemon start) — uses POST /api/v1/shutdown rather than
+	// child.kill, which would no-op when this extension doesn't own the process.
+	push(vscode.commands.registerCommand('mcpGateway.restartDaemon', async () => {
+		try {
+			const spawned = await daemon.restart();
+			if (spawned) {
+				vscode.window.showInformationMessage('MCP Gateway daemon restarted.');
+			} else {
+				vscode.window.showWarningMessage('MCP Gateway daemon did not restart — it may still be running.');
+			}
+		} catch (err) {
+			vscode.window.showErrorMessage(`Restart failed: ${(err as Error).message}`);
+		} finally {
+			// AUDIT A-L1: refresh unconditionally — both success and
+			// failure branches need the cache re-pulled so the status bar
+			// and gateway tree drop stale gatewayHealth (pid/uptime) data.
+			void cache.refresh();
 		}
 	}));
 

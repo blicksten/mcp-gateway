@@ -21,6 +21,7 @@ function createTrackingClient(opts: { fail?: boolean; failMessage?: string; init
 		calls,
 		listServers: async () => servers,
 		getHealth: async () => ({ status: 'ok', servers: 0, running: 0 }),
+		shutdown: async () => ({ status: 'shutting_down' }),
 		getServer: async () => ({}),
 		addServer: async (name: string, config: unknown) => {
 			calls.push({ method: 'addServer', args: [name, config] });
@@ -63,6 +64,7 @@ async function freshCache(servers: ServerView[] = []): Promise<ServerDataCache> 
 	const c = new ServerDataCache({
 		listServers: async () => servers,
 		getHealth: async () => ({}),
+		shutdown: async () => ({ status: 'shutting_down' }),
 		getServer: async () => ({}),
 		addServer: async () => ({}),
 		removeServer: async () => ({}),
@@ -474,6 +476,7 @@ describe('AddSapPanel', () => {
 				calls,
 				listServers: async () => [],
 				getHealth: async () => ({}),
+				shutdown: async () => ({ status: 'shutting_down' }),
 				getServer: async () => ({}),
 				addServer: async (name: string, config: unknown) => {
 					calls.push({ method: 'addServer', args: [name, config] });
@@ -521,6 +524,7 @@ describe('AddSapPanel', () => {
 				calls,
 				listServers: async () => [],
 				getHealth: async () => ({}),
+				shutdown: async () => ({ status: 'shutting_down' }),
 				getServer: async () => ({}),
 				addServer: async (name: string, config: unknown) => {
 					calls.push({ method: 'addServer', args: [name, config] });

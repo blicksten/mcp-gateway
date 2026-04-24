@@ -17,6 +17,11 @@ export class DaemonManager {
 	private disposed = false;
 	private starting = false;
 	private stopping = false;
+	// AUDIT A-H1: mutex with start()/stop(). Without this, auto-start + user
+	// restart can race — REST shutdown kills daemon, then start() sees
+	// starting=true (auto-start in flight) and returns false → daemon dead,
+	// UI reports "did not restart".
+	private restarting = false;
 
 	constructor(
 		private readonly client: IGatewayClient,
@@ -31,7 +36,7 @@ export class DaemonManager {
 
 	/** Start the daemon if it is not already running. Returns true if spawned. */
 	async start(): Promise<boolean> {
-		if (this.disposed || this.child || this.starting) { return false; }
+		if (this.disposed || this.child || this.starting || this.restarting) { return false; }
 		this.starting = true;
 
 		try {
@@ -89,11 +94,92 @@ export class DaemonManager {
 
 	/** Stop the daemon by sending SIGTERM. */
 	stop(): void {
-		if (!this.child || this.stopping) { return; }
+		// AUDIT A-M1: reject during restart to avoid racing with the
+		// restart() kill+spawn sequence.
+		if (!this.child || this.stopping || this.restarting) { return; }
 		this.stopping = true;
 		if (!this.disposed) { this.output.appendLine('[daemon] Stopping...'); }
 		this.child.kill('SIGTERM');
 		// child = undefined and stopping = false will be set by the 'exit' handler.
+	}
+
+	/**
+	 * Restart the daemon via REST (AUDIT H-1 fix).
+	 *
+	 * Works both for extension-owned children and for daemons started
+	 * externally (mcp-ctl daemon start, manual spawn). The flow is:
+	 *   1. POST /api/v1/shutdown — graceful exit regardless of ownership
+	 *   2. Poll /health until unreachable (daemon actually exited)
+	 *   3. Clean up own child handle if any
+	 *   4. start() — spawns a fresh daemon
+	 *
+	 * Returns true when a new daemon was spawned, false if the existing
+	 * one could not be shut down within timeoutMs.
+	 *
+	 * AUDIT A-M3: `timeoutMs` bounds the poll-until-unreachable loop only.
+	 * Total wall-clock also includes the shutdown REST call (up to the
+	 * GatewayClient timeout, default 5s) and the post-start health probe,
+	 * so worst-case is roughly `timeoutMs + client.timeoutMs + 2s`. The
+	 * spawn() step is fire-and-forget-detect — start() polls /health via
+	 * its own fast-path check.
+	 */
+	async restart(timeoutMs = 10_000): Promise<boolean> {
+		// AUDIT A-H1/A-M1: hard mutex with start()/stop(). If a restart is
+		// already in flight OR the manager is disposed, refuse re-entry.
+		if (this.disposed || this.restarting) { return false; }
+		this.restarting = true;
+		try {
+			this.output.appendLine('[daemon] Restarting...');
+
+			// 1. Graceful REST shutdown — works for external daemons.
+			try {
+				await this.client.shutdown();
+			} catch (err) {
+				// Daemon may be unreachable, auth may have failed, or endpoint
+				// may not exist on older daemons. Log the reason so operators
+				// have a diagnostic trail (CV-LOW fix), then proceed to poll —
+				// if /health is reachable we'll still time out and bail out.
+				const msg = err instanceof Error ? err.message : String(err);
+				this.output.appendLine(`[daemon] REST shutdown failed (${msg}) — proceeding to poll /health anyway.`);
+			}
+
+			// 2. Poll /health until unreachable.
+			const deadline = Date.now() + timeoutMs;
+			let daemonStillReachable = true;
+			while (Date.now() < deadline) {
+				if (this.disposed) { return false; }
+				try {
+					await this.client.getHealth();
+				} catch {
+					daemonStillReachable = false;
+					break; // unreachable — daemon is down
+				}
+				await new Promise((resolve) => setTimeout(resolve, 200));
+			}
+			// If the poll loop exited because we hit the deadline (not because
+			// /health became unreachable), abort without a final extra probe —
+			// otherwise GatewayClient's own HTTP timeout (5s default) could
+			// extend total wait past timeoutMs (CV-LOW fix).
+			if (daemonStillReachable) {
+				this.output.appendLine('[daemon] Restart aborted — daemon did not stop within timeout.');
+				return false;
+			}
+
+			// 3. Clean up our child handle if we owned it (daemon already exited).
+			// Safe against concurrent stop() because restarting=true blocks both
+			// start() and (via guard below) stop() re-entry during this window.
+			if (this.child) {
+				this.child.kill('SIGTERM'); // no-op if already dead; 'exit' handler resets state
+			}
+
+			// 4. Spawn a fresh daemon. Temporarily release the restarting mutex
+			// so start() can acquire its own starting flag — otherwise start()
+			// guards would reject the call as "restart in progress".
+			this.restarting = false;
+			return await this.start();
+		} finally {
+			this.restarting = false;
+		}
 	}
 
 	/** Whether a child process is actively running (false while stopping). */

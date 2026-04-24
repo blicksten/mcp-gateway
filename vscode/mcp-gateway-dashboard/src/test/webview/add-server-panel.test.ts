@@ -26,6 +26,7 @@ function createTrackingClient(opts: { fail?: boolean; failMessage?: string } = {
 		calls,
 		listServers: async () => [],
 		getHealth: async () => ({ status: 'ok', servers: 0, running: 0 }),
+		shutdown: async () => ({ status: 'shutting_down' }),
 		getServer: async () => ({}),
 		addServer: async (name: string, config: unknown) => {
 			calls.push({ method: 'addServer', args: [name, config] });
@@ -511,6 +512,7 @@ describe('AddServerPanel', () => {
 				calls,
 				listServers: async () => [],
 				getHealth: async () => ({}),
+				shutdown: async () => ({ status: 'shutting_down' }),
 				getServer: async () => ({}),
 				addServer: async (name: string, config: unknown) => {
 					calls.push({ method: 'addServer', args: [name, config] });
@@ -831,6 +833,7 @@ describe('AddServerPanel', () => {
 				calls,
 				listServers: async () => [],
 				getHealth: async () => ({}),
+				shutdown: async () => ({ status: 'shutting_down' }),
 				getServer: async () => ({}),
 				addServer: async (name: string, config: unknown) => {
 					calls.push({ method: 'addServer', args: [name, config] });
