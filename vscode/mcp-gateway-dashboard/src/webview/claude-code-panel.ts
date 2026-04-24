@@ -9,6 +9,8 @@
 
 import * as vscode from 'vscode';
 import * as crypto from 'node:crypto';
+import * as readline from 'node:readline';
+import { execFile, type ChildProcess } from 'node:child_process';
 
 import { buildDiagnosticsReport, type DiagnosticsInput } from '../claude-code/diagnostics';
 import {
@@ -28,6 +30,28 @@ import type {
 import { runPatchInstaller } from '../claude-code/patch-installer';
 import { escapeHtml } from './html-builder';
 
+/**
+ * Minimal child-process handle consumed by the Activate flow. Exposes only
+ * the fields the panel needs (streaming stdout/stderr, close/error events,
+ * kill()). Tests provide a fake implementation — the production path uses
+ * node:child_process.ChildProcess, which satisfies this interface.
+ */
+export interface InstallChildHandle {
+	stdout: NodeJS.ReadableStream | null;
+	stderr: NodeJS.ReadableStream | null;
+	kill(signal?: NodeJS.Signals | number): boolean;
+	/**
+	 * `'close'` listener receives (code, signal). When the child is killed
+	 * by a signal (SIGKILL, OS-level termination, etc.) `code` is `null`
+	 * and `signal` carries the signal name — we use that to distinguish
+	 * "external kill we didn't ask for" from "user-initiated cancel" and
+	 * show an accurate error toast instead of silently swallowing the
+	 * outcome.
+	 */
+	on(event: 'close', listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
+	on(event: 'error', listener: (err: Error) => void): void;
+}
+
 export interface ClaudeCodePanelDeps {
 	extensionUri: vscode.Uri;
 	extensionPath: string;
@@ -37,7 +61,23 @@ export interface ClaudeCodePanelDeps {
 	getAuthToken(): string | undefined;
 	/** Factory returning an HTTP client. Injected for tests. */
 	fetch: typeof fetch;
+	/** Phase 4B — resolves the mcp-ctl executable path (empty = look up on PATH). */
+	getMcpCtlPath(): string;
+	/**
+	 * Phase 4B — spawn factory for `mcp-ctl install-claude-code`. Omit in
+	 * production to use the default execFile-based implementation; tests
+	 * inject a fake that returns a controllable child process handle.
+	 */
+	spawnInstall?: (mcpCtlPath: string, argv: string[]) => InstallChildHandle;
 }
+
+/**
+ * Redaction regex for Bearer tokens surfaced on the install log stream.
+ * Defence-in-depth — mcp-ctl should never print its Bearer token, but if
+ * a future subcommand does (e.g. verbose auth trace) this strips it
+ * before the line reaches the webview.
+ */
+const BEARER_REDACT = /bearer\s+[A-Za-z0-9+/=_-]{16,}/gi;
 
 interface ClaudeCodeState {
 	tracks: Map<string, SessionTrack>;
@@ -67,6 +107,16 @@ export class ClaudeCodePanel {
 		compatMatrix: null,
 		lastStatuses: [],
 	};
+	// Phase 4B — Activate install state.
+	private installInProgress = false;
+	private activeInstallChild: InstallChildHandle | null = null;
+	/**
+	 * Phase 4B — set to true when we intentionally kill the child
+	 * (cancelInstall or dispose). The subsequent SIGTERM-induced close
+	 * event reads this flag so finish() does not surface a misleading
+	 * "install failed" error toast for user-initiated termination.
+	 */
+	private installCanceled = false;
 
 	private constructor(panel: vscode.WebviewPanel, deps: ClaudeCodePanelDeps) {
 		this.panel = panel;
@@ -217,7 +267,10 @@ export class ClaudeCodePanel {
 		const m = msg as { command?: string };
 		switch (m.command) {
 			case 'activate':
-				await this.handleActivate();
+				await this.runInstallClaudeCode();
+				break;
+			case 'activateCancel':
+				this.cancelInstall();
 				break;
 			case 'toggleAutoReload':
 				await this.handleToggleAutoReload((msg as { enabled: boolean }).enabled);
@@ -231,38 +284,154 @@ export class ClaudeCodePanel {
 		}
 	}
 
-	/** T16.5.2 — [Activate for Claude Code] flow. Posts to /plugin-sync; the
-	 * Claude CLI marketplace install flow is surfaced via a terminal spawn
-	 * rather than wrapped here — the command text is the authoritative
-	 * install step, documented in Phase 16.9. */
-	private async handleActivate(): Promise<void> {
-		const url = this.deps.getGatewayUrl();
-		const token = this.deps.getAuthToken();
-		const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-		if (token) {
-			headers['Authorization'] = `Bearer ${token}`;
+	/**
+	 * Phase 4B — [Activate for Claude Code] flow. Spawns `mcp-ctl
+	 * install-claude-code` as a child process, streams stdout + stderr
+	 * line-by-line to the webview via postMessage, and posts a final
+	 * `activate-done` when the child exits.
+	 *
+	 * Security:
+	 *   - execFile + argv array — no shell expansion, no command injection.
+	 *   - windowsHide: true — no console popup on Windows.
+	 *   - Bearer redaction on every line before postMessage (defence in
+	 *     depth; see BEARER_REDACT).
+	 *   - Webview appends via textContent (XSS-safe) + existing CSP nonce.
+	 *   - Concurrent-click guard: second Activate click while a spawn is
+	 *     running is refused, never spawns a second child.
+	 *   - Dispose during run kills the child — see dispose().
+	 */
+	private runInstallClaudeCode(): Promise<void> {
+		if (this.installInProgress) {
+			void vscode.window.showWarningMessage(
+				'Install already in progress — wait for completion or press Cancel.',
+			);
+			return Promise.resolve();
 		}
-		try {
-			const resp = await this.deps.fetch(`${url}/api/v1/claude-code/plugin-sync`, {
-				method: 'POST',
-				headers,
-			});
-			if (resp.ok) {
-				const body = (await resp.json()) as { entries_count?: number; status?: string };
-				void vscode.window.showInformationMessage(
-					`Claude Code plugin synced (${body.entries_count ?? 0} entries). ` +
-						`Install via: claude plugin marketplace add <repo>/installer/marketplace.json && claude plugin install mcp-gateway@mcp-gateway-local`,
-				);
-			} else if (resp.status === 409) {
-				void vscode.window.showErrorMessage(
-					'Plugin directory not configured on gateway. Set GATEWAY_PLUGIN_DIR or install the plugin via `claude plugin install`.',
-				);
-			} else {
-				void vscode.window.showErrorMessage(`plugin-sync failed: HTTP ${resp.status}`);
+		const mcpCtlPath = this.deps.getMcpCtlPath().trim() || 'mcp-ctl';
+		this.installInProgress = true;
+		this.installCanceled = false; // reset from prior run, if any
+		const spawnFn = this.deps.spawnInstall ?? defaultSpawnInstall;
+
+		return new Promise<void>((resolve) => {
+			let child: InstallChildHandle;
+			try {
+				child = spawnFn(mcpCtlPath, ['install-claude-code']);
+			} catch (err: unknown) {
+				const msg = err instanceof Error ? err.message : String(err);
+				this.installInProgress = false;
+				void this.panel.webview.postMessage({ kind: 'activate-error', message: msg });
+				void vscode.window.showErrorMessage(`Activate failed: ${msg}`);
+				resolve();
+				return;
 			}
-		} catch (err: unknown) {
-			const e = err instanceof Error ? err : new Error(String(err));
-			void vscode.window.showErrorMessage(`Activate failed: ${e.message}`);
+			this.activeInstallChild = child;
+			void this.panel.webview.postMessage({ kind: 'activate-start' });
+
+			const rlOut = child.stdout
+				? readline.createInterface({ input: child.stdout, crlfDelay: Infinity })
+				: null;
+			const rlErr = child.stderr
+				? readline.createInterface({ input: child.stderr, crlfDelay: Infinity })
+				: null;
+			const postLine = (line: string): void => {
+				const safe = line.replace(BEARER_REDACT, 'Bearer [REDACTED]');
+				void this.panel.webview.postMessage({ kind: 'activate-log', line: safe });
+			};
+			rlOut?.on('line', postLine);
+			rlErr?.on('line', postLine);
+
+			let finished = false;
+			const finish = (
+				exitCode: number | null,
+				err?: Error,
+				signal: NodeJS.Signals | null = null,
+			): void => {
+				if (finished) { return; }
+				finished = true;
+				rlOut?.close();
+				rlErr?.close();
+				const wasCanceled = this.installCanceled;
+				this.activeInstallChild = null;
+				this.installInProgress = false;
+
+				// Always notify the webview — postMessage on a disposed
+				// panel silently resolves to false, which is harmless.
+				if (err) {
+					void this.panel.webview.postMessage({
+						kind: 'activate-error',
+						message: err.message,
+					});
+				} else {
+					void this.panel.webview.postMessage({
+						kind: 'activate-done',
+						exitCode,
+						signal,
+						canceled: wasCanceled,
+					});
+				}
+
+				// Skip user-facing toasts when the panel is being disposed
+				// (user already closed it — any toast would be noise).
+				if (this.disposed) {
+					resolve();
+					return;
+				}
+
+				if (err) {
+					void vscode.window.showErrorMessage(`Activate failed: ${err.message}`);
+				} else if (wasCanceled) {
+					// User pressed Cancel (or panel dispose handler killed
+					// the child). SIGTERM produces exit 143 on *nix and
+					// various values on Windows — do not surface that as
+					// an error.
+					void vscode.window.showInformationMessage('Install cancelled.');
+				} else if (exitCode === 0) {
+					void vscode.window
+						.showInformationMessage(
+							'Claude Code plugin installed. Reload VSCode window to activate.',
+							'Reload Window',
+						)
+						.then((selection) => {
+							if (selection === 'Reload Window') {
+								void vscode.commands.executeCommand('workbench.action.reloadWindow');
+							}
+						});
+				} else if (exitCode === null) {
+					// External kill we didn't ask for — OS OOM killer,
+					// `kill -9 <pid>`, Windows Task Manager, etc.
+					// exitCode=null means "process died via signal, not
+					// via normal exit". Surface it so the install doesn't
+					// silently vanish.
+					const reason = signal ? `signal ${signal}` : 'an external termination';
+					void vscode.window.showErrorMessage(
+						`mcp-ctl install-claude-code was killed by ${reason}. See install log for details.`,
+					);
+				} else {
+					void vscode.window.showErrorMessage(
+						`mcp-ctl install-claude-code exited ${exitCode}. See install log for details.`,
+					);
+				}
+				resolve();
+			};
+			child.on('error', (err) => finish(null, err));
+			child.on('close', (code, signal) => finish(code, undefined, signal));
+		});
+	}
+
+	/**
+	 * Phase 4B — cancel an in-progress install. Sends SIGTERM; the spawned
+	 * process handles cleanup itself. If no install is running, no-op.
+	 */
+	private cancelInstall(): void {
+		const child = this.activeInstallChild;
+		if (!child) { return; }
+		// Mark BEFORE kill so the async 'close' handler sees the flag
+		// and routes through the cancelled-not-failed path in finish().
+		this.installCanceled = true;
+		try {
+			child.kill('SIGTERM');
+		} catch {
+			// best-effort — the close handler still runs
 		}
 	}
 
@@ -369,6 +538,22 @@ export class ClaudeCodePanel {
 		if (this.pollTimer) {
 			clearInterval(this.pollTimer);
 		}
+		// Phase 4B — kill any in-flight install to avoid a zombie child
+		// writing into a disposed webview. Mark as cancelled so the
+		// async close handler does not surface an error toast after the
+		// panel is gone (finish() also short-circuits on this.disposed,
+		// but setting the flag keeps the state consistent for anyone
+		// inspecting the final activate-done message).
+		if (this.activeInstallChild) {
+			this.installCanceled = true;
+			try {
+				this.activeInstallChild.kill('SIGTERM');
+			} catch {
+				// best-effort — panel is being torn down
+			}
+			this.activeInstallChild = null;
+			this.installInProgress = false;
+		}
 		while (this.disposables.length > 0) {
 			const d = this.disposables.pop();
 			try {
@@ -381,6 +566,26 @@ export class ClaudeCodePanel {
 			ClaudeCodePanel.current = undefined;
 		}
 	}
+
+	/** Test-only hook to clear the singleton between test cases. */
+	static _resetForTests(): void {
+		ClaudeCodePanel.current = undefined;
+	}
+}
+
+/**
+ * Default production factory for spawning `mcp-ctl install-claude-code`.
+ * Uses execFile (argv array, no shell) and windowsHide so no console
+ * popup flashes on Windows. The returned ChildProcess satisfies
+ * InstallChildHandle: stdout/stderr are piped Readable streams, and
+ * close/error events + kill() match the interface.
+ */
+function defaultSpawnInstall(mcpCtlPath: string, argv: string[]): InstallChildHandle {
+	const child: ChildProcess = execFile(mcpCtlPath, argv, {
+		windowsHide: true,
+		maxBuffer: 10 * 1024 * 1024, // 10 MB — covers verbose install output
+	});
+	return child as InstallChildHandle;
 }
 
 /**
@@ -411,6 +616,21 @@ button { padding: 6px 12px; cursor: pointer; background: var(--vscode-button-bac
 button:hover { background: var(--vscode-button-hoverBackground); }
 .session { border-left: 3px solid var(--vscode-focusBorder); padding-left: 12px; margin-top: 12px; }
 .mono { font-family: var(--vscode-editor-font-family); font-size: 12px; color: var(--vscode-descriptionForeground); }
+#activate-progress { margin-top: 10px; }
+#activate-progress .row { margin-bottom: 6px; }
+#activate-log {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 12px;
+	background: var(--vscode-editor-background);
+	color: var(--vscode-editor-foreground);
+	border: 1px solid var(--vscode-panel-border, #333);
+	border-radius: 2px;
+	padding: 8px;
+	max-height: 260px;
+	overflow-y: auto;
+	white-space: pre-wrap;
+	margin: 0;
+}
 </style>
 </head>
 <body>
@@ -419,6 +639,14 @@ button:hover { background: var(--vscode-button-hoverBackground); }
 <div class="section">
   <button id="activate">Activate for Claude Code</button>
   <span id="pluginStatus" class="mono">● Checking…</span>
+</div>
+
+<div id="activate-progress" class="section" hidden>
+  <div class="row">
+    <label>Install log:</label>
+    <button id="activate-cancel">Cancel</button>
+  </div>
+  <pre id="activate-log"></pre>
 </div>
 
 <hr>
@@ -449,10 +677,42 @@ button:hover { background: var(--vscode-button-hoverBackground); }
   const $ = (id) => document.getElementById(id);
 
   $('activate').addEventListener('click', () => vscode.postMessage({ command: 'activate' }));
+  $('activate-cancel').addEventListener('click', () => vscode.postMessage({ command: 'activateCancel' }));
   $('autoReload').addEventListener('change', (e) =>
     vscode.postMessage({ command: 'toggleAutoReload', enabled: e.target.checked }));
   $('probe').addEventListener('click', () => vscode.postMessage({ command: 'probeReconnect' }));
   $('copyDiag').addEventListener('click', () => vscode.postMessage({ command: 'copyDiagnostics' }));
+
+  function renderActivate(msg) {
+    const progress = $('activate-progress');
+    const logEl = $('activate-log');
+    const activateBtn = $('activate');
+    if (msg.kind === 'activate-start') {
+      progress.hidden = false;
+      logEl.textContent = '';
+      activateBtn.disabled = true;
+      return;
+    }
+    if (msg.kind === 'activate-log') {
+      // textContent — XSS-safe append. Truncate at 1 MB to cap memory.
+      const next = logEl.textContent + String(msg.line ?? '') + '\n';
+      logEl.textContent = next.length > 1048576 ? next.slice(next.length - 1048576) : next;
+      logEl.scrollTop = logEl.scrollHeight;
+      return;
+    }
+    if (msg.kind === 'activate-done') {
+      activateBtn.disabled = false;
+      logEl.textContent += '\n[exit ' + (msg.exitCode ?? 'null') + ']\n';
+      logEl.scrollTop = logEl.scrollHeight;
+      return;
+    }
+    if (msg.kind === 'activate-error') {
+      activateBtn.disabled = false;
+      logEl.textContent += '\n[error: ' + String(msg.message ?? '') + ']\n';
+      logEl.scrollTop = logEl.scrollHeight;
+      return;
+    }
+  }
 
   function escapeText(s) { return String(s ?? ''); }
 
@@ -507,7 +767,10 @@ button:hover { background: var(--vscode-button-hoverBackground); }
   window.addEventListener('message', (ev) => {
     const msg = ev.data;
     if (!msg || typeof msg !== 'object') return;
-    if (msg.type === 'status') { renderStatus(msg); }
+    if (msg.type === 'status') { renderStatus(msg); return; }
+    if (typeof msg.kind === 'string' && msg.kind.startsWith('activate-')) {
+      renderActivate(msg);
+    }
   });
 })();
 </script>

@@ -246,6 +246,11 @@ function registerCommands(
 				}
 			},
 			fetch: globalThis.fetch,
+			// Phase 4B — read the setting live so operator edits are picked up
+			// without reopening the panel. Default '' means "look up on PATH".
+			getMcpCtlPath: () => vscode.workspace
+				.getConfiguration('mcpGateway')
+				.get<string>('mcpCtlPath', ''),
 		});
 	}));
 
