@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-04-24
+
+### Added — VSCode extension
+
+- **`mcpGateway.sapSystemsEnabled`** setting (bool, default `false`, scope `window`). Hides the SAP Systems view by default — SAP integration is team-specific and most users of the published extension do not need it. The setting gates four runtime constructions in `activate()`: `SapTreeProvider`, `sapTreeView`, `SapStatusBar`, and the `SapDetailPanel.updateAll` cache-refresh listener. View visibility is driven by a `when: "mcpGateway.sapSystemsEnabled"` clause on both the view entry and its `viewsWelcome` entry, seeded via `executeCommand('setContext', ...)` before view registration so first paint is correct. SAP commands stay registered unconditionally so palette access remains an operator escape hatch.
+- **Live-toggle handler** — `onDidChangeConfiguration` updates the context key immediately (view appears/disappears) and surfaces an informational toast with a one-click `Reload Window` action; full provider/status-bar lifecycle requires the reload to take effect.
+
+### Documentation
+
+- README — new `mcpGateway.sapSystemsEnabled` row in the Settings table.
+- ROADMAP — new "UX toggles (post-v1.7.x)" section recording this entry.
+
+### Build hygiene
+
+- `.vscodeignore` — added `*.log` exclusion so stray build/test logs in the extension root never end up bundled in the VSIX.
+
+### Breaking
+
+- Users who had the SAP Systems view visible on v1.8.x will see it disappear on upgrade. Re-enable via Settings → `mcpGateway.sapSystemsEnabled: true` and reload the window. SAP commands remain available from the command palette regardless of the setting.
+
 ## [1.7.0] - 2026-04-24
 
 ### Added — Daemon lifecycle control
