@@ -4,6 +4,7 @@ import { buildAuthHeader, resolveTokenPath, AuthTokenError } from './auth-header
 import { runKeepassImport, applyImportedCredentials, KeepassImportError } from './keepass-importer';
 import { BackendTreeProvider } from './backend-tree-provider';
 import { BackendItem } from './backend-item';
+import { GatewayTreeProvider } from './gateway-tree-provider';
 import { McpStatusBar } from './status-bar';
 import { DaemonManager } from './daemon';
 import { LogViewer } from './log-viewer';
@@ -104,6 +105,14 @@ export function activate(
 		treeDataProvider: treeProvider,
 	});
 
+	// Phase D.4 — Gateway daemon tree view. Shown at the top of the
+	// mcp-gateway activity container (package.json view order). Provides
+	// PID/Version/Started/Uptime rows and inline start/stop/restart icons.
+	const gatewayTreeProvider = new GatewayTreeProvider(cache);
+	const gatewayTreeView = vscode.window.createTreeView('mcpGatewayDaemon', {
+		treeDataProvider: gatewayTreeProvider,
+	});
+
 	// Phase 8.3: SAP tree view — auto-detected SAP systems.
 	const sapTreeProvider = new SapTreeProvider(cache);
 	const sapTreeView = vscode.window.createTreeView('mcpSapSystems', {
@@ -113,6 +122,8 @@ export function activate(
 	// Register disposables before starting side effects (A6 fix).
 	context.subscriptions.push(treeView);
 	context.subscriptions.push({ dispose: () => treeProvider.dispose() });
+	context.subscriptions.push(gatewayTreeView);
+	context.subscriptions.push({ dispose: () => gatewayTreeProvider.dispose() });
 	context.subscriptions.push(sapTreeView);
 	context.subscriptions.push({ dispose: () => sapTreeProvider.dispose() });
 

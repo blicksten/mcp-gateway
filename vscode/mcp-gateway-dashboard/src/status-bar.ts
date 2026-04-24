@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { ServerDataCache } from './server-data-cache';
-import type { ServerView } from './types';
+import type { HealthResponse, ServerView } from './types';
+import { formatUptime } from './gateway-tree-provider';
 import { escapeMd } from './markdown-utils';
 
 /**
@@ -44,7 +45,7 @@ export class McpStatusBar implements vscode.Disposable {
 		const servers = this.cache.getMcpServers();
 		const total = servers.length;
 		const running = servers.filter((s) => s.status === 'running').length;
-		this.renderCounts(running, total, servers);
+		this.renderCounts(running, total, servers, this.cache.gatewayHealth);
 	}
 
 	/** Reset item styling to defaults. */
@@ -54,7 +55,12 @@ export class McpStatusBar implements vscode.Disposable {
 	}
 
 	/** Render running/total counts + rich MarkdownString tooltip. */
-	private renderCounts(running: number, total: number, servers: readonly ServerView[]): void {
+	private renderCounts(
+		running: number,
+		total: number,
+		servers: readonly ServerView[],
+		health: HealthResponse | null,
+	): void {
 		this.resetStyle();
 
 		if (total === 0) {
@@ -70,7 +76,7 @@ export class McpStatusBar implements vscode.Disposable {
 			this.item.color = new vscode.ThemeColor('notificationsWarningIcon.foreground');
 		}
 
-		this.item.tooltip = this.buildTooltip(running, total, servers);
+		this.item.tooltip = this.buildTooltip(running, total, servers, health);
 	}
 
 	/** Render the daemon-offline state. */
@@ -89,10 +95,35 @@ export class McpStatusBar implements vscode.Disposable {
 	 * sections listing server names. `isTrusted=false` — tooltips never
 	 * execute command links.
 	 */
-	private buildTooltip(running: number, total: number, servers: readonly ServerView[]): vscode.MarkdownString {
+	private buildTooltip(
+		running: number,
+		total: number,
+		servers: readonly ServerView[],
+		health: HealthResponse | null,
+	): vscode.MarkdownString {
 		const md = new vscode.MarkdownString();
 		md.isTrusted = false;
 		md.supportHtml = false;
+
+		// Phase D.4: lead the tooltip with a daemon-meta line when /health
+		// is available. Renders: "Gateway: 2h 14m · v1.7.2 · pid 12345".
+		// Fields are optional against older daemons that pre-date D.1; skip
+		// missing pieces rather than print "unknown" (keeps the line tidy).
+		if (health !== null) {
+			const parts: string[] = [];
+			if (health.uptime_seconds !== undefined) {
+				parts.push(formatUptime(health.uptime_seconds));
+			}
+			if (health.version !== undefined) {
+				parts.push(`v${escapeMd(health.version)}`);
+			}
+			if (health.pid !== undefined) {
+				parts.push(`pid ${health.pid}`);
+			}
+			if (parts.length > 0) {
+				md.appendMarkdown(`**Gateway**: ${parts.join(' · ')}\n\n`);
+			}
+		}
 
 		if (total === 0) {
 			md.appendMarkdown('**MCP Gateway** — no servers configured\n');

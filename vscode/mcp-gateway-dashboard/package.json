@@ -32,6 +32,10 @@
     "views": {
       "mcp-gateway": [
         {
+          "id": "mcpGatewayDaemon",
+          "name": "Gateway"
+        },
+        {
           "id": "mcpBackends",
           "name": "Backends"
         },
@@ -91,11 +95,18 @@
       },
       {
         "command": "mcpGateway.startDaemon",
-        "title": "MCP Gateway: Start Daemon"
+        "title": "MCP Gateway: Start Daemon",
+        "icon": "$(play)"
       },
       {
         "command": "mcpGateway.stopDaemon",
-        "title": "MCP Gateway: Stop Daemon"
+        "title": "MCP Gateway: Stop Daemon",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "mcpGateway.restartDaemon",
+        "title": "MCP Gateway: Restart Daemon",
+        "icon": "$(debug-restart)"
       },
       {
         "command": "mcpGateway.restartSapVsp",
@@ -136,6 +147,16 @@
       "view/title": [
         {
           "command": "mcpGateway.refresh",
+          "when": "view == mcpGatewayDaemon",
+          "group": "navigation@10"
+        },
+        {
+          "command": "mcpGateway.openSettings",
+          "when": "view == mcpGatewayDaemon",
+          "group": "navigation@90"
+        },
+        {
+          "command": "mcpGateway.refresh",
           "when": "view == mcpBackends",
           "group": "navigation@10"
         },
@@ -161,6 +182,21 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "mcpGateway.startDaemon",
+          "when": "view == mcpGatewayDaemon && viewItem == gateway-unreachable",
+          "group": "inline@1"
+        },
+        {
+          "command": "mcpGateway.stopDaemon",
+          "when": "view == mcpGatewayDaemon && viewItem == gateway-running",
+          "group": "inline@1"
+        },
+        {
+          "command": "mcpGateway.restartDaemon",
+          "when": "view == mcpGatewayDaemon && viewItem == gateway-running",
+          "group": "inline@2"
+        },
         {
           "command": "mcpGateway.startServer",
           "when": "view == mcpBackends && viewItem == disabled",
