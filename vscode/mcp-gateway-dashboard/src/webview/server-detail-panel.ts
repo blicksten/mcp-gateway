@@ -4,6 +4,7 @@ import type { ServerView } from '../types';
 import type { CredentialStore } from '../credential-store';
 import type { IGatewayClient } from '../extension';
 import { buildMcpDetailHtml } from './html-builder';
+import { logger } from '../logger';
 
 const ALLOWED_ACTIONS = new Set(['restart', 'showLogs', 'resetCircuit', 'enable', 'disable']);
 const SERVER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
@@ -16,6 +17,8 @@ export class ServerDetailPanel {
 	private readonly credentialStore: CredentialStore;
 	private readonly client: IGatewayClient;
 	private disposed = false;
+	/** Latch so the render-error toast fires at most once per panel session (B-15). */
+	private renderErrorNotified = false;
 
 	private constructor(
 		panel: vscode.WebviewPanel,
@@ -72,19 +75,29 @@ export class ServerDetailPanel {
 
 	private async _render(server: ServerView): Promise<void> {
 		if (this.disposed) { return; }
-		const nonce = this._getNonce();
-		const creds = await this.credentialStore.getServerCredentials(server.name);
-		if (this.disposed) { return; }
-		const credentialKeys = {
-			env: Object.keys(creds.env),
-			headers: Object.keys(creds.headers),
-		};
-		this.panel.webview.html = buildMcpDetailHtml({
-			server,
-			credentialKeys,
-			nonce,
-			cspSource: this.panel.webview.cspSource,
-		});
+		try {
+			const nonce = this._getNonce();
+			const creds = await this.credentialStore.getServerCredentials(server.name);
+			if (this.disposed) { return; }
+			const credentialKeys = {
+				env: Object.keys(creds.env),
+				headers: Object.keys(creds.headers),
+			};
+			this.panel.webview.html = buildMcpDetailHtml({
+				server,
+				credentialKeys,
+				nonce,
+				cspSource: this.panel.webview.cspSource,
+			});
+		} catch (err) {
+			logger.error('server-detail-panel', `Render failed for server '${server.name}'`, err);
+			if (!this.renderErrorNotified) {
+				this.renderErrorNotified = true;
+				void vscode.window.showWarningMessage(
+					`MCP Gateway: failed to render detail panel for '${server.name}'. Check the Output channel for details.`,
+				);
+			}
+		}
 	}
 
 	private _getNonce(): string {

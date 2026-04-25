@@ -8,6 +8,7 @@ import { GatewayTreeProvider } from './gateway-tree-provider';
 import { McpStatusBar } from './status-bar';
 import { DaemonManager } from './daemon';
 import { LogViewer } from './log-viewer';
+import { logger } from './logger';
 import { CredentialStore } from './credential-store';
 import { ServerDataCache } from './server-data-cache';
 import { SapTreeProvider } from './sap-tree-provider';
@@ -163,7 +164,9 @@ export function activate(
 	// Phase 17.5 — refresh the SAP tree when the KeePass toggle flips.
 	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
 		if (e.affectsConfiguration('mcpGateway.keepassEnabled')) {
-			cache.refresh().catch(() => {});
+			cache.refresh().catch((err: unknown) => {
+				logger.error('extension', 'KeePass toggle: cache refresh failed', err);
+			});
 		}
 	}));
 
@@ -201,8 +204,10 @@ export function activate(
 	// requires an item arg from the hidden tree), so the call is a no-op in
 	// practice — the explicit guard makes intent clear and avoids per-poll work.
 	context.subscriptions.push(cache.onDidRefresh((payload) => {
+		// post-dispose race absorber — see audit ADR for B-08 reassessment
 		ServerDetailPanel.updateAll(cache.getAllServers()).catch(() => {});
 		if (sapSystemsEnabled) {
+			// post-dispose race absorber — see audit ADR for B-08 reassessment
 			SapDetailPanel.updateAll(cache.getSapSystems()).catch(() => {});
 		}
 		// Phase 0d (B-NEW-28): surface a one-shot toast when the gateway rejects

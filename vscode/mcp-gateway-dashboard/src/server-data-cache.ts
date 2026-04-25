@@ -3,6 +3,7 @@ import type { IGatewayClient } from './extension';
 import type { HealthResponse, ServerView } from './types';
 import { GatewayError } from './gateway-client';
 import { groupSapSystems, synthesizeKeepassSapSystems, compareByName, type SapSystem } from './sap-detector';
+import { logger } from './logger';
 
 export interface CacheRefreshPayload {
 	servers: ServerView[];
@@ -181,9 +182,13 @@ export class ServerDataCache implements vscode.Disposable {
 	startAutoRefresh(intervalMs: number): void {
 		this.stopAutoRefresh();
 		// Immediate first refresh.
-		this.refresh().catch(() => {});
+		this.refresh().catch((err: unknown) => {
+			logger.error('server-data-cache', 'Initial auto-refresh failed', err);
+		});
 		this.timer = setInterval(() => {
-			this.refresh().catch(() => {});
+			this.refresh().catch((err: unknown) => {
+				logger.error('server-data-cache', 'Scheduled auto-refresh failed', err);
+			});
 		}, intervalMs);
 	}
 

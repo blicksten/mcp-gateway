@@ -4,6 +4,7 @@ import * as assert from 'node:assert';
 import { describe, it, beforeEach, afterEach } from 'mocha';
 import { EventEmitter } from 'node:events';
 import { DaemonManager, type SpawnFn } from '../daemon';
+import { _setLoggerForTests } from '../logger';
 import type { IGatewayClient } from '../extension';
 import type { ChildProcess } from 'node:child_process';
 
@@ -72,6 +73,8 @@ describe('DaemonManager', () => {
 		resetMockState();
 		client = createMockClient(false);
 		output = createMockOutputChannel();
+		// Route all logger writes to the local mock channel so tests can assert on output.lines.
+		_setLoggerForTests(output);
 		mockChild = createMockChild() as ChildProcess & { killed: boolean };
 		lastSpawnCmd = '';
 		spawnCount = 0;
@@ -274,7 +277,8 @@ describe('DaemonManager', () => {
 			await daemon.start();
 			(mockChild as any).emit('error', new Error('EPIPE'));
 			assert.strictEqual(daemon.running, false);
-			assert.ok(output.lines.some((l) => l.includes('Process error: EPIPE')));
+			// Logger formats error as "[ERROR] [daemon] Process error\n  Error: EPIPE"
+			assert.ok(output.lines.some((l) => l.includes('Process error') && l.includes('EPIPE')));
 		});
 	});
 
@@ -483,6 +487,7 @@ describe('Daemon commands (integration)', () => {
 		resetMockState();
 		client = createMockClient(false);
 		output = createMockOutputChannel();
+		_setLoggerForTests(output);
 		mockSpawn = (() => createMockChild()) as unknown as SpawnFn;
 	});
 

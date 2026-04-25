@@ -4,6 +4,7 @@ import type { SapSystem } from '../sap-detector';
 import type { CredentialStore } from '../credential-store';
 import type { IGatewayClient } from '../extension';
 import { buildSapDetailHtml } from './html-builder';
+import { logger } from '../logger';
 
 const ALLOWED_ACTIONS = new Set(['restart', 'showLogs']);
 const ALLOWED_COMPONENTS = new Set(['vsp', 'gui']);
@@ -17,6 +18,8 @@ export class SapDetailPanel {
 	private readonly credentialStore: CredentialStore;
 	private readonly client: IGatewayClient;
 	private disposed = false;
+	/** Latch so the render-error toast fires at most once per panel session (B-15). */
+	private renderErrorNotified = false;
 
 	private constructor(
 		panel: vscode.WebviewPanel,
@@ -72,24 +75,34 @@ export class SapDetailPanel {
 
 	private async _render(system: SapSystem): Promise<void> {
 		if (this.disposed) { return; }
-		const nonce = this._getNonce();
+		try {
+			const nonce = this._getNonce();
 
-		const vspCreds = system.vsp
-			? await this.credentialStore.getServerCredentials(system.vsp.name)
-			: { env: {}, headers: {} };
-		if (this.disposed) { return; }
-		const guiCreds = system.gui
-			? await this.credentialStore.getServerCredentials(system.gui.name)
-			: { env: {}, headers: {} };
-		if (this.disposed) { return; }
+			const vspCreds = system.vsp
+				? await this.credentialStore.getServerCredentials(system.vsp.name)
+				: { env: {}, headers: {} };
+			if (this.disposed) { return; }
+			const guiCreds = system.gui
+				? await this.credentialStore.getServerCredentials(system.gui.name)
+				: { env: {}, headers: {} };
+			if (this.disposed) { return; }
 
-		this.panel.webview.html = buildSapDetailHtml({
-			system,
-			vspCredentialKeys: { env: Object.keys(vspCreds.env), headers: Object.keys(vspCreds.headers) },
-			guiCredentialKeys: { env: Object.keys(guiCreds.env), headers: Object.keys(guiCreds.headers) },
-			nonce,
-			cspSource: this.panel.webview.cspSource,
-		});
+			this.panel.webview.html = buildSapDetailHtml({
+				system,
+				vspCredentialKeys: { env: Object.keys(vspCreds.env), headers: Object.keys(vspCreds.headers) },
+				guiCredentialKeys: { env: Object.keys(guiCreds.env), headers: Object.keys(guiCreds.headers) },
+				nonce,
+				cspSource: this.panel.webview.cspSource,
+			});
+		} catch (err) {
+			logger.error('sap-detail-panel', `Render failed for system '${system.key}'`, err);
+			if (!this.renderErrorNotified) {
+				this.renderErrorNotified = true;
+				void vscode.window.showWarningMessage(
+					`MCP Gateway: failed to render SAP detail panel for '${system.key}'. Check the Output channel for details.`,
+				);
+			}
+		}
 	}
 
 	private _getNonce(): string {

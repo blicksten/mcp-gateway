@@ -11,6 +11,7 @@ import { resolveCatalogDir } from './catalog-path';
 import type { ServerDataCache, CacheRefreshPayload } from './server-data-cache';
 import type { ServerView } from './types';
 import { SERVER_NAME_RE } from './validation';
+import { logger } from './logger';
 
 // Phase 16.9 T16.9.3 — disclaimer lines sit BELOW the MARKER but above
 // all body content. Operators (and Claude) periodically confuse
@@ -161,7 +162,9 @@ export class SlashCommandGenerator implements vscode.Disposable {
 	}
 
 	private enqueue(task: () => Promise<void>): void {
-		this.lastTask = this.lastTask.then(task).catch(() => {});
+		this.lastTask = this.lastTask.then(task).catch((err: unknown) => {
+			logger.error('slash-command-generator', 'Queued task failed', err);
+		});
 	}
 
 	private async generateCommand(dir: string, server: ServerView): Promise<void> {

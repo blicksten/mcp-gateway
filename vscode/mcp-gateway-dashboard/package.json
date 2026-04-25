@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -356,6 +356,11 @@
           "type": "string",
           "default": "${workspaceFolder}/.claude/commands",
           "description": "Directory for auto-generated slash command files. Supports ${workspaceFolder} variable."
+        },
+        "mcpGateway.verboseLogging": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, every gateway REST call and response is logged to OutputChannel 'MCP Gateway' with URL, status, elapsed ms. Default off to keep the channel clean."
         },
         "mcpGateway.authTokenPath": {
           "type": "string",
