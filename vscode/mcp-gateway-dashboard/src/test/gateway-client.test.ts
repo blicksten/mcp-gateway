@@ -236,6 +236,26 @@ describe('GatewayClient', () => {
 	});
 
 	describe('error handling', () => {
+		it('HTTP 401 response classifies as kind:auth — not kind:http (B-NEW-18)', async () => {
+			// Critical security path: a 401 from the gateway means the auth token
+			// is missing/expired. ServerDataCache checks err.kind === 'auth' to
+			// flip lastAuthFailed and trigger the re-auth toast in extension.ts.
+			// If this is misclassified as 'http', the toast never fires.
+			addRoute('GET', '/api/v1/health', () => ({
+				status: 401,
+				body: { error: 'Unauthorized — missing or invalid Bearer token' },
+			}));
+			const authClient = new GatewayClient(`http://127.0.0.1:${port}`, 2000);
+			await assert.rejects(
+				() => authClient.getHealth(),
+				(err: GatewayError) => {
+					assert.strictEqual(err.kind, 'auth', `expected kind:auth, got: ${err.kind}`);
+					assert.strictEqual(err.statusCode, 401);
+					return true;
+				},
+			);
+		});
+
 		it('detects invalid JSON response (F-02)', async () => {
 			// Create a server that returns 200 with non-JSON body.
 			const badServer = http.createServer((_req, res) => {

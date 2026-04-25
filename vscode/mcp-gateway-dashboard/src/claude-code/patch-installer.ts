@@ -4,19 +4,32 @@
 // The scripts themselves (authored in Phase 16.4 — feature-b8f2decf
 // pipeline) handle idempotency, token substitution, backup/restore, and
 // chmod 600 / icacls DACL. This module is a thin spawn wrapper.
+//
+// Env contract (B-NEW-18): canonical names are imported from installer-contract.ts.
+// Token semantics (B-NEW-31): only the token FILE PATH travels via env — never
+// raw token bytes.
 
-import { spawn } from 'node:child_process';
+import { spawn as nodeSpawn } from 'node:child_process';
 import * as path from 'node:path';
+import { INSTALLER_ENV, LEGACY_INSTALLER_ENV } from './installer-contract';
 
 export interface InstallerOptions {
 	/** Absolute path to the extension directory — used to resolve script paths. */
 	extensionPath: string;
 	/** Gateway URL the script substitutes into the patch (e.g. http://localhost:8765). */
 	gatewayUrl: string;
-	/** Bearer token substituted into the patch. */
-	gatewayAuthToken: string;
+	/**
+	 * Filesystem path to the auth-token file (B-NEW-31). NEVER raw token bytes.
+	 * Passed as MCP_GATEWAY_TOKEN_FILE env var so the apply script reads it.
+	 */
+	tokenPath: string;
 	/** true → run with --uninstall flag to restore backup. */
 	uninstall?: boolean;
+	/**
+	 * Injectable spawn function for testability. Defaults to node:child_process.spawn.
+	 * Tests pass a fake that captures argv + env without launching a real process.
+	 */
+	spawn?: typeof nodeSpawn;
 }
 
 export interface InstallerResult {
@@ -31,9 +44,11 @@ export interface InstallerResult {
  * the dashboard can surface exit code + output in the UI (and feed the
  * failure trace into [Copy diagnostics]).
  *
- * Security: the token is passed through environment variables (not argv)
- * so it does not appear in process lists or shell history. The apply
- * script reads `$GATEWAY_AUTH_TOKEN` (documented in Phase 16.4 work orders).
+ * Env contract (B-NEW-18 + B-NEW-31): uses INSTALLER_ENV / LEGACY_INSTALLER_ENV
+ * from installer-contract.ts. MCP_GATEWAY_URL is the canonical URL name;
+ * GATEWAY_URL is emitted alongside it during the v1.10..v2.0 compat window.
+ * MCP_GATEWAY_TOKEN_FILE carries only the token file path — never raw token
+ * bytes (path leaks are non-secret; file is 0o600-protected).
  */
 export function runPatchInstaller(opts: InstallerOptions): Promise<InstallerResult> {
 	const scriptDir = path.join(opts.extensionPath, '..', '..', 'installer', 'patches');
@@ -56,12 +71,15 @@ export function runPatchInstaller(opts: InstallerOptions): Promise<InstallerResu
 		argv.push('--uninstall');
 	}
 
+	const spawnFn = opts.spawn ?? nodeSpawn;
+
 	return new Promise((resolve) => {
-		const child = spawn(command, argv, {
+		const child = spawnFn(command, argv, {
 			env: {
 				...process.env,
-				GATEWAY_URL: opts.gatewayUrl,
-				GATEWAY_AUTH_TOKEN: opts.gatewayAuthToken,
+				[INSTALLER_ENV.URL]: opts.gatewayUrl,
+				[INSTALLER_ENV.TOKEN_FILE]: opts.tokenPath,
+				[LEGACY_INSTALLER_ENV.URL]: opts.gatewayUrl,
 			},
 			stdio: ['ignore', 'pipe', 'pipe'],
 			windowsHide: true,

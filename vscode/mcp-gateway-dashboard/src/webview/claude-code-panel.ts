@@ -59,6 +59,11 @@ export interface ClaudeCodePanelDeps {
 	getGatewayUrl(): string;
 	/** Returns the Bearer token or undefined. */
 	getAuthToken(): string | undefined;
+	/**
+	 * Returns the filesystem path to the auth-token file (B-NEW-31).
+	 * Used by runPatchInstaller for the auto-reload toggle flow.
+	 */
+	getTokenPath(): string;
 	/** Factory returning an HTTP client. Injected for tests. */
 	fetch: typeof fetch;
 	/** Phase 4B — resolves the mcp-ctl executable path (empty = look up on PATH). */
@@ -315,7 +320,7 @@ export class ClaudeCodePanel {
 		return new Promise<void>((resolve) => {
 			let child: InstallChildHandle;
 			try {
-				child = spawnFn(mcpCtlPath, ['install-claude-code']);
+				child = spawnFn(mcpCtlPath, ['install-claude-code', '--api-url', this.deps.getGatewayUrl()]);
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
 				this.installInProgress = false;
@@ -438,17 +443,11 @@ export class ClaudeCodePanel {
 	/** T16.5.3 — Auto-reload checkbox handler. Spawns apply / uninstall script. */
 	private async handleToggleAutoReload(enabled: boolean): Promise<void> {
 		const url = this.deps.getGatewayUrl();
-		const token = this.deps.getAuthToken();
-		if (!token) {
-			void vscode.window.showErrorMessage(
-				'Cannot install patch: no gateway auth token available. Start the daemon and retry.',
-			);
-			return;
-		}
+		const tokenPath = this.deps.getTokenPath();
 		const result = await runPatchInstaller({
 			extensionPath: this.deps.extensionPath,
 			gatewayUrl: url,
-			gatewayAuthToken: token,
+			tokenPath,
 			uninstall: !enabled,
 		});
 		if (result.ok) {

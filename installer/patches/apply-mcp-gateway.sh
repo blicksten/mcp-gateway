@@ -8,6 +8,12 @@
 #   bash apply-mcp-gateway.sh --uninstall Restore original index.js from .bak
 #
 # After first apply: Reload VSCode window (Developer: Reload Window)
+#
+# Canonical env vars (v1.10+):
+#   MCP_GATEWAY_URL        — gateway base URL (preferred)
+#   MCP_GATEWAY_TOKEN_FILE — filesystem path to the auth-token file (NEVER raw bytes)
+# Legacy env vars (compat window v1.10..v2.0.0 — will be removed in v2.0.0):
+#   GATEWAY_URL            — deprecated alias for MCP_GATEWAY_URL
 
 set -euo pipefail
 
@@ -78,10 +84,16 @@ fi
 [ ! -f "$INDEX_JS.bak" ] && cp "$INDEX_JS" "$INDEX_JS.bak"
 
 # --- Read and validate gateway URL (S16.4-H1/H2 fix — prevents JS injection via string-literal break) ---
-GATEWAY_URL="${MCP_GATEWAY_URL:-http://127.0.0.1:8765}"
-if [ -z "$GATEWAY_URL" ]; then
-  GATEWAY_URL="http://127.0.0.1:8765"
+# Prefer MCP_GATEWAY_URL (canonical v1.10+); fall back to legacy GATEWAY_URL during compat window.
+if [ -n "${MCP_GATEWAY_URL:-}" ]; then
+  RESOLVED_URL="$MCP_GATEWAY_URL"
+elif [ -n "${GATEWAY_URL:-}" ]; then
+  echo "WARN: GATEWAY_URL is deprecated, use MCP_GATEWAY_URL (will be removed in v2.0.0)" >&2
+  RESOLVED_URL="$GATEWAY_URL"
+else
+  RESOLVED_URL="http://127.0.0.1:8765"
 fi
+GATEWAY_URL="$RESOLVED_URL"
 # Strict allowlist: http(s)://, hostname chars, optional :port, optional path with safe chars.
 # Rejects quotes, backslash, backtick, $, &, |, ;, <, >, @, spaces, newlines, unicode.
 # Use bash native =~ so the regex is evaluated without awk's trailing-newline quirk

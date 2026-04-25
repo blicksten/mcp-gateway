@@ -7,6 +7,12 @@
     Idempotent — safe to run on every session start.
     Mirrors apply-mcp-gateway.sh semantics for Windows without Git Bash.
 
+    Canonical env vars (v1.10+):
+      MCP_GATEWAY_URL        -- gateway base URL (preferred)
+      MCP_GATEWAY_TOKEN_FILE -- filesystem path to the auth-token file (NEVER raw bytes)
+    Legacy env vars (compat window v1.10..v2.0.0 -- will be removed in v2.0.0):
+      GATEWAY_URL            -- deprecated alias for MCP_GATEWAY_URL
+
 .PARAMETER Auto
     Hook mode — silent if already patched; exits 0 if extension not found.
 
@@ -95,8 +101,13 @@ if (-not (Test-Path $IndexBak)) {
 }
 
 # --- Read and validate gateway URL (S16.4-H1/H2 fix — prevents JS injection via string-literal break) ---
-$GatewayUrl = $env:MCP_GATEWAY_URL
-if ([string]::IsNullOrWhiteSpace($GatewayUrl)) {
+# Prefer MCP_GATEWAY_URL (canonical v1.10+); fall back to legacy GATEWAY_URL during compat window.
+if (-not [string]::IsNullOrWhiteSpace($env:MCP_GATEWAY_URL)) {
+    $GatewayUrl = $env:MCP_GATEWAY_URL
+} elseif (-not [string]::IsNullOrWhiteSpace($env:GATEWAY_URL)) {
+    Write-Warning 'GATEWAY_URL is deprecated, use MCP_GATEWAY_URL (will be removed in v2.0.0)'
+    $GatewayUrl = $env:GATEWAY_URL
+} else {
     $GatewayUrl = "http://127.0.0.1:8765"
 }
 # Strict allowlist: http(s)://, hostname chars, optional :port, optional path with safe chars.

@@ -91,6 +91,7 @@ function makeDeps(overrides: Partial<ClaudeCodePanelDeps> = {}): ClaudeCodePanel
 		extensionPath: '/t',
 		getGatewayUrl: () => 'http://localhost:8765',
 		getAuthToken: () => undefined,
+		getTokenPath: () => '/t/auth.token',
 		fetch: (async () => ({
 			ok: true,
 			status: 200,
@@ -148,6 +149,35 @@ describe('ClaudeCodePanel — Activate install flow (Phase 4B)', () => {
 		assert.ok(
 			mockCalls.infoMessages.some((m) => m.includes('installed')),
 			'expected success info toast',
+		);
+	});
+
+	it('Activate argv passes --api-url with the configured gateway URL (B-NEW-23)', async () => {
+		let capturedArgv: string[] | undefined;
+		const deps = makeDeps({
+			getGatewayUrl: () => 'http://custom-host:9001',
+			spawnInstall: (_mcpCtlPath, argv) => {
+				capturedArgv = argv;
+				return child;
+			},
+		});
+		ClaudeCodePanel.createOrShow(deps);
+		const panel = latestPanel();
+		panel.webview._simulateMessage({ command: 'activate' });
+		await flush();
+		child.finish(0);
+		await flush(8);
+		assert.ok(capturedArgv, 'spawnInstall was not called');
+		assert.ok(
+			capturedArgv.includes('install-claude-code'),
+			`install-claude-code subcommand missing from argv: ${capturedArgv.join(' ')}`,
+		);
+		const apiUrlIdx = capturedArgv.indexOf('--api-url');
+		assert.ok(apiUrlIdx !== -1, `--api-url flag missing from argv: ${capturedArgv.join(' ')}`);
+		assert.strictEqual(
+			capturedArgv[apiUrlIdx + 1],
+			'http://custom-host:9001',
+			`--api-url value mismatch: ${capturedArgv.join(' ')}`,
 		);
 	});
 

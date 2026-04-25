@@ -77,6 +77,29 @@ Delivered in one v1.7.0 bundle:
 
 ---
 
+## Audit-dashboard track (post-v1.9.1)
+
+Plan: `docs/PLAN-audit-dashboard.md` (v3 APPROVED 2026-04-25 by PAL `gpt-5.2-pro` thinkdeep gate_mode=true). Reviews: `docs/REVIEW-audit-dashboard.md`.
+
+12-phase track addressing **31 audit findings** (2 CRITICAL, 8 HIGH, 13 MEDIUM, 8 LOW) across six defect classes: zombie DOM elements, sentinel data stubs, cross-file contract drift, zombie state after upstream change, silent error swallowing, lifecycle/safety gaps. Discovered via two-pass audit (initial 17 + double-audit sub-agent +13 + PAL gpt-5.2-pro promotion of B-NEW-18 to CRITICAL and surfacing of B-NEW-31 as separate security concern).
+
+| # | Phase | Status |
+|---|-------|--------|
+| 0 | **Contract-drift fixes + compat shim + canonical contract module** (closes B-NEW-18 CRITICAL env-var name drift in patch-installer chain, B-NEW-19 HIGH 401 misclassification as offline, B-NEW-23 MEDIUM Activate hardcoded URL, B-NEW-28 LOW patch-installer test coverage gap, B-NEW-31 CRITICAL token bytes via env security regression). 13 files: new `installer-contract.ts` (frozen INSTALLER_ENV/LEGACY_INSTALLER_ENV typed export); `patch-installer.ts` swaps `gatewayAuthToken: string` → `tokenPath: string` and emits MCP_GATEWAY_URL+MCP_GATEWAY_TOKEN_FILE+legacy GATEWAY_URL only (zero raw-bytes via env); `apply-mcp-gateway.{sh,ps1}` accept new + legacy URL with stderr deprecation warning; `gateway-client.ts` adds `kind:'auth'` for HTTP 401; `server-data-cache.ts` propagates `lastAuthFailed` only on `kind:auth` and clears on success; `extension.ts` shows one-shot toast with Reload Window action latched via `authErrorNotified`; `claude-code-panel.ts` `defaultSpawnInstall` argv now `['install-claude-code', '--api-url', deps.getGatewayUrl()]`; new `src/test/claude-code/patch-installer.test.ts` (10 tests); new `installer/patches/test-contract.sh` (bash-side env-contract smoke test); +new B-NEW-23 argv test in `claude-code-panel.test.ts`; +new B-NEW-19 401 → kind:auth test in `gateway-client.test.ts`; +new lastAuthFailed-only-on-kind:auth test in `server-data-cache.test.ts`. PAL `gpt-5.1-codex` codereview gate_mode=true verdict **PASS, 0 blocking findings** (3 advisory items recorded in REVIEW_FILE as out-of-scope: daemon-side `MCP_GATEWAY_AUTH_TOKEN` is a different active env var, gateway-client.test.ts legacy /api/* routes are pre-existing baseline-flaky bug, PowerShell apply-mcp-gateway.ps1 contract test deferred to follow-up). Scoped Phase 0 critical-path tests **52/52 passing**; full suite **647 passing / 31 baseline-flaky failing** (+47 net vs 599 baseline). Acceptance grep `git grep "GATEWAY_AUTH_TOKEN" -- vscode/` confirms zero live raw-bytes-via-env emissions. Pipeline `execute-2be14a13`. | ✅ implemented 2026-04-25 |
+| 1 | ClaudeCodePanel zombie elements + hardcoded facts (B-01..B-05, B-13) | ⏳ pending |
+| 2 | Shared Logger + remove silent catches (B-08, B-09, B-14, B-15) | ⏳ pending |
+| 3 | Backend-aware commands (B-06, B-07) | ⏳ pending |
+| 4 | gatewayVersion wiring + probe cleanup + version-skew guardrail (B-10, B-11) | ⏳ pending |
+| 5 | Activate-button CWD independence (B-12) | ⏳ pending |
+| 6 | Manual QA checklist + zombie-DOM CI script | ⏳ pending |
+| 7 | mcp-ctl doctor + ARCHITECTURE.md (B-16, B-17) | ⏳ pending |
+| 8 | Detail-panel reconcile + settings-change watcher (B-NEW-20, B-NEW-22) | ⏳ pending |
+| 9 | Windows daemon-kill safety + REST-first stop (B-NEW-21, B-NEW-25) | ⏳ pending |
+| 10 | Atomic writes + serialization races (B-NEW-24, B-NEW-26, B-NEW-27, B-NEW-30) | ⏳ pending |
+| 11 | Perf: async token caching (B-NEW-29) | ⏳ pending |
+
+---
+
 ## Debug patches (post-v1.7.1)
 
 Plan: `docs/PLAN-debug-flicker.md` (locked 2026-04-23, PAL `gpt-5.1-codex` thinkdeep+chat APPROVED).

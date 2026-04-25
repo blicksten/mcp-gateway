@@ -175,6 +175,10 @@ export class GatewayClient {
 						} catch {
 							// Non-JSON error body — use raw text.
 						}
+						if (code === 401) {
+							reject(new GatewayError('auth', message, code, data));
+							return;
+						}
 						reject(new GatewayError('http', message, code, data));
 					}
 				});

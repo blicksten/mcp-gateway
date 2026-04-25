@@ -1,6 +1,7 @@
 import './mock-vscode';
 import { strict as assert } from 'node:assert';
 import { ServerDataCache, type CacheRefreshPayload } from '../server-data-cache';
+import { GatewayError } from '../gateway-client';
 import type { ServerView } from '../types';
 
 function createMockClient(servers: ServerView[] = []) {
@@ -277,6 +278,61 @@ describe('ServerDataCache', () => {
 		shouldFail = false;
 		await cache.refresh();
 		assert.equal(cache.lastRefreshFailed, false);
+	});
+
+	it('lastAuthFailed propagates in payload when listServers rejects with GatewayError kind:auth', async () => {
+		// Critical path for B-NEW-18: the 401-classification in gateway-client.ts
+		// surfaces via lastAuthFailed on the CacheRefreshPayload so extension.ts
+		// can show the re-auth toast. A generic Error (kind:connection) must NOT
+		// set the flag — only a GatewayError with kind='auth' qualifies.
+		let phase: 'auth-fail' | 'connection-fail' | 'success' = 'auth-fail';
+		const client = {
+			listServers: async () => {
+				if (phase === 'auth-fail') {
+					throw new GatewayError('auth', 'Unauthorized', 401, '');
+				}
+				if (phase === 'connection-fail') {
+					throw new GatewayError('connection', 'connection refused');
+				}
+				return mixedServers;
+			},
+			getHealth: async () => ({}),
+			getServer: async () => ({}),
+			addServer: async () => ({}),
+			removeServer: async () => ({}),
+			patchServer: async () => ({}),
+			restartServer: async () => ({}),
+			resetCircuit: async () => ({}),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+		cache = new ServerDataCache(client as any);
+
+		// 1. 401 auth failure: both lastRefreshFailed and lastAuthFailed must be true.
+		const authPayload = await new Promise<CacheRefreshPayload>((resolve) => {
+			const sub = cache.onDidRefresh((p) => { sub.dispose(); resolve(p); });
+			cache.refresh();
+		});
+		assert.equal(authPayload.lastRefreshFailed, true, 'lastRefreshFailed on auth error');
+		assert.equal(authPayload.lastAuthFailed, true, 'lastAuthFailed on 401');
+
+		// 2. Generic connection failure: lastRefreshFailed=true but lastAuthFailed must stay false.
+		phase = 'connection-fail';
+		const connPayload = await new Promise<CacheRefreshPayload>((resolve) => {
+			const sub = cache.onDidRefresh((p) => { sub.dispose(); resolve(p); });
+			cache.refresh();
+		});
+		assert.equal(connPayload.lastRefreshFailed, true, 'lastRefreshFailed on connection error');
+		assert.equal(connPayload.lastAuthFailed, false, 'lastAuthFailed must be false for non-auth errors');
+
+		// 3. Successful refresh: both flags clear.
+		phase = 'success';
+		const successPayload = await new Promise<CacheRefreshPayload>((resolve) => {
+			const sub = cache.onDidRefresh((p) => { sub.dispose(); resolve(p); });
+			cache.refresh();
+		});
+		assert.equal(successPayload.lastRefreshFailed, false, 'lastRefreshFailed clears on success');
+		assert.equal(successPayload.lastAuthFailed, false, 'lastAuthFailed clears on success');
 	});
 
 	it('startAutoRefresh triggers immediate refresh', (done) => {

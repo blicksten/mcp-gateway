@@ -1,11 +1,18 @@
 import * as vscode from 'vscode';
 import type { IGatewayClient } from './extension';
 import type { HealthResponse, ServerView } from './types';
+import { GatewayError } from './gateway-client';
 import { groupSapSystems, synthesizeKeepassSapSystems, compareByName, type SapSystem } from './sap-detector';
 
 export interface CacheRefreshPayload {
 	servers: ServerView[];
 	lastRefreshFailed: boolean;
+	/**
+	 * true when the most recent listServers() call was rejected with HTTP 401.
+	 * Optional (defaults to false) for backward compat with test stubs that
+	 * construct payloads without this field.
+	 */
+	lastAuthFailed?: boolean;
 	gatewayHealth: HealthResponse | null;
 }
 
@@ -39,6 +46,7 @@ export class ServerDataCache implements vscode.Disposable {
 	// and the toggle effect is delayed by up to one poll tick.
 	private pendingRefresh = false;
 	private _lastRefreshFailed = false;
+	private _lastAuthFailed = false;
 
 	constructor(client: IGatewayClient, importedProvider?: ImportedSystemsProvider) {
 		this.client = client;
@@ -74,6 +82,7 @@ export class ServerDataCache implements vscode.Disposable {
 				// the interface is intentionally loose to support mock clients in tests.
 				this.cachedServers = serversResult.value as ServerView[];
 				this._lastRefreshFailed = false;
+				this._lastAuthFailed = false;
 			} else {
 				// Preserve last-known-good data on transient API errors. This
 				// keeps tree views stable (same fingerprint → no re-render) and
@@ -87,6 +96,10 @@ export class ServerDataCache implements vscode.Disposable {
 				// flips to "offline", slash-command-generator skips orphan
 				// cleanup).
 				this._lastRefreshFailed = true;
+				// Track 401 auth failures so extension.ts can surface a token-refresh toast.
+				this._lastAuthFailed =
+					serversResult.reason instanceof GatewayError &&
+					serversResult.reason.kind === 'auth';
 			}
 
 			if (healthResult.status === 'fulfilled') {
@@ -126,6 +139,7 @@ export class ServerDataCache implements vscode.Disposable {
 			this._onDidRefresh.fire({
 				servers: this.cachedServers,
 				lastRefreshFailed: this._lastRefreshFailed,
+				lastAuthFailed: this._lastAuthFailed,
 				gatewayHealth: this.cachedGatewayHealth,
 			});
 		} finally {
