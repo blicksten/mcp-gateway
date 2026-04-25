@@ -323,3 +323,71 @@ describe('ClaudeCodePanel — Activate install flow (Phase 4B)', () => {
 		await flush(8);
 	});
 });
+
+// --------------------------------------------------------------------------
+// Phase 1 — facts-updated message tests
+// --------------------------------------------------------------------------
+
+/** A fetch that returns empty arrays for both gateway endpoints (no heartbeats, no matrix). */
+function makeEmptyGatewayFetch(): ClaudeCodePanelDeps['fetch'] {
+	return (async (url: string) => {
+		const u = String(url);
+		if (u.includes('compat-matrix')) {
+			return { ok: false, status: 503, json: async () => null };
+		}
+		// patch-status returns empty heartbeat array
+		return { ok: true, status: 200, json: async () => [] };
+	}) as unknown as typeof fetch;
+}
+
+describe('ClaudeCodePanel — facts-updated postMessage (Phase 1)', () => {
+	beforeEach(() => {
+		resetMockState();
+		mockWebviewPanels.length = 0;
+		ClaudeCodePanel._resetForTests();
+	});
+
+	it('posts facts-updated with pluginInstalled=true and version when detectPlugin returns installed', async () => {
+		const deps = makeDeps({
+			fetch: makeEmptyGatewayFetch(),
+			detectPlugin: async () => ({ installed: true, version: '3.1.4', marketplace: 'mcp-gateway-local' }),
+			detectPatch: async () => ({ installed: false }),
+		});
+		ClaudeCodePanel.createOrShow(deps);
+		const panel = latestPanel();
+
+		// Wait for the initial poll to complete (fetch + gatherFacts + postMessage).
+		await flush(16);
+
+		const updates = postedOfKind(panel, 'facts-updated');
+		assert.ok(updates.length > 0, 'expected at least one facts-updated message');
+		const last = updates[updates.length - 1];
+		assert.strictEqual(last['pluginInstalled'], true);
+		assert.strictEqual(last['pluginVersion'], '3.1.4');
+		assert.strictEqual(last['patchInstalled'], false);
+	});
+
+	it('posts facts-updated with patchStale=true when detectPatch reports a stale patch', async () => {
+		const deps = makeDeps({
+			fetch: makeEmptyGatewayFetch(),
+			detectPlugin: async () => ({ installed: false }),
+			detectPatch: async () => ({
+				installed: true,
+				stale: true,
+				currentVersion: '1.0.0',
+				latestVersion: '1.1.0',
+			}),
+		});
+		ClaudeCodePanel.createOrShow(deps);
+		await flush(16);
+
+		const panel = latestPanel();
+		const updates = postedOfKind(panel, 'facts-updated');
+		assert.ok(updates.length > 0, 'expected at least one facts-updated message');
+		const last = updates[updates.length - 1];
+		assert.strictEqual(last['patchInstalled'], true);
+		assert.strictEqual(last['patchStale'], true);
+		assert.strictEqual(last['patchCurrentVersion'], '1.0.0');
+		assert.strictEqual(last['patchLatestVersion'], '1.1.0');
+	});
+});

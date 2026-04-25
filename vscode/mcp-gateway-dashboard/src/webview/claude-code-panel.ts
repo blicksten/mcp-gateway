@@ -28,6 +28,11 @@ import type {
 	StatusColor,
 } from '../claude-code/types';
 import { runPatchInstaller } from '../claude-code/patch-installer';
+import {
+	detectPluginInstalled,
+	detectPatchInstalled,
+	detectChannelStatus,
+} from '../claude-code/detection';
 import { escapeHtml } from './html-builder';
 
 /**
@@ -74,6 +79,18 @@ export interface ClaudeCodePanelDeps {
 	 * inject a fake that returns a controllable child process handle.
 	 */
 	spawnInstall?: (mcpCtlPath: string, argv: string[]) => InstallChildHandle;
+	/**
+	 * Phase 1 — override for detectPluginInstalled. Tests inject a fake that
+	 * returns a controlled PluginDetection without spawning a real child.
+	 * Omit in production to use the default detection helper.
+	 */
+	detectPlugin?: () => Promise<import('../claude-code/detection').PluginDetection>;
+	/**
+	 * Phase 1 — override for detectPatchInstalled. Tests inject a fake that
+	 * returns a controlled PatchDetection without touching the filesystem.
+	 * Omit in production to use the default detection helper.
+	 */
+	detectPatch?: () => Promise<import('../claude-code/detection').PatchDetection>;
 }
 
 /**
@@ -205,7 +222,8 @@ export class ClaudeCodePanel {
 				this.state.compatMatrix = null;
 			}
 
-			const facts = await this.gatherFacts();
+			const gathered = await this.gatherFacts();
+			const { facts, plugin, patch } = gathered;
 			this.state.lastFacts = facts;
 
 			const statuses: SessionStatus[] = [];
@@ -221,6 +239,9 @@ export class ClaudeCodePanel {
 				statuses,
 				compatMatrix: this.state.compatMatrix,
 			});
+
+			this.postFactsUpdate(facts, plugin, patch);
+			this.postBannerUpdate(true, facts.pluginInstalled, this.state.tracks.size);
 		} catch (err: unknown) {
 			// Gateway unreachable: post a synthetic H status so the UI reflects it.
 			const e = err instanceof Error ? err : new Error(String(err));
@@ -238,23 +259,40 @@ export class ClaudeCodePanel {
 				],
 				compatMatrix: null,
 			});
+			this.postBannerUpdate(false, false, 0);
 		}
 	}
 
-	/** Gathers non-heartbeat facts. Keeps inline implementations short — real
-	 * CC plugin detection lives in T16.5.2 and is stubbed here until that
-	 * task ships. */
-	private async gatherFacts(): Promise<ExternalFacts> {
-		// For now, assume patch installed when apply-mcp-gateway.sh is resolvable;
-		// a proper FS check lives in the activation hook (T16.4.5, out-of-scope here).
+	/**
+	 * Gathers non-heartbeat facts using real detection helpers.
+	 * Phase 1: detectPluginInstalled (spawn `claude plugin list --json`) and
+	 * detectPatchInstalled (FS glob + marker check) replace the hardcoded stubs.
+	 *
+	 * Returns both the ExternalFacts and the raw detection results so that
+	 * poll() can post a `facts-updated` message with version details.
+	 */
+	private async gatherFacts(): Promise<{
+		facts: ExternalFacts;
+		plugin: import('../claude-code/detection').PluginDetection;
+		patch: import('../claude-code/detection').PatchDetection;
+	}> {
 		const ccVersion =
 			Array.from(this.state.tracks.values())[0]?.lastHeartbeat?.cc_version ?? '';
 		const altE =
 			this.state.compatMatrix?.alt_e_verified_versions ?? [];
-		return {
-			patchInstalled: true, // TODO: FS check in T16.5.2
-			patchStale: false,
-			pluginInstalled: true, // TODO: `claude plugin list --json` in T16.5.2
+
+		const ctlPath = this.deps.getMcpCtlPath().trim() || undefined;
+		const detectPluginFn = this.deps.detectPlugin ?? (() => detectPluginInstalled({ ctlPath }));
+		const detectPatchFn = this.deps.detectPatch ?? (() => detectPatchInstalled());
+		const [plugin, patch] = await Promise.all([
+			detectPluginFn(),
+			detectPatchFn(),
+		]);
+
+		const facts: ExternalFacts = {
+			patchInstalled: patch.installed,
+			patchStale: patch.stale === true,
+			pluginInstalled: plugin.installed,
 			gatewayReachable: true,
 			tokenRotationDriftMs: null,
 			ccVersion,
@@ -263,6 +301,62 @@ export class ClaudeCodePanel {
 			corsReachable: null,
 			anyRecentHeartbeat: this.state.tracks.size > 0,
 		};
+
+		return { facts, plugin, patch };
+	}
+
+	/**
+	 * Posts a `facts-updated` message to the webview with current plugin,
+	 * patch, and channel status. Called from the poll() success path.
+	 */
+	private postFactsUpdate(
+		facts: ExternalFacts,
+		plugin: import('../claude-code/detection').PluginDetection,
+		patch: import('../claude-code/detection').PatchDetection,
+	): void {
+		const channel = detectChannelStatus();
+		void this.panel.webview.postMessage({
+			kind: 'facts-updated',
+			pluginInstalled: facts.pluginInstalled,
+			pluginVersion: plugin.version,
+			patchInstalled: facts.patchInstalled,
+			patchStale: facts.patchStale,
+			patchCurrentVersion: patch.currentVersion,
+			patchLatestVersion: patch.latestVersion,
+			channelState: channel.state,
+			channelDetail: channel.detail,
+		});
+	}
+
+	/**
+	 * Posts a `banner-updated` message. Produces actionable copy based on
+	 * gateway reachability and plugin installation state.
+	 */
+	private postBannerUpdate(gatewayReachable: boolean, pluginInstalled: boolean, sessionCount: number): void {
+		if (!gatewayReachable) {
+			void this.panel.webview.postMessage({
+				kind: 'banner-updated',
+				tone: 'red',
+				text: 'mcp-gateway daemon not running',
+			});
+			return;
+		}
+		if (sessionCount === 0) {
+			if (pluginInstalled) {
+				void this.panel.webview.postMessage({
+					kind: 'banner-updated',
+					tone: 'yellow',
+					text: '⏸ No Claude Code sessions reporting yet — restart Claude Code to pick up the plugin',
+				});
+			} else {
+				void this.panel.webview.postMessage({
+					kind: 'banner-updated',
+					tone: 'yellow',
+					text: '⏸ Plugin not installed — click Activate for Claude Code below',
+				});
+			}
+		}
+		// When sessionCount >= 1, the existing renderStatus logic in the webview handles the banner.
 	}
 
 	private async handleMessage(msg: unknown): Promise<void> {
@@ -661,7 +755,7 @@ button:hover { background: var(--vscode-button-hoverBackground); }
   </div>
 </div>
 
-<div id="banner" class="banner yellow">Polling gateway…</div>
+<div id="banner" class="banner yellow">Checking gateway…</div>
 
 <div class="section">
   <button id="probe">Probe reconnect</button>
@@ -763,10 +857,49 @@ button:hover { background: var(--vscode-button-hoverBackground); }
     }
   }
 
+  function renderFacts(msg) {
+    const pluginEl = $('pluginStatus');
+    if (pluginEl) {
+      if (msg.pluginInstalled) {
+        pluginEl.textContent = msg.pluginVersion
+          ? '✔ Installed (v' + escapeText(msg.pluginVersion) + ')'
+          : '✔ Installed';
+      } else {
+        pluginEl.textContent = '✘ Not installed';
+      }
+    }
+    const patchEl = $('patchStatus');
+    if (patchEl) {
+      if (!msg.patchInstalled) {
+        patchEl.textContent = '✘ Not applied';
+      } else if (msg.patchStale) {
+        const cur = escapeText(msg.patchCurrentVersion ?? '?');
+        const nxt = escapeText(msg.patchLatestVersion ?? '?');
+        patchEl.textContent = '⚠ Stale (v' + cur + ' → v' + nxt + ')';
+      } else {
+        const ver = msg.patchCurrentVersion ? ' (v' + escapeText(msg.patchCurrentVersion) + ')' : '';
+        patchEl.textContent = '✔ Applied' + ver;
+      }
+    }
+    const channelEl = $('channelStatus');
+    if (channelEl) {
+      channelEl.textContent = escapeText(msg.channelState) + ' — ' + escapeText(msg.channelDetail);
+    }
+  }
+
+  function renderBanner(msg) {
+    const banner = $('banner');
+    if (!banner) return;
+    banner.className = 'banner ' + escapeText(msg.tone);
+    banner.textContent = escapeText(msg.text);
+  }
+
   window.addEventListener('message', (ev) => {
     const msg = ev.data;
     if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'status') { renderStatus(msg); return; }
+    if (msg.kind === 'facts-updated') { renderFacts(msg); return; }
+    if (msg.kind === 'banner-updated') { renderBanner(msg); return; }
     if (typeof msg.kind === 'string' && msg.kind.startsWith('activate-')) {
       renderActivate(msg);
     }
