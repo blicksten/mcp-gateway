@@ -1,0 +1,28 @@
+{
+  "captured_at": "2026-04-29T22:16:27Z",
+  "source": "mcp-ctl servers list --json (full output 71.6KB; tools[] descriptions truncated here for evidence brevity — full output available in tool-results cache)",
+  "matches_REST": true,
+  "_REST_query": "curl -s -H 'Authorization: Bearer <tok>' http://127.0.0.1:8765/api/v1/servers (returns identical structure)",
+  "servers": [
+    {
+      "name": "context7",
+      "status": "running",
+      "transport": "http",
+      "tool_count": 2,
+      "tools": ["resolve-library-id", "query-docs"]
+    },
+    {
+      "name": "orchestrator",
+      "status": "running",
+      "transport": "stdio",
+      "tool_count": 32,
+      "tools_sample": ["route_task", "start_pipeline", "complete_step", "pipeline_ops", "plan_ops", "list_active_pipelines", "..."]
+    }
+  ],
+  "summary": {
+    "total_servers": 2,
+    "running": 2,
+    "test_prefix_servers": 0,
+    "ready_for_phase_2_add": true
+  }
+}

@@ -239,7 +239,11 @@ func (s *Server) TriggerPluginRegen() {
 	// Production: pass the default placeholder so Claude Code substitutes
 	// the gateway URL from userConfig at MCP-client runtime. This keeps
 	// the regenerated file portable across machines (different hosts,
-	// different ports).
+	// different ports). Resolution of userConfig values into the
+	// resulting URL/Authorization header is the responsibility of
+	// `mcp-ctl install-claude-code`'s pluginConfigs writer
+	// (cmd/mcp-ctl/install_claude_code.go::writePluginUserConfig) which
+	// populates ~/.claude/settings.json::pluginConfigs at install time.
 	if err := s.pluginRegen.Regenerate(s.pluginDir, snapshot, plugin.DefaultGatewayURLPlaceholder); err != nil {
 		s.logger.Warn("plugin regen failed", "error", err, "plugin_dir", s.pluginDir)
 		return

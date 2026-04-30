@@ -1,0 +1,10 @@
+{
+  "captured_at": "2026-04-29T22:16:27Z",
+  "source": "curl -s -H 'Authorization: Bearer <tok>' http://127.0.0.1:8765/api/v1/servers",
+  "match_with_mcp_ctl_list": "identical",
+  "summary": [
+    {"name": "context7", "status": "running", "transport": "http", "tool_count": 2},
+    {"name": "orchestrator", "status": "running", "transport": "stdio", "tool_count": 32}
+  ],
+  "note": "Both endpoints return identical server states. Persistence layer (config.json) and live REST view are in sync. Baseline of 2 servers confirmed for Phase 2 (which will add 4 test- prefix MCPs)."
+}

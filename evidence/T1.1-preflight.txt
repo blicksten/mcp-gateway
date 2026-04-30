@@ -1,0 +1,69 @@
+=== T1.1 Pre-flight env check (cell I1-P0) ===
+Run: 2026-04-29T22:15:52Z
+Cwd: c:/Users/stanislav.naumov/claude-workspace/mcp-gateway
+
+[mcp-ctl version]
+mcp-ctl version: dev
+go: go1.25.6
+commit: 5d0e9390467d
+built: 2026-04-24T20:40:18Z
+dirty: true
+
+[mcp-gateway help head]
+Usage of C:\Users\stanislav.naumov\go\bin\mcp-gateway.exe:
+  -config string
+    	path to config.json (default ~/.mcp-gateway/config.json)
+  -env-file string
+    	path to .env file for variable expansion (env: MCP_GATEWAY_ENV_FILE)
+  -no-auth
+    	disable Bearer authentication (DANGEROUS: combined with allow_remote requires MCP_GATEWAY_I_UNDERSTAND_NO_AUTH=1)
+  -version
+    	print version and exit
+
+[daemon status]
+STATUS   ok
+PID      11532
+VERSION  dev
+STARTED  2026-04-29T21:53:28Z
+UPTIME   22m 25s
+SERVERS  2
+RUNNING  2
+
+[auth.token readable]
+OK
+
+[config.json readable]
+OK
+
+[uv version]
+uv 0.9.29 (1f1321d84 2026-02-03)
+
+[where npx]
+C:\Program Files\nodejs\npx.cmd
+
+[claude --version]
+2.1.92 (Claude Code)
+
+[compat file in cwd configs/]
+COMPAT_OK   <-- file IS present
+
+[anon health]
+anon-status=200   <-- /api/v1/health does NOT require auth (by design — public health probe)
+
+[auth health]
+{"auth":"enabled","pid":11532,"running":2,"servers":2,"started_at":"2026-04-29T21:53:28Z","status":"ok","uptime_seconds":1356,"version":"dev"}
+
+[compat-matrix REST]
+{"error":"compat matrix not yet configured (configs/supported_claude_code_versions.json missing)"}
+
+[plugin .mcp.json found at]
+C:\Users\stanislav.naumov\.claude\plugins\cache\mcp-gateway-local\mcp-gateway\1.6.0\.mcp.json
+Content: stub with empty mcpServers:{} object — F-PLUGIN-SYNC-NEVER-TRIGGERED confirmed
+
+=== Verdict ===
+PASS with 3 recorded findings (do not halt):
+1. F-COMPAT-MATRIX-NOT-LOADED (HIGH refined) — file exists in repo at configs/supported_claude_code_versions.json, but daemon's REST endpoint reports it missing. Path resolution issue (daemon may resolve relative to its own cwd vs project repo cwd).
+2. F-PLUGIN-SYNC-NEVER-TRIGGERED (LOW confirmed) — .mcp.json is the stub `mcpServers:{}` from gateway-side regen never having run.
+3. F-CLAUDECODE-VERSION-2.1.92 (informational) — operator now on 2.1.92 (was 2.1.119 per 2026-04-25 spike recon). Earlier finding F-CLAUDECODE-NEWER-THAN-PROBE-VERIFIED needs re-evaluation.
+
+=== T1.1 END ===

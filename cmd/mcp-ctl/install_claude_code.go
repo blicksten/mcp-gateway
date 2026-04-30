@@ -214,6 +214,23 @@ func (ins *installer) run(cmd *cobra.Command, opts installOpts) error {
 	ins.pushRollback(func() error { return ins.runPluginUninstall() })
 	ins.logf(cmd, "✓ plugin installed")
 
+	// F-PLUGIN-USER-CONFIG-NOT-SET (Phase 10 / 2026-04-30): Claude CLI v2
+	// no longer prompts for plugin userConfig values during install, and
+	// has no public `plugin config set` command. Without populated
+	// userConfig, the plugin's `${user_config.*}` placeholders in
+	// .mcp.json never resolve, and Claude Code filters out the plugin's
+	// mcpServers entries from the /mcp panel silently. Write the values
+	// into ~/.claude/settings.json::pluginConfigs directly — this is the
+	// canonical storage per claude-code-settings.schema.json:2271.
+	settingsPath, err := defaultClaudeSettingsPath()
+	if err != nil {
+		return ins.rollbackAndExit(cmd, fmt.Errorf("resolve settings.json path: %w", err))
+	}
+	if err := ins.writePluginUserConfig(settingsPath, apiURL, authToken); err != nil {
+		return ins.rollbackAndExit(cmd, fmt.Errorf("write pluginConfigs: %w", err))
+	}
+	ins.logf(cmd, "✓ pluginConfigs populated in %s", settingsPath)
+
 	if err := ins.triggerPluginSync(apiURL, authToken); err != nil {
 		if errors.Is(err, ErrPluginDirNotConfigured) {
 			// Non-fatal — plugin is installed on disk. Restarting the
@@ -276,10 +293,22 @@ func (ins *installer) runCheckOnly(cmd *cobra.Command) error {
 // runRefreshToken implements the REVIEW-16 M-03 re-registration flow.
 func (ins *installer) runRefreshToken(cmd *cobra.Command, apiURL, authToken, tokenPath string) error {
 	ins.logf(cmd, "refreshing plugin + patch with current auth.token…")
-	// Re-invoke plugin install path which re-registers the user_config.auth_token.
+	// Re-invoke plugin install path. Note: prior to Phase 10 this comment
+	// claimed the install command "re-registers the user_config.auth_token"
+	// — that was aspirational; Claude CLI v2 install never wrote
+	// user_config (F-PLUGIN-USER-CONFIG-NOT-SET). The actual write now
+	// happens via writePluginUserConfig below.
 	if err := ins.runPluginInstall(cmd); err != nil {
 		return exitErr(installExitDriftUnresolved, fmt.Errorf("plugin re-registration failed: %w", err))
 	}
+	settingsPath, err := defaultClaudeSettingsPath()
+	if err != nil {
+		return exitErr(installExitDriftUnresolved, fmt.Errorf("resolve settings.json path: %w", err))
+	}
+	if err := ins.writePluginUserConfig(settingsPath, apiURL, authToken); err != nil {
+		return exitErr(installExitDriftUnresolved, fmt.Errorf("write pluginConfigs: %w", err))
+	}
+	ins.logf(cmd, "✓ pluginConfigs refreshed with current auth.token")
 	if err := ins.triggerPluginSync(apiURL, authToken); err != nil {
 		return exitErr(installExitDriftUnresolved, fmt.Errorf("plugin-sync failed: %w", err))
 	}
@@ -391,6 +420,232 @@ func (ins *installer) runPluginInstall(_ *cobra.Command) error {
 		return fmt.Errorf("plugin install failed: %w (output: %s)", err, string(out))
 	}
 	return nil
+}
+
+// pluginID is the plugin@marketplace identifier used as the key in
+// ~/.claude/settings.json::pluginConfigs and in `claude plugin install`
+// arguments. Centralized so the install path, refresh-token path, and
+// pluginConfigs writer all agree on the exact spelling.
+const pluginID = "mcp-gateway@mcp-gateway-local"
+
+// defaultClaudeSettingsPath returns the canonical path to Claude Code's
+// per-user settings.json. Equivalent to `~/.claude/settings.json`.
+func defaultClaudeSettingsPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home dir: %w", err)
+	}
+	return filepath.Join(home, ".claude", "settings.json"), nil
+}
+
+// acquireFileLock implements a simple cross-platform advisory file
+// lock by O_CREATE|O_EXCL on a sentinel `<path>.lock` file. Retries up
+// to `timeout` with 20 ms backoff between attempts. Returns a release
+// function that closes the file handle and removes the sentinel.
+//
+// This is a cooperative lock — only callers who participate in the
+// scheme are serialized. mcp-ctl's pluginConfigs writer is the sole
+// writer expected on settings.json from our codebase; Claude Code
+// itself writes settings.json too but does not honor our sentinel.
+// Cross-process safety is best-effort: if the OS allows two CreateExcl
+// calls to race past the kernel check (rare), the inner atomic rename
+// remains the last line of defense.
+//
+// Stale-lock recovery: if the sentinel is older than `staleAfter`, it
+// is treated as orphaned (holder crashed) and forcibly removed. 30 s is
+// generous — the writer's actual critical section is sub-100 ms even
+// under load. Avoids permanent stuck-lock when a prior mcp-ctl crashes
+// mid-write.
+func acquireFileLock(lockPath string, timeout time.Duration) (release func(), err error) {
+	const staleAfter = 30 * time.Second
+	deadline := time.Now().Add(timeout)
+	for {
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			fp := f
+			return func() {
+				_ = fp.Close()
+				_ = os.Remove(lockPath)
+			}, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("acquire lock %s: %w", lockPath, err)
+		}
+		// Stale-lock recovery: if the existing sentinel is older than
+		// staleAfter, assume the holder crashed and reclaim.
+		if info, statErr := os.Stat(lockPath); statErr == nil {
+			if time.Since(info.ModTime()) > staleAfter {
+				_ = os.Remove(lockPath)
+				continue
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timeout acquiring lock %s after %s", lockPath, timeout)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// writePluginUserConfig writes Claude Code's user_config values for the
+// mcp-gateway plugin into ~/.claude/settings.json::pluginConfigs.
+//
+// Claude CLI v2 has no public command to set plugin user_config (the
+// interactive prompt that existed in v1 was removed somewhere in the v2
+// line). Without populated values, the plugin's `${user_config.*}`
+// placeholders in .mcp.json never resolve, and Claude Code filters out
+// the plugin's mcpServers entries from the /mcp panel silently. This
+// writer is the canonical fix — F-PLUGIN-USER-CONFIG-NOT-SET (Phase 10
+// of docs/PLAN-mcp-lifecycle.md).
+//
+// Spec: claude-code-settings.schema.json (v2.1.123) line 2271 declares
+// pluginConfigs as an object keyed by plugin@marketplace. We start with
+// plugin-level flat structure (matches plugin.json::userConfig schema
+// shape); per-server nesting (.mcpServers.<server>.<key>) is the
+// fallback empirical-verification path documented in PLAN T10.9.
+//
+// Atomicity:
+//   - read settingsPath (treat ErrNotExist as empty {} — first-time install)
+//   - parse to map[string]interface{} (preserves all unknown top-level keys
+//     and other plugins' pluginConfigs entries verbatim through round-trip)
+//   - merge into pluginConfigs[pluginID] only the two keys we manage
+//   - marshal + write via temp + fsync + rename (atomic on POSIX,
+//     "essentially atomic" on Windows MoveFileEx semantics)
+//
+// Idempotency: when both keys already match the desired values, the
+// function returns nil without touching the file (no mtime bump, no
+// rename — same posture as plugin/regen.go's idempotent path).
+//
+// Concurrency: read-modify-write is NOT protected by an OS lock. Two
+// concurrent mcp-ctl invocations against the same machine could clobber
+// each other; a proper file lock is a candidate v2 enhancement. The
+// race window is small (single function), and the only fields mutated
+// are this plugin's own pluginConfigs entry — other plugins' entries
+// and other top-level settings keys round-trip untouched.
+func (ins *installer) writePluginUserConfig(settingsPath, apiURL, authToken string) error {
+	if apiURL == "" {
+		return errors.New("apiURL is empty")
+	}
+	if authToken == "" {
+		return errors.New("authToken is empty")
+	}
+
+	// Ensure parent dir exists before lock attempt — fresh installs may
+	// not have ~/.claude/ yet.
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		return fmt.Errorf("ensure parent dir: %w", err)
+	}
+
+	// Acquire advisory file lock to serialize concurrent mcp-ctl
+	// invocations (CI + dashboard [Activate] race). Without this on
+	// Windows, two writers' MoveFileEx calls collide and one fails
+	// with "Access is denied" mid-rename.
+	release, err := acquireFileLock(settingsPath+".lock", 5*time.Second)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	// 1. Read existing settings.json (or start with empty {}).
+	var top map[string]interface{}
+	raw, err := os.ReadFile(settingsPath)
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(raw, &top); err != nil {
+			return fmt.Errorf("parse %s: %w", settingsPath, err)
+		}
+		if top == nil {
+			top = make(map[string]interface{})
+		}
+	case errors.Is(err, os.ErrNotExist):
+		top = make(map[string]interface{})
+	default:
+		return fmt.Errorf("read %s: %w", settingsPath, err)
+	}
+
+	// 2. Get/create pluginConfigs object — preserve type if already
+	//    present, fail loud if it's the wrong type (operator hand-edit
+	//    we should not silently overwrite).
+	pluginConfigs, err := getOrCreateObject(top, "pluginConfigs")
+	if err != nil {
+		return err
+	}
+
+	// 3. Get/create our plugin's entry.
+	ourEntry, err := getOrCreateObject(pluginConfigs, pluginID)
+	if err != nil {
+		return err
+	}
+
+	// 4. Idempotent: skip the write entirely when both values already
+	//    match. Avoids gratuitous mtime bumps + rename churn that would
+	//    invalidate any file-watcher-driven UI on Claude Code's side.
+	if curURL, ok := ourEntry["gateway_url"].(string); ok && curURL == apiURL {
+		if curTok, ok := ourEntry["auth_token"].(string); ok && curTok == authToken {
+			return nil
+		}
+	}
+
+	// 5. Merge our keys.
+	ourEntry["gateway_url"] = apiURL
+	ourEntry["auth_token"] = authToken
+
+	// 6. Marshal + atomic write.
+	out, err := json.MarshalIndent(top, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal settings.json: %w", err)
+	}
+	out = append(out, '\n')
+
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		return fmt.Errorf("ensure parent dir: %w", err)
+	}
+
+	tmpFile, err := os.CreateTemp(filepath.Dir(settingsPath), "settings.json.tmp.*")
+	if err != nil {
+		return fmt.Errorf("create tmp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmpFile.Write(out); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("write tmp file: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("sync tmp file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close tmp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, settingsPath); err != nil {
+		return fmt.Errorf("rename tmp -> settings.json: %w", err)
+	}
+	renamed = true
+	return nil
+}
+
+// getOrCreateObject returns m[key] as map[string]interface{}, creating
+// an empty one if the key is absent. Returns an error if the key is
+// present but holds a non-object value — this prevents silently
+// destroying operator hand-edits that conflict with our schema.
+func getOrCreateObject(m map[string]interface{}, key string) (map[string]interface{}, error) {
+	raw, ok := m[key]
+	if !ok {
+		obj := make(map[string]interface{})
+		m[key] = obj
+		return obj, nil
+	}
+	obj, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("settings.json::%s is not an object: %T", key, raw)
+	}
+	return obj, nil
 }
 
 func (ins *installer) runPluginUninstall() error {

@@ -5,7 +5,7 @@
     "transport": "http",
     "description": "Up-to-date library documentation lookup. Use to fetch current docs for any library, framework, SDK, API, or CLI tool.",
     "url": "https://mcp.context7.com/mcp",
-    "header_keys": ["Authorization"],
+    "header_keys": ["CONTEXT7_API_KEY"],
     "homepage": "https://context7.com",
     "tags": ["docs", "research"]
   },

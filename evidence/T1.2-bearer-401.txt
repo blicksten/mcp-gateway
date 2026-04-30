@@ -1,0 +1,22 @@
+=== T1.2 Bearer auth negative test (cell I2-401) ===
+Run: 2026-04-29T22:16:16Z
+
+[curl -s -i http://127.0.0.1:8765/api/v1/servers]   (NO Authorization header)
+HTTP/1.1 401 Unauthorized
+Cache-Control: no-store
+Content-Type: application/json
+Pragma: no-cache
+Www-Authenticate: Bearer
+Date: Wed, 29 Apr 2026 22:16:16 GMT
+Content-Length: 131
+
+{"error":"authentication required","hint":"add Bearer token via MCP_GATEWAY_AUTH_TOKEN env var or ~/.mcp-gateway/auth.token file"}
+
+=== Verdict ===
+PASS — gateway correctly rejects unauthenticated request to /api/v1/servers.
+- Status: 401 Unauthorized ✓
+- Header: WWW-Authenticate: Bearer ✓ (RFC 6750 compliant)
+- Body: helpful error + hint mentioning both env var and token file ✓
+- No-cache headers prevent stale cached 401 confusion ✓
+
+=== T1.2 END ===
