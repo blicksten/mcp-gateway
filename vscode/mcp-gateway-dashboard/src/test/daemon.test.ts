@@ -537,6 +537,20 @@ describe('Daemon commands (integration)', () => {
 		await daemon.start();
 		assert.strictEqual(daemon.running, true);
 
+		// B-06 fix: stopDaemon now probes getHealth before stopping.
+		// Mark the daemon as online so the reachability probe resolves.
+		// shutdown() in createMockClient resolves immediately, then the
+		// poll loop sees client.online=false (still false after daemon.stop()
+		// emits exit) and exits quickly.
+		client.online = true;
+		// After shutdown, flag as offline so the poll-until-unreachable exits.
+		const origShutdown = (client as any).shutdown;
+		(client as any).shutdown = async () => {
+			const result = await origShutdown.call(client);
+			client.online = false;
+			return result;
+		};
+
 		const cmd = getRegisteredCommands().get('mcpGateway.stopDaemon');
 		assert.ok(cmd);
 		await cmd();

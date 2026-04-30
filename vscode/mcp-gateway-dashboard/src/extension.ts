@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { GatewayClient } from './gateway-client';
+import { GatewayClient, GatewayError } from './gateway-client';
 import { buildAuthHeader, resolveTokenPath, AuthTokenError } from './auth-header';
 import { runKeepassImport, applyImportedCredentials, KeepassImportError } from './keepass-importer';
 import { BackendTreeProvider } from './backend-tree-provider';
@@ -453,22 +453,73 @@ function registerCommands(
 		logViewer.show(item.server.name);
 	}));
 
+	// B-07 fix: wrap daemon.start() in try/catch so spawn failures surface
+	// as a user-facing error toast instead of the generic "command resulted
+	// in an error" VSCode fallback. DaemonManager already logs details to
+	// the 'MCP Gateway' channel; the toast adds the human-visible summary.
 	push(vscode.commands.registerCommand('mcpGateway.startDaemon', async () => {
-		const spawned = await daemon.start();
-		if (spawned) {
-			vscode.window.showInformationMessage('MCP Gateway daemon started.');
-		} else {
-			vscode.window.showInformationMessage('MCP Gateway daemon is already running.');
+		try {
+			const spawned = await daemon.start();
+			if (spawned) {
+				vscode.window.showInformationMessage('MCP Gateway daemon started.');
+			} else {
+				vscode.window.showInformationMessage('MCP Gateway daemon is already running.');
+			}
+		} catch (err) {
+			logger.error('extension', 'startDaemon spawn failed', err);
+			vscode.window.showErrorMessage(
+				`Start daemon failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
 		}
 	}));
 
-	push(vscode.commands.registerCommand('mcpGateway.stopDaemon', () => {
+	// B-06 fix: try REST shutdown FIRST, regardless of whether the extension
+	// owns the child process. This handles externally-started daemons
+	// (e.g. via `mcp-ctl daemon start`) where daemon.running is false.
+	push(vscode.commands.registerCommand('mcpGateway.stopDaemon', async () => {
+		// Step 1: check reachability — null means daemon is not running.
+		const health = await client.getHealth().catch(() => null);
+		if (health === null) {
+			vscode.window.showInformationMessage('No daemon process to stop.');
+			return;
+		}
+
+		// Step 2: REST shutdown — works regardless of ownership.
+		try {
+			await client.shutdown();
+		} catch (err) {
+			if (err instanceof GatewayError && err.kind === 'auth') {
+				logger.error('extension', 'stopDaemon: auth rejected during shutdown', err);
+				vscode.window.showErrorMessage(
+					'MCP Gateway: auth token rejected. Run `mcp-ctl install-claude-code --refresh-token` to refresh credentials.',
+				);
+				return;
+			}
+			// Connection-level failure — fall through to daemon.stop() if available.
+			logger.warn('extension', 'stopDaemon: REST shutdown failed — falling back to local stop', err);
+			if (daemon.running) {
+				daemon.stop();
+			} else {
+				vscode.window.showInformationMessage('Could not reach daemon for shutdown.');
+				return;
+			}
+		}
+
+		// Step 3: poll until unreachable (up to 5 s, 250 ms intervals).
+		const deadline = Date.now() + 5_000;
+		while (Date.now() < deadline) {
+			const reachable = await client.getHealth().then(() => true, () => false);
+			if (!reachable) { break; }
+			await new Promise((resolve) => setTimeout(resolve, 250));
+		}
+
+		// Step 4: also stop local child handle if we own one (clean up spawn handle).
 		if (daemon.running) {
 			daemon.stop();
-			vscode.window.showInformationMessage('MCP Gateway daemon stopped.');
-		} else {
-			vscode.window.showInformationMessage('No daemon process to stop.');
 		}
+
+		void cache.refresh();
+		vscode.window.showInformationMessage('MCP Gateway daemon stopped.');
 	}));
 
 	// Phase D.3: restart the daemon via REST shutdown + poll + respawn.

@@ -49,13 +49,19 @@ function createTrackingClient() {
 	const calls: MockClientCall[] = [];
 	let shouldFail = false;
 	let failMessage = 'mock error';
+	// After shutdown() is called, getHealth() rejects to simulate daemon exiting.
+	// This makes the stopDaemon poll-until-unreachable loop exit immediately.
+	let daemonShutDown = false;
 
 	const client = {
 		calls,
 		set shouldFail(v: boolean) { shouldFail = v; },
 		set failMessage(v: string) { failMessage = v; },
 		listServers: async () => [],
-		getHealth: async () => ({ status: 'ok', servers: 0, running: 0 }),
+		getHealth: async () => {
+			if (daemonShutDown) { throw new Error('ECONNREFUSED'); }
+			return { status: 'ok', servers: 0, running: 0 };
+		},
 		addServer: async (name: string, config: unknown) => {
 			calls.push({ method: 'addServer', args: [name, config] });
 			if (shouldFail) { throw new Error(failMessage); }
@@ -83,6 +89,15 @@ function createTrackingClient() {
 		},
 		callTool: async () => ({ content: null }),
 		listTools: async () => [],
+		// B-06 fix: stopDaemon now calls client.shutdown() for REST-first stop.
+		// After shutdown resolves, mark daemonShutDown=true so subsequent getHealth
+		// calls reject — this lets the poll-until-unreachable loop exit immediately.
+		shutdown: async () => {
+			calls.push({ method: 'shutdown', args: [] });
+			if (shouldFail) { throw new Error(failMessage); }
+			daemonShutDown = true;
+			return { status: 'ok' };
+		},
 	};
 
 	return client;
@@ -590,8 +605,330 @@ describe('Commands (with injected client)', () => {
 	});
 
 	it('stopDaemon shows info message', async () => {
+		// B-06 fix: stopDaemon now probes getHealth first. The shared trackingClient
+		// resolves getHealth (daemon is "reachable"), calls shutdown (which flips
+		// daemonShutDown=true), then the poll-until-unreachable loop exits immediately
+		// because subsequent getHealth calls reject. Result: "stopped" toast.
 		await commands.get('mcpGateway.stopDaemon')!();
-		assert.ok(mockCalls.infoMessages.some((m) => m.includes('No daemon')));
+		assert.ok(
+			mockCalls.infoMessages.some((m) => m.includes('stopped')),
+			`expected "stopped" info toast, got: ${JSON.stringify(mockCalls.infoMessages)}`,
+		);
+	});
+});
+
+// ── Phase 3 tests: B-06 (stopDaemon REST-first) + B-07 (startDaemon try/catch) ──
+
+describe('mcpGateway.stopDaemon (Phase 3 — REST-first)', () => {
+	// Each test builds its own client + daemon so it can control exactly how
+	// getHealth / shutdown behave without interfering with the shared beforeEach.
+
+	function buildSetup(opts: {
+		healthRejects?: boolean;
+		shutdownRejects?: boolean;
+		shutdownRejectWith?: Error;
+		daemonRunning?: boolean;
+	}) {
+		resetMockState();
+		_pendingOps.clear();
+		// Disable autoStart so activate() does NOT consume getHealth calls
+		// before the test invokes stopDaemon.
+		mockConfigValues['mcpGateway.autoStart'] = false;
+
+		const daemonStopCalls: number[] = [];
+
+		// Minimal spawn that records stop() calls via kill().
+		const trackingSpawn: SpawnFn = (() => {
+			const { EventEmitter } = require('node:events');
+			const child = new EventEmitter();
+			child.stdout = new EventEmitter();
+			child.stderr = new EventEmitter();
+			child.pid = 42;
+			child.killed = false;
+			child.kill = () => {
+				child.killed = true;
+				daemonStopCalls.push(1);
+				child.emit('exit', null, 'SIGTERM');
+				return true;
+			};
+			return child;
+		}) as unknown as SpawnFn;
+
+		const healthResponse = { status: 'ok', servers: 0, running: 0 };
+		const shutdownResponse = { status: 'ok' };
+
+		const client = {
+			getHealth: async () => {
+				if (opts.healthRejects) { throw new Error('ECONNREFUSED'); }
+				return healthResponse;
+			},
+			shutdown: async () => {
+				if (opts.shutdownRejects) {
+					throw opts.shutdownRejectWith ?? new Error('shutdown failed');
+				}
+				return shutdownResponse;
+			},
+			listServers: async () => [],
+			getServer: async () => ({}),
+			addServer: async () => ({ status: 'ok' }),
+			removeServer: async () => ({ status: 'ok' }),
+			patchServer: async () => ({ status: 'ok' }),
+			restartServer: async () => ({ status: 'ok' }),
+			resetCircuit: async () => ({ status: 'ok' }),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+
+		// Use an output channel stub (DaemonManager requires one for legacy compat).
+		const outputStub = {
+			name: 'test', lines: [] as string[], disposed: false,
+			appendLine() {}, append() {}, clear() {}, show() {}, hide() {}, dispose() {},
+		};
+		const daemon = new DaemonManager(client as any, '', outputStub as any, trackingSpawn);
+
+		// Simulate an extension-owned child by calling start() when daemonRunning=true.
+		// We do NOT actually await start() here — we'll let tests control the flow.
+		// Instead, directly patch the running property via a guard flag:
+		// DaemonManager.running = child !== undefined && !stopping.
+		// The simplest way is to trigger the spawn path: set a fake health rejection
+		// then start(), which will spawn because getHealth throws initially.
+		// But we need start() to NOT make a real network call, so re-use the client.
+		// For daemonRunning=false: just don't call start(). daemon.running will be false.
+
+		const ctx = createMockContext();
+		activate(ctx as any, client as any, daemon);
+		const commands = getRegisteredCommands();
+
+		return { commands, daemonStopCalls, daemon, client };
+	}
+
+	it('(a) extension owns child + REST shutdown succeeds → toast "stopped", daemon.stop() called, refresh triggered', async () => {
+		resetMockState();
+		_pendingOps.clear();
+		mockConfigValues['mcpGateway.autoStart'] = false;
+
+		const shutdownCalls: string[] = [];
+		const daemonStopCalls: number[] = [];
+
+		const trackingSpawn2: SpawnFn = (() => {
+			const { EventEmitter } = require('node:events');
+			const child = new EventEmitter();
+			child.stdout = new EventEmitter();
+			child.stderr = new EventEmitter();
+			child.pid = 42;
+			child.killed = false;
+			child.kill = () => {
+				child.killed = true;
+				daemonStopCalls.push(1);
+				child.emit('exit', null, 'SIGTERM');
+				return true;
+			};
+			return child;
+		}) as unknown as SpawnFn;
+
+		// healthMode controls what getHealth returns:
+		// 'reject' = throws (used during daemon.start() fast-path and post-shutdown polls)
+		// 'resolve' = returns health (used for the stopDaemon reachability probe)
+		let healthMode: 'reject' | 'resolve' = 'reject';
+		const client = {
+			getHealth: async () => {
+				if (healthMode === 'reject') { throw new Error('ECONNREFUSED'); }
+				return { status: 'ok', servers: 0, running: 0 };
+			},
+			shutdown: async () => { shutdownCalls.push('shutdown'); return { status: 'ok' }; },
+			listServers: async () => [], getServer: async () => ({}),
+			addServer: async () => ({ status: 'ok' }), removeServer: async () => ({ status: 'ok' }),
+			patchServer: async () => ({ status: 'ok' }), restartServer: async () => ({ status: 'ok' }),
+			resetCircuit: async () => ({ status: 'ok' }), callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+
+		const outputStub = {
+			name: 'test', lines: [] as string[], disposed: false,
+			appendLine() {}, append() {}, clear() {}, show() {}, hide() {}, dispose() {},
+		};
+		const daemon = new DaemonManager(client as any, '', outputStub as any, trackingSpawn2);
+
+		// Spawn so daemon.running = true. getHealth rejects during start() fast-path.
+		await daemon.start();
+		assert.ok(daemon.running, 'daemon should be running after start()');
+
+		// Activate with autoStart=false. cache.startAutoRefresh() fires immediately but
+		// getHealth still rejects — cache logs error and continues. That's fine.
+		const ctx = createMockContext();
+		activate(ctx as any, client as any, daemon);
+		const commands = getRegisteredCommands();
+
+		// Switch to resolve mode BEFORE invoking stopDaemon so the reachability probe sees
+		// a live daemon. Polls after shutdown() will reject (healthMode switches back below).
+		healthMode = 'resolve';
+
+		// Intercept shutdown to flip healthMode back to reject, simulating daemon exit.
+		const origShutdown = client.shutdown;
+		client.shutdown = async () => {
+			const result = await origShutdown();
+			healthMode = 'reject'; // daemon is gone after shutdown
+			return result;
+		};
+
+		await commands.get('mcpGateway.stopDaemon')!();
+
+		assert.ok(shutdownCalls.length > 0, 'shutdown must be called');
+		assert.ok(daemonStopCalls.length > 0, 'daemon.stop() must be called (extension owns child)');
+		assert.ok(
+			mockCalls.infoMessages.some((m) => m.includes('stopped')),
+			`expected "stopped" info toast, got: ${JSON.stringify(mockCalls.infoMessages)}`,
+		);
+		assert.deepStrictEqual(mockCalls.errorMessages, []);
+	});
+
+	it('(b) extension does NOT own child + REST shutdown succeeds → toast "stopped", no daemon.stop() call', async () => {
+		resetMockState();
+		_pendingOps.clear();
+		mockConfigValues['mcpGateway.autoStart'] = false;
+
+		const daemonStopCalls: number[] = [];
+		const trackingSpawn3: SpawnFn = (() => {
+			const { EventEmitter } = require('node:events');
+			const child = new EventEmitter();
+			child.stdout = new EventEmitter();
+			child.stderr = new EventEmitter();
+			child.pid = 42;
+			child.killed = false;
+			child.kill = () => {
+				child.killed = true;
+				daemonStopCalls.push(1);
+				child.emit('exit', null, 'SIGTERM');
+				return true;
+			};
+			return child;
+		}) as unknown as SpawnFn;
+
+		// healthMode: resolves for the reachability probe, rejects for polls.
+		let healthMode: 'resolve' | 'reject' = 'resolve';
+		const client = {
+			getHealth: async () => {
+				if (healthMode === 'reject') { throw new Error('ECONNREFUSED'); }
+				return { status: 'ok', servers: 0, running: 0 };
+			},
+			shutdown: async () => {
+				healthMode = 'reject'; // daemon exits after shutdown
+				return { status: 'ok' };
+			},
+			listServers: async () => [], getServer: async () => ({}),
+			addServer: async () => ({ status: 'ok' }), removeServer: async () => ({ status: 'ok' }),
+			patchServer: async () => ({ status: 'ok' }), restartServer: async () => ({ status: 'ok' }),
+			resetCircuit: async () => ({ status: 'ok' }), callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+
+		const outputStub = {
+			name: 'test', lines: [] as string[], disposed: false,
+			appendLine() {}, append() {}, clear() {}, show() {}, hide() {}, dispose() {},
+		};
+		const daemon = new DaemonManager(client as any, '', outputStub as any, trackingSpawn3);
+		// daemon.running is false — no start() called, no child handle.
+		assert.ok(!daemon.running, 'daemon must NOT be running for this test');
+
+		const ctx = createMockContext();
+		activate(ctx as any, client as any, daemon);
+		const commands = getRegisteredCommands();
+
+		// Note: activate() calls cache.startAutoRefresh() which immediately calls
+		// cache.refresh() → client.getHealth(). With healthMode='resolve', this will
+		// resolve but then we need the stopDaemon reachability probe to also resolve.
+		// The cache.refresh() is async (fire-and-forget), so by the time we call
+		// stopDaemon below it may or may not have consumed the first resolve.
+		// We keep healthMode='resolve' throughout until shutdown() flips it to 'reject',
+		// so both cache.refresh() AND the stopDaemon probe correctly see a live daemon.
+
+		await commands.get('mcpGateway.stopDaemon')!();
+
+		assert.strictEqual(daemonStopCalls.length, 0, 'daemon.stop() must NOT be called (no child ownership)');
+		assert.ok(
+			mockCalls.infoMessages.some((m) => m.includes('stopped')),
+			`expected "stopped" info toast, got: ${JSON.stringify(mockCalls.infoMessages)}`,
+		);
+		assert.deepStrictEqual(mockCalls.errorMessages, []);
+	});
+
+	it('(c) daemon completely unreachable → "No daemon process to stop" info toast, no error', async () => {
+		const { commands } = buildSetup({ healthRejects: true });
+
+		await commands.get('mcpGateway.stopDaemon')!();
+
+		assert.ok(
+			mockCalls.infoMessages.some((m) => m.includes('No daemon')),
+			`expected "No daemon" toast, got: ${JSON.stringify(mockCalls.infoMessages)}`,
+		);
+		assert.deepStrictEqual(mockCalls.errorMessages, []);
+	});
+
+	it('(d) REST shutdown rejects with kind:"auth" (401) → error toast mentioning --refresh-token', async () => {
+		const { GatewayError } = require('../gateway-client');
+		const authErr = new GatewayError('auth', 'HTTP 401', 401, '{"error":"Unauthorized"}');
+
+		const { commands } = buildSetup({
+			healthRejects: false,
+			shutdownRejects: true,
+			shutdownRejectWith: authErr,
+		});
+
+		await commands.get('mcpGateway.stopDaemon')!();
+
+		assert.ok(
+			mockCalls.errorMessages.some((m) => m.includes('--refresh-token')),
+			`expected error toast with --refresh-token hint, got: ${JSON.stringify(mockCalls.errorMessages)}`,
+		);
+		assert.ok(
+			mockCalls.infoMessages.every((m) => !m.includes('stopped')),
+			'must NOT show "stopped" toast on auth failure',
+		);
+	});
+});
+
+describe('mcpGateway.startDaemon (Phase 3 — B-07 try/catch)', () => {
+	it('(e) daemon.start() throws → showErrorMessage called with "Start daemon failed:" prefix', async () => {
+		// Use a mock daemon object (not DaemonManager) so start() actually throws.
+		// DaemonManager.start() absorbs spawn errors internally; the B-07 fix wraps
+		// the call site for cases where start() itself propagates an error.
+		resetMockState();
+		_pendingOps.clear();
+
+		const throwingDaemon = {
+			start: async (): Promise<boolean> => {
+				throw new Error('ENOENT: mcp-gateway not found');
+			},
+			stop: () => {},
+			restart: async () => false,
+			dispose: () => {},
+			get running() { return false; },
+		};
+
+		const client = {
+			getHealth: async () => ({ status: 'ok', servers: 0, running: 0 }),
+			shutdown: async () => ({ status: 'ok' }),
+			listServers: async () => [], getServer: async () => ({}),
+			addServer: async () => ({ status: 'ok' }), removeServer: async () => ({ status: 'ok' }),
+			patchServer: async () => ({ status: 'ok' }), restartServer: async () => ({ status: 'ok' }),
+			resetCircuit: async () => ({ status: 'ok' }), callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+
+		const ctx = createMockContext();
+		activate(ctx as any, client as any, throwingDaemon as any);
+		const commands = getRegisteredCommands();
+
+		await commands.get('mcpGateway.startDaemon')!();
+
+		assert.ok(
+			mockCalls.errorMessages.some((m) => m.startsWith('Start daemon failed:')),
+			`expected error toast with "Start daemon failed:" prefix, got: ${JSON.stringify(mockCalls.errorMessages)}`,
+		);
+		assert.ok(
+			mockCalls.errorMessages.some((m) => m.includes('ENOENT')),
+			`expected error message to include ENOENT, got: ${JSON.stringify(mockCalls.errorMessages)}`,
+		);
 	});
 });
 
