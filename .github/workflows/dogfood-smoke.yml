@@ -64,13 +64,30 @@ jobs:
       - name: Build mcp-ctl
         run: go build -o ./mcp-ctl ./cmd/mcp-ctl
 
+      - name: Render runtime .env (resolve absolute npx path)
+        run: |
+          # The gateway config validator requires `command` to be an
+          # absolute path — bare `npx` is rejected (PATH lookup is a
+          # hijack vector). Resolve npx via `which` after setup-node and
+          # write it into a .env file that the daemon expands into the
+          # ${NPX} placeholders in configs/ci-dogfood.json.
+          NPX_PATH=$(which npx)
+          if [ -z "${NPX_PATH}" ]; then
+            echo "::error::npx not found on PATH after setup-node@v4"
+            exit 1
+          fi
+          echo "NPX=${NPX_PATH}" > dogfood.env
+          echo "resolved npx -> ${NPX_PATH}"
+
       - name: Start gateway in background
         run: |
           # --no-auth is safe for this smoke run: the daemon binds to
           # 127.0.0.1 only, and the job runner is ephemeral + network-
           # isolated. Production config is covered by the full test suite.
           MCP_GATEWAY_I_UNDERSTAND_NO_AUTH=1 \
-            ./mcp-gateway --no-auth --config configs/ci-dogfood.json \
+            ./mcp-gateway --no-auth \
+              --config configs/ci-dogfood.json \
+              --env-file dogfood.env \
             > gateway.log 2>&1 &
           echo $! > gateway.pid
 

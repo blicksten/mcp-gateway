@@ -1,5 +1,6 @@
 {
   "//": "CI dogfood smoke-test config. Used ONLY by .github/workflows/dogfood-smoke.yml on ubuntu-latest. NOT a developer/operator config — three reference MCP servers from @modelcontextprotocol on npm, picked because they boot on a vanilla Linux runner without any secrets, external repos, or platform-specific paths.",
+  "//npx": "command='${NPX}' resolved from --env-file at runtime. Gateway validator requires absolute paths for command (PATH lookup is forbidden — hijack vector); the workflow renders a .env file via `which npx` after actions/setup-node and passes it with --env-file. ${NPX} is NOT in the gateway's expand-allowlist, so this only works through the explicit env-file path.",
   "gateway": {
     "transports": ["http"],
     "http_port": 8765,
@@ -7,15 +8,15 @@
   },
   "servers": {
     "fs-tmp": {
-      "command": "npx",
+      "command": "${NPX}",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
     },
     "fs-var-log": {
-      "command": "npx",
+      "command": "${NPX}",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/var/log"]
     },
     "everything": {
-      "command": "npx",
+      "command": "${NPX}",
       "args": ["-y", "@modelcontextprotocol/server-everything"]
     }
   }
