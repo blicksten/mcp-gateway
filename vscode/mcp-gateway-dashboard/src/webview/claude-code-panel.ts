@@ -91,6 +91,13 @@ export interface ClaudeCodePanelDeps {
 	 * Omit in production to use the default detection helper.
 	 */
 	detectPatch?: () => Promise<import('../claude-code/detection').PatchDetection>;
+	/**
+	 * Phase 4 — returns the running daemon's version string from the cached
+	 * /api/v1/health response (closes B-10). Tests inject a fake returning a
+	 * controlled version string. When undefined or not injected, Copy Diagnostics
+	 * falls back to the literal 'unknown'.
+	 */
+	getGatewayVersion?: () => string | undefined;
 }
 
 /**
@@ -584,17 +591,12 @@ export class ClaudeCodePanel {
 				void vscode.window.showErrorMessage(`Probe trigger failed: HTTP ${trigger.status}`);
 				return;
 			}
-			// Poll for the result up to 15 s.
-			const deadline = Date.now() + 15_000;
-			while (Date.now() < deadline) {
-				await new Promise((r) => setTimeout(r, 500));
-				// The patch reports via POST /probe-result; the gateway stores by nonce.
-				// No per-nonce GET on the FROZEN contract, so we rely on next heartbeat
-				// carrying the probe ack — UI already displays the result path via
-				// heartbeat stream. This stub simply toasts "Probe sent".
-			}
+			// B-11 fix: the FROZEN contract has no per-nonce GET endpoint; the probe
+			// outcome arrives via the next heartbeat and is already reflected in the
+			// session panel. Removed the legacy 15 s poll loop that blocked the UI
+			// for nothing — the user is directed to the session panel instead.
 			void vscode.window.showInformationMessage(
-				`Probe sent (nonce ${nonce.slice(0, 8)}…). Check patch status — a probe-reconnect that rejects with "Server not found" is the GREEN success signal.`,
+				`Probe sent (nonce ${nonce.slice(0, 8)}…). Watch the session panel for the result.`,
 			);
 		} catch (err: unknown) {
 			const e = err instanceof Error ? err : new Error(String(err));
@@ -604,10 +606,14 @@ export class ClaudeCodePanel {
 
 	/** T16.5.7 — [Copy diagnostics] generates structured report → clipboard. */
 	private async handleCopyDiagnostics(): Promise<void> {
+		// B-10 fix: use the real daemon version from cached /api/v1/health when
+		// available; fall back to 'unknown' only when the hook is absent or returns
+		// undefined (e.g. daemon offline or pre-D.1 daemon without version field).
+		const gatewayVersion = this.deps.getGatewayVersion?.() ?? 'unknown';
 		const input: DiagnosticsInput = {
 			platform: process.platform,
 			vscodeVersion: vscode.version,
-			gatewayVersion: 'unknown', // TODO: wire /api/v1/version
+			gatewayVersion,
 			ccVersion: this.state.lastFacts?.ccVersion ?? '',
 			pluginStatus: { installed: this.state.lastFacts?.pluginInstalled ?? false },
 			patchStatus: { installed: this.state.lastFacts?.patchInstalled ?? false },

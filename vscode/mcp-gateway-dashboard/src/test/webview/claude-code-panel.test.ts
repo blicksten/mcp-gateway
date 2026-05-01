@@ -325,6 +325,88 @@ describe('ClaudeCodePanel — Activate install flow (Phase 4B)', () => {
 });
 
 // --------------------------------------------------------------------------
+// Phase 4 — probe reconnect cleanup (B-11) + Copy Diagnostics version (B-10)
+// --------------------------------------------------------------------------
+
+describe('ClaudeCodePanel — Phase 4 fixes (B-10, B-11)', () => {
+	beforeEach(() => {
+		resetMockState();
+		mockWebviewPanels.length = 0;
+		ClaudeCodePanel._resetForTests();
+	});
+
+	it('handleProbeReconnect completes in <1 second (no 15s poll loop)', async () => {
+		const deps = makeDeps({
+			fetch: (async () => ({
+				ok: true,
+				status: 200,
+				json: async () => ({}),
+			})) as unknown as typeof fetch,
+		});
+		ClaudeCodePanel.createOrShow(deps);
+		const panel = latestPanel();
+
+		const startMs = Date.now();
+		panel.webview._simulateMessage({ command: 'probeReconnect' });
+		// Flush enough micro-ticks for the handler to complete. We intentionally
+		// do NOT use a long sleep — the test itself asserts the handler is fast.
+		await flush(8);
+		const elapsedMs = Date.now() - startMs;
+
+		assert.ok(
+			elapsedMs < 1000,
+			`handleProbeReconnect should complete in <1 s, took ${elapsedMs} ms`,
+		);
+		assert.ok(
+			mockCalls.infoMessages.some((m) => m.toLowerCase().includes('probe sent')),
+			`expected "Probe sent" info toast, got: ${mockCalls.infoMessages.join(' | ')}`,
+		);
+	});
+
+	it('handleCopyDiagnostics uses the real getGatewayVersion() value when injected', async () => {
+		const deps = makeDeps({
+			getGatewayVersion: () => '2.3.4',
+		});
+		ClaudeCodePanel.createOrShow(deps);
+		const panel = latestPanel();
+
+		panel.webview._simulateMessage({ command: 'copyDiagnostics' });
+		await flush(8);
+
+		// The diagnostics report is written to clipboard — verify the version is in it.
+		assert.ok(
+			mockCalls.clipboard.length > 0,
+			'expected clipboard.writeText to have been called',
+		);
+		const report = mockCalls.clipboard[0];
+		assert.ok(
+			report.includes('2.3.4'),
+			`expected gateway version '2.3.4' in diagnostics report, got: ${report.slice(0, 200)}`,
+		);
+	});
+
+	it('handleCopyDiagnostics falls back to "unknown" when getGatewayVersion is not provided', async () => {
+		// makeDeps does not inject getGatewayVersion — it should be absent/undefined.
+		const deps = makeDeps({});
+		ClaudeCodePanel.createOrShow(deps);
+		const panel = latestPanel();
+
+		panel.webview._simulateMessage({ command: 'copyDiagnostics' });
+		await flush(8);
+
+		assert.ok(
+			mockCalls.clipboard.length > 0,
+			'expected clipboard.writeText to have been called',
+		);
+		const report = mockCalls.clipboard[0];
+		assert.ok(
+			report.includes('unknown'),
+			`expected "unknown" gateway version in diagnostics report, got: ${report.slice(0, 200)}`,
+		);
+	});
+});
+
+// --------------------------------------------------------------------------
 // Phase 1 — facts-updated message tests
 // --------------------------------------------------------------------------
 

@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.13.0",
+  "version": "1.15.0",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -142,6 +142,14 @@
         "command": "mcpGateway.openSettings",
         "title": "MCP Gateway: Open Settings",
         "icon": "$(gear)"
+      },
+      {
+        "command": "mcpGateway.cleanupClaudeConfig",
+        "title": "MCP Gateway: Cleanup Claude Code Config (remove managed entries)"
+      },
+      {
+        "command": "mcpGateway.previewClaudeConfigSync",
+        "title": "MCP Gateway: Preview Claude Code Config Sync (dry-run)"
       }
     ],
     "menus": {
@@ -396,6 +404,22 @@
           "default": "",
           "scope": "machine",
           "description": "Optional override path to a catalog directory containing servers.json and commands.json. When empty, the bundled catalog under the extension's installation directory is used."
+        },
+        "mcpGateway.claudeConfigSync.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Reflect gateway backends into ~/.claude.json::mcpServers so they appear in Claude Code's /mcp panel. Workaround for F-CC-V2-PLUGIN-MCPSERVERS-NOT-LOADED on Claude Code 2.1.123+. Disable when Anthropic restores the plugin loader to avoid duplicate /mcp entries."
+        },
+        "mcpGateway.claudeConfigSync.namespacePrefix": {
+          "type": "string",
+          "default": "mcp-gateway:",
+          "description": "Prefix for managed mcpServers entries. Entries with this prefix are owned by the extension; all other keys are preserved verbatim. Change only if a name collision occurs."
+        },
+        "mcpGateway.claudeConfigSync.path": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Override path to Claude Code's user-scope config (default: ~/.claude.json)."
         }
       }
     }

@@ -11,6 +11,7 @@ import { LogViewer } from './log-viewer';
 import { logger } from './logger';
 import { CredentialStore } from './credential-store';
 import { ServerDataCache } from './server-data-cache';
+import { ClaudeConfigSync, defaultClaudeJsonPath } from './claude-config-sync';
 import { SapTreeProvider } from './sap-tree-provider';
 import { SapSystemItem, SapComponentItem } from './sap-item';
 import { SapStatusBar } from './sap-status-bar';
@@ -20,6 +21,7 @@ import { AddServerPanel } from './webview/add-server-panel';
 import { AddSapPanel } from './webview/add-sap-panel';
 import { ClaudeCodePanel } from './webview/claude-code-panel';
 import { SlashCommandGenerator } from './slash-command-generator';
+import { assertCompatible } from './version-compat';
 import {
 	SERVER_NAME_RE,
 	validateServerName,
@@ -68,6 +70,11 @@ export function activate(
 	// without a VS Code reload.
 	const tokenPath = resolveTokenPath(config);
 	let authErrorNotified = false;
+	// Phase 4: version-skew guardrail — only check once per session so the toast
+	// is not repeated on every poll cycle. Reset if the daemon version changes
+	// (e.g. operator hot-swaps the binary) so users are re-notified.
+	let versionCompatChecked = false;
+	let lastCheckedDaemonVersion: string | undefined;
 	const authHeader = (): string | undefined => {
 		try {
 			return buildAuthHeader(tokenPath);
@@ -225,6 +232,30 @@ export function activate(
 		} else if (payload.lastAuthFailed !== true) {
 			authErrorNotified = false;
 		}
+
+		// Phase 4: version-skew guardrail — check once after the first successful
+		// health fetch and re-check if the daemon version changes (hot-swap).
+		const currentDaemonVersion = payload.gatewayHealth?.version;
+		if (payload.gatewayHealth && currentDaemonVersion !== lastCheckedDaemonVersion) {
+			versionCompatChecked = false;
+			lastCheckedDaemonVersion = currentDaemonVersion;
+		}
+		if (!versionCompatChecked && payload.gatewayHealth) {
+			versionCompatChecked = true;
+			const extVersion = (context.extension.packageJSON as { version?: string }).version ?? 'unknown';
+			const compatErr = assertCompatible(extVersion, payload.gatewayHealth);
+			if (compatErr) {
+				logger.error('extension', 'gateway version skew detected', compatErr);
+				void vscode.window.showErrorMessage(
+					compatErr.remediation,
+					'Show Output',
+				).then((selection) => {
+					if (selection === 'Show Output') {
+						void vscode.commands.executeCommand('mcpGateway.showOutput');
+					}
+				});
+			}
+		}
 	}));
 
 	// Phase 2.6: daemon auto-start (after tree view, before status bar)
@@ -244,6 +275,80 @@ export function activate(
 		const sapStatusBar = new SapStatusBar(cache);
 		context.subscriptions.push(sapStatusBar);
 	}
+
+	// Phase 11 (mcp-lifecycle) — extension-as-bridge for Claude Code v2.1.123.
+	// Subscribes to cache.onDidRefresh and reflects backend list into
+	// ~/.claude.json::mcpServers under prefix `mcp-gateway:` so /mcp panel
+	// surfaces gateway-routed servers via the working direct-config path.
+	// Plugin loader regression tracked as F-CC-V2-PLUGIN-MCPSERVERS-NOT-LOADED.
+	const claudeConfigSync = new ClaudeConfigSync(cache, {
+		enabled: () => vscode.workspace
+			.getConfiguration('mcpGateway')
+			.get<boolean>('claudeConfigSync.enabled', true),
+		namespacePrefix: () => vscode.workspace
+			.getConfiguration('mcpGateway')
+			.get<string>('claudeConfigSync.namespacePrefix', 'mcp-gateway:'),
+		configPath: () => {
+			const configured = vscode.workspace
+				.getConfiguration('mcpGateway')
+				.get<string>('claudeConfigSync.path', '');
+			return configured && configured.trim().length > 0
+				? configured
+				: defaultClaudeJsonPath();
+		},
+		gatewayUrl: () => apiUrl,
+		authHeader,
+	});
+	context.subscriptions.push(claudeConfigSync);
+
+	context.subscriptions.push(vscode.commands.registerCommand(
+		'mcpGateway.cleanupClaudeConfig',
+		async () => {
+			const choice = await vscode.window.showWarningMessage(
+				'Remove ALL mcp-gateway:* entries from ~/.claude.json? User entries are untouched.',
+				{ modal: true },
+				'Remove',
+			);
+			if (choice !== 'Remove') { return; }
+			try {
+				await claudeConfigSync.cleanup();
+				vscode.window.showInformationMessage(
+					'Claude Code config: managed mcp-gateway:* entries removed.',
+				);
+			} catch (err) {
+				vscode.window.showErrorMessage(
+					`Cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+		},
+	));
+
+	context.subscriptions.push(vscode.commands.registerCommand(
+		'mcpGateway.previewClaudeConfigSync',
+		async () => {
+			try {
+				const diff = await claudeConfigSync.preview(cache.getAllServers());
+				const lines: string[] = [];
+				lines.push('Preview of ~/.claude.json::mcpServers reconciliation:');
+				lines.push('');
+				lines.push(`Added (${diff.added.length}):     ${diff.added.join(', ') || '—'}`);
+				lines.push(`Updated (${diff.updated.length}):   ${diff.updated.join(', ') || '—'}`);
+				lines.push(`Removed (${diff.removed.length}):   ${diff.removed.join(', ') || '—'}`);
+				lines.push(`Unchanged (${diff.unchanged.length}): ${diff.unchanged.join(', ') || '—'}`);
+				lines.push('');
+				lines.push('No file was modified. Disable mcpGateway.claudeConfigSync.enabled to stop auto-sync.');
+				const doc = await vscode.workspace.openTextDocument({
+					content: lines.join('\n'),
+					language: 'plaintext',
+				});
+				await vscode.window.showTextDocument(doc, { preview: true });
+			} catch (err) {
+				vscode.window.showErrorMessage(
+					`Preview failed: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+		},
+	));
 
 	// Phase 11.E: slash command auto-generation.
 	// catalog.C: pass extensionUri so the generator can resolve the bundled
@@ -335,6 +440,9 @@ function registerCommands(
 			getMcpCtlPath: () => vscode.workspace
 				.getConfiguration('mcpGateway')
 				.get<string>('mcpCtlPath', ''),
+			// Phase 4 (B-10) — provide the real daemon version from the cached
+			// health response so Copy Diagnostics includes an accurate version string.
+			getGatewayVersion: () => cache.gatewayHealth?.version ?? undefined,
 		});
 	}));
 
