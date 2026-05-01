@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.17.0",
+  "version": "1.18.0",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -441,6 +441,8 @@
     "watch": "tsc -watch -p ./",
     "lint": "tsc --noEmit -p ./",
     "lint:catalog": "ajv validate --spec=draft7 --strict=true -c ajv-formats -s docs/catalog/schema.server.json -d docs/catalog/servers.json && ajv validate --spec=draft7 --strict=true -c ajv-formats -s docs/catalog/schema.command.json -d docs/catalog/commands.json && node scripts/check-catalog-refs.js",
+    "lint:zombie-dom": "node scripts/check-zombie-dom.js",
+    "pretest": "node scripts/check-zombie-dom.js",
     "test": "mocha --require ts-node/register --file 'src/test/setup.ts' 'src/test/**/*.test.ts'",
     "package": "vsce package --allow-missing-repository --out mcp-gateway-dashboard-latest.vsix",
     "deploy": "npm run compile && npm run package && node scripts/install-vsix.js mcp-gateway-dashboard-latest.vsix",
