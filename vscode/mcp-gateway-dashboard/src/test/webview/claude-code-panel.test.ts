@@ -407,6 +407,124 @@ describe('ClaudeCodePanel — Phase 4 fixes (B-10, B-11)', () => {
 });
 
 // --------------------------------------------------------------------------
+// Phase 5 — CWD independence tests (B-12)
+// --------------------------------------------------------------------------
+
+describe('ClaudeCodePanel — Activate CWD independence (Phase 5, B-12)', () => {
+	let child: FakeChild;
+
+	beforeEach(() => {
+		resetMockState();
+		mockWebviewPanels.length = 0;
+		ClaudeCodePanel._resetForTests();
+		child = new FakeChild();
+	});
+
+	it('spawnInstall receives cwd from deps.getWorkspaceFolder when present', async () => {
+		let capturedOpts: { cwd?: string; envOverrides?: Record<string, string> } | undefined;
+		const deps = makeDeps({
+			getWorkspaceFolder: () => '/home/user/my-project',
+			spawnInstall: (_path, _argv, opts) => {
+				capturedOpts = opts;
+				return child;
+			},
+		});
+		ClaudeCodePanel.createOrShow(deps);
+		const panel = latestPanel();
+		panel.webview._simulateMessage({ command: 'activate' });
+		await flush();
+		child.finish(0);
+		await flush(8);
+
+		assert.ok(capturedOpts !== undefined, 'spawnInstall was not called');
+		assert.strictEqual(capturedOpts.cwd, '/home/user/my-project');
+	});
+
+	it('spawnInstall does NOT pass cwd when deps.getWorkspaceFolder returns undefined', async () => {
+		let capturedOpts: { cwd?: string; envOverrides?: Record<string, string> } | undefined;
+		const deps = makeDeps({
+			getWorkspaceFolder: () => undefined,
+			spawnInstall: (_path, _argv, opts) => {
+				capturedOpts = opts;
+				return child;
+			},
+		});
+		ClaudeCodePanel.createOrShow(deps);
+		const panel = latestPanel();
+		panel.webview._simulateMessage({ command: 'activate' });
+		await flush();
+		child.finish(0);
+		await flush(8);
+
+		assert.ok(capturedOpts !== undefined, 'spawnInstall was not called');
+		assert.strictEqual(capturedOpts.cwd, undefined);
+	});
+
+	it('spawnInstall passes GATEWAY_MARKETPLACE_JSON env when getMarketplaceJsonPath returns a non-empty string', async () => {
+		let capturedOpts: { cwd?: string; envOverrides?: Record<string, string> } | undefined;
+		const marketplacePath = '/opt/mcp-gateway/marketplace.json';
+		const deps = makeDeps({
+			getMarketplaceJsonPath: () => marketplacePath,
+			spawnInstall: (_path, _argv, opts) => {
+				capturedOpts = opts;
+				return child;
+			},
+		});
+		ClaudeCodePanel.createOrShow(deps);
+		const panel = latestPanel();
+		panel.webview._simulateMessage({ command: 'activate' });
+		await flush();
+		child.finish(0);
+		await flush(8);
+
+		assert.ok(capturedOpts !== undefined, 'spawnInstall was not called');
+		assert.ok(capturedOpts.envOverrides !== undefined, 'envOverrides should be set');
+		assert.strictEqual(
+			capturedOpts.envOverrides['GATEWAY_MARKETPLACE_JSON'],
+			marketplacePath,
+		);
+	});
+
+	it('spawnInstall does NOT pass GATEWAY_MARKETPLACE_JSON when getMarketplaceJsonPath returns undefined or empty string', async () => {
+		// Verify with hook absent (undefined) and hook returning empty string
+		const scenarios: Array<{ label: string; hook: (() => string | undefined) | undefined }> = [
+			{ label: 'hook absent', hook: undefined },
+			{ label: 'hook returns undefined', hook: () => undefined },
+			{ label: 'hook returns empty string', hook: () => '' },
+		];
+
+		for (const scenario of scenarios) {
+			resetMockState();
+			mockWebviewPanels.length = 0;
+			ClaudeCodePanel._resetForTests();
+			child = new FakeChild();
+
+			let capturedOpts: { cwd?: string; envOverrides?: Record<string, string> } | undefined;
+			const deps = makeDeps({
+				getMarketplaceJsonPath: scenario.hook,
+				spawnInstall: (_path, _argv, opts) => {
+					capturedOpts = opts;
+					return child;
+				},
+			});
+			ClaudeCodePanel.createOrShow(deps);
+			const panel = latestPanel();
+			panel.webview._simulateMessage({ command: 'activate' });
+			await flush();
+			child.finish(0);
+			await flush(8);
+
+			assert.ok(capturedOpts !== undefined, `spawnInstall was not called (${scenario.label})`);
+			const overrides = capturedOpts.envOverrides;
+			assert.ok(
+				overrides === undefined || !('GATEWAY_MARKETPLACE_JSON' in overrides),
+				`GATEWAY_MARKETPLACE_JSON should not be set when ${scenario.label}, got: ${JSON.stringify(overrides)}`,
+			);
+		}
+	});
+});
+
+// --------------------------------------------------------------------------
 // Phase 1 — facts-updated message tests
 // --------------------------------------------------------------------------
 

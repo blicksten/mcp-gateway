@@ -77,8 +77,15 @@ export interface ClaudeCodePanelDeps {
 	 * Phase 4B — spawn factory for `mcp-ctl install-claude-code`. Omit in
 	 * production to use the default execFile-based implementation; tests
 	 * inject a fake that returns a controllable child process handle.
+	 *
+	 * Phase 5 (B-12) — third argument carries CWD + env overrides so that
+	 * Activate works from any VSCode workspace (not just the mcp-gateway repo).
 	 */
-	spawnInstall?: (mcpCtlPath: string, argv: string[]) => InstallChildHandle;
+	spawnInstall?: (
+		mcpCtlPath: string,
+		argv: string[],
+		opts?: { cwd?: string; envOverrides?: Record<string, string> },
+	) => InstallChildHandle;
 	/**
 	 * Phase 1 — override for detectPluginInstalled. Tests inject a fake that
 	 * returns a controlled PluginDetection without spawning a real child.
@@ -98,6 +105,21 @@ export interface ClaudeCodePanelDeps {
 	 * falls back to the literal 'unknown'.
 	 */
 	getGatewayVersion?: () => string | undefined;
+	/**
+	 * Phase 5 (B-12) — returns the first workspace folder path so that
+	 * `mcp-ctl install-claude-code` can walk ancestors from the correct
+	 * location to find marketplace.json. Omit in tests that do not exercise
+	 * CWD behaviour; production wires vscode.workspace.workspaceFolders.
+	 */
+	getWorkspaceFolder?: () => string | undefined;
+	/**
+	 * Phase 5 (B-12) — optional override for the marketplace.json path.
+	 * When non-empty, passed as GATEWAY_MARKETPLACE_JSON env var to mcp-ctl
+	 * so that the ancestor walk is bypassed entirely. Omit in tests that do
+	 * not exercise env-override behaviour; production reads
+	 * mcpGateway.marketplaceJsonPath from VSCode configuration.
+	 */
+	getMarketplaceJsonPath?: () => string | undefined;
 }
 
 /**
@@ -406,6 +428,25 @@ export class ClaudeCodePanel {
 	 *     running is refused, never spawns a second child.
 	 *   - Dispose during run kills the child — see dispose().
 	 */
+	/**
+	 * Phase 5 (B-12) — builds the optional CWD + env-override bag for the
+	 * Activate spawn. Called by runInstallClaudeCode.
+	 *
+	 * - `cwd`: first workspace folder path (undefined when no workspace is open
+	 *   or when getWorkspaceFolder is not wired — mcp-ctl falls back to
+	 *   process.cwd(), which was the previous behaviour).
+	 * - `envOverrides.GATEWAY_MARKETPLACE_JSON`: path from the operator setting
+	 *   (undefined / empty → key omitted so mcp-ctl's ancestor walk is used).
+	 */
+	private getActivateSpawnOptions(): { cwd?: string; envOverrides?: Record<string, string> } {
+		const cwd = this.deps.getWorkspaceFolder?.() || undefined;
+		const marketplacePath = this.deps.getMarketplaceJsonPath?.() || undefined;
+		const envOverrides: Record<string, string> | undefined = marketplacePath
+			? { GATEWAY_MARKETPLACE_JSON: marketplacePath }
+			: undefined;
+		return { cwd, envOverrides };
+	}
+
 	private runInstallClaudeCode(): Promise<void> {
 		if (this.installInProgress) {
 			void vscode.window.showWarningMessage(
@@ -417,11 +458,12 @@ export class ClaudeCodePanel {
 		this.installInProgress = true;
 		this.installCanceled = false; // reset from prior run, if any
 		const spawnFn = this.deps.spawnInstall ?? defaultSpawnInstall;
+		const spawnOpts = this.getActivateSpawnOptions();
 
 		return new Promise<void>((resolve) => {
 			let child: InstallChildHandle;
 			try {
-				child = spawnFn(mcpCtlPath, ['install-claude-code', '--api-url', this.deps.getGatewayUrl()]);
+				child = spawnFn(mcpCtlPath, ['install-claude-code', '--api-url', this.deps.getGatewayUrl()], spawnOpts);
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
 				this.installInProgress = false;
@@ -678,11 +720,23 @@ export class ClaudeCodePanel {
  * popup flashes on Windows. The returned ChildProcess satisfies
  * InstallChildHandle: stdout/stderr are piped Readable streams, and
  * close/error events + kill() match the interface.
+ *
+ * Phase 5 (B-12): accepts optional `opts.cwd` and `opts.envOverrides` so
+ * that the spawn runs from the VSCode workspace folder (not the inherited
+ * VSCode process CWD) and can receive a pre-resolved marketplace.json path
+ * via GATEWAY_MARKETPLACE_JSON — making the Activate button work from any
+ * workspace, not just a descendant of the mcp-gateway repo.
  */
-function defaultSpawnInstall(mcpCtlPath: string, argv: string[]): InstallChildHandle {
+function defaultSpawnInstall(
+	mcpCtlPath: string,
+	argv: string[],
+	opts?: { cwd?: string; envOverrides?: Record<string, string> },
+): InstallChildHandle {
 	const child: ChildProcess = execFile(mcpCtlPath, argv, {
 		windowsHide: true,
 		maxBuffer: 10 * 1024 * 1024, // 10 MB — covers verbose install output
+		cwd: opts?.cwd,
+		env: opts?.envOverrides ? { ...process.env, ...opts.envOverrides } : process.env,
 	});
 	return child as InstallChildHandle;
 }

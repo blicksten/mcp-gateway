@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.15.0",
+  "version": "1.16.0",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -392,6 +392,12 @@
           "default": "",
           "description": "Optional KeePass group to filter entries to (e.g. 'MCP/Servers'). Empty = all groups.",
           "scope": "machine"
+        },
+        "mcpGateway.marketplaceJsonPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Optional override path to a marketplace.json file (used by the Activate-for-Claude-Code button). When empty, mcp-ctl walks ancestors of the workspace folder to find marketplace.json. Set this when running VSCode from outside the mcp-gateway repo."
         },
         "mcpGateway.mcpCtlPath": {
           "type": "string",

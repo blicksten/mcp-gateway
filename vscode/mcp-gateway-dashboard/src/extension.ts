@@ -443,6 +443,15 @@ function registerCommands(
 			// Phase 4 (B-10) — provide the real daemon version from the cached
 			// health response so Copy Diagnostics includes an accurate version string.
 			getGatewayVersion: () => cache.gatewayHealth?.version ?? undefined,
+			// Phase 5 (B-12) — first workspace folder path so mcp-ctl walks
+			// ancestors from the correct location when resolving marketplace.json.
+			getWorkspaceFolder: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? undefined,
+			// Phase 5 (B-12) — optional operator override for marketplace.json;
+			// when empty the ancestor walk is used (same behaviour as before).
+			getMarketplaceJsonPath: () => {
+				const v = vscode.workspace.getConfiguration('mcpGateway').get<string>('marketplaceJsonPath', '');
+				return v.trim() === '' ? undefined : v;
+			},
 		});
 	}));
 
