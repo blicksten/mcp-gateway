@@ -58,6 +58,14 @@ export interface ClaudeConfigSyncOptions {
 	configPath: () => string;
 	gatewayUrl: () => string;
 	authHeader: AuthHeaderProvider;
+	/**
+	 * Optional aggregate-endpoint entry name. When non-empty, an extra
+	 * managed entry under this name points at `<gatewayUrl>/mcp` (no
+	 * backend suffix) so Claude Code's /mcp panel exposes the aggregate
+	 * gateway alongside per-backend entries. Default `mcp-gateway`
+	 * matches the legacy plugin name.
+	 */
+	aggregateEntryName?: () => string;
 }
 
 export interface ManagedHttpEntry {
@@ -105,6 +113,23 @@ export class ClaudeConfigSync implements vscode.Disposable {
 		const baseUrl = this.opts.gatewayUrl().replace(/\/+$/, '');
 		const auth = safeCallAuth(this.opts.authHeader);
 		const out: Record<string, ManagedHttpEntry> = {};
+
+		// Aggregate-gateway entry (e.g. "mcp-gateway") — exposes the
+		// universal /mcp endpoint with meta-tools (gateway.list_servers,
+		// gateway.list_tools, gateway.invoke). Skipped when
+		// aggregateEntryName getter returns empty.
+		const aggName = this.opts.aggregateEntryName?.() ?? '';
+		if (aggName.length > 0) {
+			const aggEntry: ManagedHttpEntry = {
+				type: 'http',
+				url: `${baseUrl}/mcp`,
+			};
+			if (auth) {
+				aggEntry.headers = { Authorization: auth };
+			}
+			out[aggName] = aggEntry;
+		}
+
 		for (const s of servers) {
 			const key = `${prefix}${s.name}`;
 			const entry: ManagedHttpEntry = {
@@ -131,8 +156,7 @@ export class ClaudeConfigSync implements vscode.Disposable {
 		const desired = this.buildDesired(servers);
 		const { parsed } = await this.readWithRetry();
 		const existing = (parsed.mcpServers ?? {}) as Record<string, unknown>;
-		const prefix = this.opts.namespacePrefix();
-		const currentManaged = pickPrefix(existing, prefix);
+		const currentManaged = this.pickManaged(existing);
 		const added: string[] = [];
 		const removed: string[] = [];
 		const updated: string[] = [];
@@ -172,16 +196,38 @@ export class ClaudeConfigSync implements vscode.Disposable {
 		}
 	}
 
+	/**
+	 * Returns the subset of `obj` that is owned by this extension —
+	 * keys matching `namespacePrefix` plus the optional aggregate-entry
+	 * name. Used for diff comparison and gateway-as-truth cleanup.
+	 */
+	private pickManaged(obj: Record<string, unknown>): Record<string, unknown> {
+		const prefix = this.opts.namespacePrefix();
+		const aggName = this.opts.aggregateEntryName?.() ?? '';
+		const out: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(obj)) {
+			if (k.startsWith(prefix) || (aggName.length > 0 && k === aggName)) {
+				out[k] = v;
+			}
+		}
+		return out;
+	}
+
+	private isManagedKey(k: string): boolean {
+		const prefix = this.opts.namespacePrefix();
+		const aggName = this.opts.aggregateEntryName?.() ?? '';
+		return k.startsWith(prefix) || (aggName.length > 0 && k === aggName);
+	}
+
 	private async safeUpdateMcpServers(
 		desiredManaged: Record<string, ManagedHttpEntry>,
 	): Promise<void> {
-		const prefix = this.opts.namespacePrefix();
 		const target = this.opts.configPath();
 
 		for (let attempt = 1; attempt <= CAS_RETRY_BUDGET; attempt++) {
 			const { hash, parsed } = await this.readWithRetry();
 			const existingServers = (parsed.mcpServers ?? {}) as Record<string, unknown>;
-			const currentManaged = pickPrefix(existingServers, prefix);
+			const currentManaged = this.pickManaged(existingServers);
 
 			if (deepEqualJson(currentManaged, desiredManaged)) {
 				return;
@@ -192,7 +238,7 @@ export class ClaudeConfigSync implements vscode.Disposable {
 			// gateway state changes.
 			const merged: Record<string, unknown> = {};
 			for (const [k, v] of Object.entries(existingServers)) {
-				if (!k.startsWith(prefix)) { merged[k] = v; }
+				if (!this.isManagedKey(k)) { merged[k] = v; }
 			}
 			for (const [k, v] of Object.entries(desiredManaged)) {
 				merged[k] = v;

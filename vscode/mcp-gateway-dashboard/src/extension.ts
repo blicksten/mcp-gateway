@@ -298,6 +298,9 @@ export function activate(
 		},
 		gatewayUrl: () => apiUrl,
 		authHeader,
+		aggregateEntryName: () => vscode.workspace
+			.getConfiguration('mcpGateway')
+			.get<string>('claudeConfigSync.aggregateEntryName', 'mcp-gateway'),
 	});
 	context.subscriptions.push(claudeConfigSync);
 

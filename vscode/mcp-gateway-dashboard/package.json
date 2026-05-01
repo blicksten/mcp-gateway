@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.16.0",
+  "version": "1.17.0",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -426,6 +426,11 @@
           "default": "",
           "scope": "machine",
           "description": "Override path to Claude Code's user-scope config (default: ~/.claude.json)."
+        },
+        "mcpGateway.claudeConfigSync.aggregateEntryName": {
+          "type": "string",
+          "default": "mcp-gateway",
+          "description": "Name of the managed entry that points at the aggregate gateway endpoint (/mcp without a backend suffix). Exposes gateway meta-tools (gateway.list_servers, gateway.list_tools, gateway.invoke). Empty string disables the aggregate entry."
         }
       }
     }
