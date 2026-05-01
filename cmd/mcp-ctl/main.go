@@ -120,6 +120,9 @@ func newRootCmd() *cobra.Command {
 	installCCCmd.Annotations = map[string]string{skipClientAnnotation: "true"}
 	root.AddCommand(installCCCmd)
 
+	// Phase 7 audit-dashboard — diagnostic checks (closes B-16).
+	root.AddCommand(newDoctorCmd())
+
 	versionCmd := newVersionCmd()
 	versionCmd.Annotations = map[string]string{skipClientAnnotation: "true"}
 	root.AddCommand(versionCmd)
