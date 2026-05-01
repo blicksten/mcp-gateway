@@ -1,0 +1,22 @@
+{
+  "//": "CI dogfood smoke-test config. Used ONLY by .github/workflows/dogfood-smoke.yml on ubuntu-latest. NOT a developer/operator config — three reference MCP servers from @modelcontextprotocol on npm, picked because they boot on a vanilla Linux runner without any secrets, external repos, or platform-specific paths.",
+  "gateway": {
+    "transports": ["http"],
+    "http_port": 8765,
+    "bind_address": "127.0.0.1"
+  },
+  "servers": {
+    "fs-tmp": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    },
+    "fs-var-log": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/var/log"]
+    },
+    "everything": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything"]
+    }
+  }
+}

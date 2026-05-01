@@ -1,37 +1,41 @@
-# Phase 16.9 T16.9.4.a — dogfood smoke test.
+# dogfood-smoke — Phase 16.9 T16.9.4.a, fixed in Phase 17 follow-up
+# (commit context: original workflow asserted 3 running backends but did
+# NOT pass --config to the daemon, so the daemon fell back to
+# ~/.mcp-gateway/config.json which doesn't exist on a fresh CI runner;
+# default-empty config produced 0 backends and the assertion failed on
+# every push since introduction).
 #
-# Runs on PRs that touch `.mcp.json` or `config.json`. Starts the gateway
-# with the repo's own config, waits for /health, asserts the three
-# dogfood backends (context7, orchestrator, playwright) register as
-# `running`, then shuts down cleanly. Guards against bit-rot on the
-# dogfood config when the gateway itself evolves.
+# Now uses configs/ci-dogfood.json — a CI-only fixture with three
+# reference MCP servers from the official @modelcontextprotocol npm
+# packages. They boot on vanilla ubuntu-latest with no secrets, no
+# external repos, and no platform-specific paths.
 #
-# This CI is intentionally a smoke test — it does NOT run through Claude
-# Code; it just proves the daemon + configured MCPs come up healthy.
+# This is a smoke test — it does NOT run through Claude Code; it proves
+# the daemon parses the config, spawns stdio backends correctly, and
+# the REST API surfaces the running set.
 
 name: dogfood-smoke
 
 on:
   pull_request:
     paths:
-      - '.mcp.json'
-      - 'config.json'
-      - 'configs/**'
+      - 'configs/ci-dogfood.json'
       - 'cmd/mcp-gateway/**'
       - 'internal/**'
+      - '.github/workflows/dogfood-smoke.yml'
   push:
     branches: [main]
     paths:
-      - '.mcp.json'
-      - 'config.json'
-      - 'configs/**'
+      - 'configs/ci-dogfood.json'
       - 'cmd/mcp-gateway/**'
       - 'internal/**'
+      - '.github/workflows/dogfood-smoke.yml'
 
 jobs:
   dogfood-smoke:
-    # Smoke test requires a full Linux runtime with curl + jq. macOS /
-    # Windows duplicate the same surface; Linux is sufficient.
+    # Smoke test requires a full Linux runtime with curl + jq + Node.js
+    # (for npx-spawned backends). macOS / Windows duplicate the same
+    # surface; Linux is sufficient.
     runs-on: ubuntu-latest
 
     steps:
@@ -42,6 +46,14 @@ jobs:
         with:
           go-version: '1.25'
           cache: true
+
+      - name: Set up Node.js
+        # Reference MCP servers in configs/ci-dogfood.json are spawned
+        # via `npx -y @modelcontextprotocol/server-*`. Node 20+ is
+        # required by the @modelcontextprotocol packages.
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       - name: Install jq
         run: sudo apt-get install -y jq
@@ -57,36 +69,47 @@ jobs:
           # --no-auth is safe for this smoke run: the daemon binds to
           # 127.0.0.1 only, and the job runner is ephemeral + network-
           # isolated. Production config is covered by the full test suite.
-          MCP_GATEWAY_I_UNDERSTAND_NO_AUTH=1 ./mcp-gateway --no-auth > gateway.log 2>&1 &
+          MCP_GATEWAY_I_UNDERSTAND_NO_AUTH=1 \
+            ./mcp-gateway --no-auth --config configs/ci-dogfood.json \
+            > gateway.log 2>&1 &
           echo $! > gateway.pid
 
-      - name: Wait for gateway health (timeout 10s)
+      - name: Wait for gateway health (timeout 30s)
         run: |
-          for i in $(seq 1 20); do
+          for i in $(seq 1 60); do
             if curl -sf http://127.0.0.1:8765/api/v1/health > /dev/null; then
               echo "gateway ready after ${i}x 500ms polls"
               exit 0
             fi
             sleep 0.5
           done
-          echo "::error::gateway did not become healthy within 10s"
+          echo "::error::gateway did not become healthy within 30s"
           echo "--- gateway.log ---"
           cat gateway.log
           exit 1
 
-      - name: Assert all configured backends registered running
+      - name: Assert all configured backends registered running (timeout 60s for npx warmup)
         run: |
-          running=$(curl -s http://127.0.0.1:8765/api/v1/servers | \
-            jq '[.[] | select(.status=="running")] | length')
-          echo "running backends: ${running}"
-          if [ "${running}" -lt 3 ]; then
-            echo "::error::expected at least 3 running backends, got ${running}"
-            echo "--- /api/v1/servers ---"
-            curl -s http://127.0.0.1:8765/api/v1/servers | jq .
-            echo "--- gateway.log ---"
-            cat gateway.log
-            exit 1
-          fi
+          # First-run npx -y downloads the package, which on a cold
+          # CI runner can take 20-40s for the largest reference
+          # server. Poll for up to 60s with a status snapshot every
+          # 2s; succeed as soon as 3 are running.
+          for i in $(seq 1 30); do
+            running=$(curl -s http://127.0.0.1:8765/api/v1/servers | \
+              jq '[.[] | select(.status=="running")] | length')
+            echo "[t=$((i*2))s] running backends: ${running}"
+            if [ "${running}" -ge 3 ]; then
+              echo "all 3 backends running after $((i*2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::expected 3 running backends after 60s, last count: ${running}"
+          echo "--- /api/v1/servers ---"
+          curl -s http://127.0.0.1:8765/api/v1/servers | jq .
+          echo "--- gateway.log ---"
+          cat gateway.log
+          exit 1
 
       - name: Gateway shutdown (graceful)
         if: always()
