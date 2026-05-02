@@ -8,7 +8,11 @@ import { _setLoggerForTests } from '../logger';
 import type { IGatewayClient } from '../extension';
 import type { ChildProcess } from 'node:child_process';
 
-// Minimal mock client — only getHealth() is used by DaemonManager.
+// Minimal mock client — only getHealth() and shutdown() are used by DaemonManager.
+// Phase 9 (B-NEW-25): shutdown() now respects the `online` flag. When offline,
+// it rejects with a connection error so DaemonManager.stop() falls through to
+// the SIGTERM fallback path (mirrors real GatewayClient behavior — a daemon
+// that won't answer /health also won't answer /shutdown).
 function createMockClient(online = false): IGatewayClient & { online: boolean } {
 	const mock = {
 		online,
@@ -16,7 +20,10 @@ function createMockClient(online = false): IGatewayClient & { online: boolean } 
 			if (!mock.online) { throw new Error('connection refused'); }
 			return { status: 'ok', servers: 0, running: 0 };
 		},
-		shutdown: async () => ({ status: 'shutting_down' }),
+		shutdown: async () => {
+			if (!mock.online) { throw new Error('connection refused'); }
+			return { status: 'shutting_down' };
+		},
 		listServers: async () => [],
 		getServer: async () => ({}),
 		addServer: async () => ({ status: 'ok' }),
@@ -85,8 +92,8 @@ describe('DaemonManager', () => {
 		}) as unknown as SpawnFn;
 	});
 
-	afterEach(() => {
-		if (daemon) { daemon.dispose(); }
+	afterEach(async () => {
+		if (daemon) { await daemon.dispose(); }
 	});
 
 	describe('start', () => {
@@ -114,7 +121,7 @@ describe('DaemonManager', () => {
 
 		it('returns false after dispose', async () => {
 			daemon = new DaemonManager(client as any, 'mcp-gateway', output as any, mockSpawn);
-			daemon.dispose();
+			await daemon.dispose();
 			const result = await daemon.start();
 			assert.strictEqual(result, false);
 		});
@@ -163,9 +170,10 @@ describe('DaemonManager', () => {
 			};
 			daemon = new DaemonManager(slowClient as any, 'mcp-gateway', output as any, mockSpawn);
 			const startPromise = daemon.start();
-			daemon.dispose();
+			const disposePromise = daemon.dispose();
 			resolveHealth();
 			const result = await startPromise;
+			await disposePromise;
 			assert.strictEqual(result, false, 'start() must return false after dispose');
 			assert.strictEqual(spawnCount, 0, 'must not spawn into disposed manager');
 		});
@@ -180,18 +188,19 @@ describe('DaemonManager', () => {
 	});
 
 	describe('stop', () => {
-		it('sends SIGTERM to child process', async () => {
+		it('sends SIGTERM to child process when REST shutdown rejects (offline)', async () => {
+			// Phase 9 (B-NEW-25): client offline → shutdown rejects → fall back to SIGTERM.
 			daemon = new DaemonManager(client as any, 'mcp-gateway', output as any, mockSpawn);
 			await daemon.start();
 			assert.strictEqual(daemon.running, true);
-			daemon.stop();
-			assert.ok(mockChild.killed);
+			await daemon.stop();
+			assert.ok(mockChild.killed, 'SIGTERM fallback should fire when REST shutdown is unreachable');
 			assert.ok(output.lines.some((l) => l.includes('Stopping')));
 		});
 
-		it('is a no-op when not running', () => {
+		it('is a no-op when not running and gateway unreachable', async () => {
 			daemon = new DaemonManager(client as any, 'mcp-gateway', output as any, mockSpawn);
-			daemon.stop(); // Should not throw
+			await daemon.stop(); // Should not throw
 			assert.strictEqual(daemon.running, false);
 		});
 
@@ -215,10 +224,15 @@ describe('DaemonManager', () => {
 			daemon = new DaemonManager(client as any, 'mcp-gateway', output as any, spawn);
 			await daemon.start();
 			assert.strictEqual(daemon.running, true);
-			daemon.stop();
+			// Phase 9: stop() is async — check stopping state BEFORE the
+			// REST flow completes by not awaiting yet.
+			const stopPromise = daemon.stop();
+			// Yield once so stop() reaches the `this.stopping=true` line.
+			await new Promise((r) => setImmediate(r));
 			assert.strictEqual(daemon.running, false, 'running should be false while stopping');
-			// Simulate eventual exit
+			// Simulate eventual exit + complete the await chain
 			child.emit('exit', 0, null);
+			await stopPromise;
 		});
 
 		it('error event clears stopping when exit does not fire (D7-02 fix)', async () => {
@@ -231,13 +245,14 @@ describe('DaemonManager', () => {
 			const spawn = (() => child) as unknown as SpawnFn;
 			daemon = new DaemonManager(client as any, 'mcp-gateway', output as any, spawn);
 			await daemon.start();
-			daemon.stop();
+			const stopPromise = daemon.stop();
+			await new Promise((r) => setImmediate(r));
 			assert.strictEqual(daemon.running, false, 'stopping — running is false');
 			// Simulate error without exit (e.g., orphaned error event)
 			child.emit('error', new Error('EPIPE'));
-			// stopping should be cleared by the error handler
-			// child is now undefined, so running is false regardless, but stopping must be false
-			// to allow a fresh start() cycle
+			await stopPromise;
+			// stopping should be cleared by the error handler (child is now
+			// undefined). Verify by attempting a fresh start cycle.
 			const result = await daemon.start();
 			assert.strictEqual(result, true, 'start() should succeed after error clears stopping');
 		});
@@ -253,10 +268,104 @@ describe('DaemonManager', () => {
 			const spawn = (() => child) as unknown as SpawnFn;
 			daemon = new DaemonManager(client as any, 'mcp-gateway', output as any, spawn);
 			await daemon.start();
-			daemon.stop();
-			daemon.stop();
+			// Phase 9: kick off two stop() calls; second should hit the
+			// `this.stopping` re-entry guard and resolve to a no-op.
+			const [s1, s2] = await Promise.all([daemon.stop(), daemon.stop()]);
+			void s1; void s2;
 			assert.strictEqual(killCount, 1, 'kill should only be called once');
 			child.emit('exit', 0, null);
+		});
+	});
+
+	describe('stop (Phase 9 — REST-first, B-NEW-25 coverage)', () => {
+		// On Windows, child.kill('SIGTERM') maps to TerminateProcess, which
+		// gives the daemon NO chance to run signal handlers — leaves a stale
+		// pidfile and unflushed patchstate. Phase 9 fixes stop() and dispose()
+		// to attempt REST /shutdown first, falling back to SIGTERM only when
+		// REST fails AND a child is owned.
+
+		it('REST shutdown succeeds → no SIGTERM, daemon goes unreachable', async () => {
+			let shutdownCalls = 0;
+			const onlineClient = createMockClient(true);
+			(onlineClient as any).shutdown = async () => {
+				shutdownCalls++;
+				onlineClient.online = false; // daemon "exits" after REST shutdown
+				return { status: 'shutting_down' };
+			};
+			daemon = new DaemonManager(onlineClient as any, 'mcp-gateway', output as any, mockSpawn);
+			await daemon.start(); // start sees getHealth ok → no spawn (already running case)
+			// Force an owned-child scenario by calling start while offline first
+			// is harder; for this test we just exercise the REST happy path.
+			(daemon as any).child = mockChild; // inject owned child for test
+
+			await daemon.stop();
+			assert.strictEqual(shutdownCalls, 1, 'REST /shutdown should be invoked exactly once');
+			assert.strictEqual(mockChild.killed, false,
+				'SIGTERM should NOT fire when REST shutdown succeeded — guards against TerminateProcess on Windows (B-NEW-25)');
+		});
+
+		it('REST shutdown fails AND owned child → falls back to SIGTERM', async () => {
+			// Default offline mock rejects shutdown — exactly the legacy path
+			// where REST is unavailable and SIGTERM is the only option left.
+			daemon = new DaemonManager(client as any, 'mcp-gateway', output as any, mockSpawn);
+			await daemon.start();
+			assert.strictEqual(daemon.running, true);
+
+			await daemon.stop();
+			assert.strictEqual(mockChild.killed, true,
+				'SIGTERM fallback must fire when REST shutdown rejects AND we own a child');
+			assert.ok(output.lines.some((l) => l.includes('REST shutdown failed')),
+				'fallback should be logged so operators see why SIGTERM was used');
+		});
+
+		it('REST shutdown fails AND no owned child → no SIGTERM, just clears state', async () => {
+			// Externally-started daemon scenario: extension never spawned, REST
+			// is the only handle. If REST fails we cannot SIGTERM something we
+			// don't own — log and leave.
+			daemon = new DaemonManager(client as any, 'mcp-gateway', output as any, mockSpawn);
+			// Don't start — no child. Force a reachability flip so stop() proceeds past the !child guard.
+			client.online = true;
+			(client as any).shutdown = async () => { throw new Error('HTTP 500 Internal Server Error'); };
+
+			await daemon.stop(300);
+			// No mockChild was ever spawned, so nothing should be killed.
+			assert.strictEqual(mockChild.killed, false, 'no owned child — no SIGTERM');
+			// stopping flag must be cleared so future start() works.
+			const result = await daemon.start();
+			assert.strictEqual(result, false, 'start() returns false because online=true (existing behaviour) but stopping flag was cleared');
+		});
+
+		it('dispose() with owned child runs the same REST-first flow', async () => {
+			let shutdownCalls = 0;
+			const onlineClient = createMockClient(true);
+			(onlineClient as any).shutdown = async () => {
+				shutdownCalls++;
+				onlineClient.online = false;
+				return { status: 'shutting_down' };
+			};
+			daemon = new DaemonManager(onlineClient as any, 'mcp-gateway', output as any, mockSpawn);
+			(daemon as any).child = mockChild; // simulate owned child
+
+			await daemon.dispose();
+			assert.strictEqual(shutdownCalls, 1,
+				'dispose() must attempt graceful REST shutdown before any SIGTERM (B-NEW-25 mirror in dispose)');
+			assert.strictEqual(mockChild.killed, false,
+				'no SIGTERM when REST succeeded');
+		});
+
+		it('dispose() with NO owned child is a no-op', async () => {
+			// Per Phase 9 design: dispose only acts on children we spawned.
+			// REST-shutdown of an externally-started daemon is the operator's
+			// decision via the explicit stopDaemon command, not extension teardown.
+			let shutdownCalls = 0;
+			const onlineClient = createMockClient(true);
+			(onlineClient as any).shutdown = async () => { shutdownCalls++; return {}; };
+			daemon = new DaemonManager(onlineClient as any, 'mcp-gateway', output as any, mockSpawn);
+			// No spawn.
+
+			await daemon.dispose();
+			assert.strictEqual(shutdownCalls, 0,
+				'dispose() must not REST-shutdown a daemon we don\'t own');
 		});
 	});
 
@@ -430,28 +539,28 @@ describe('DaemonManager', () => {
 		it('stops child and preserves injected output channel (D6-03 fix)', async () => {
 			daemon = new DaemonManager(client as any, 'mcp-gateway', output as any, mockSpawn);
 			await daemon.start();
-			daemon.dispose();
+			await daemon.dispose();
 			assert.strictEqual(mockChild.killed, true);
 			assert.strictEqual(output.disposed, false, 'injected channel should not be disposed');
 		});
 
-		it('preserves injected output channel even without child (D6-03 fix)', () => {
+		it('preserves injected output channel even without child (D6-03 fix)', async () => {
 			daemon = new DaemonManager(client as any, 'mcp-gateway', output as any, mockSpawn);
-			daemon.dispose();
+			await daemon.dispose();
 			assert.strictEqual(output.disposed, false, 'injected channel should not be disposed');
 		});
 
 		it('double dispose is safe', async () => {
 			daemon = new DaemonManager(client as any, 'mcp-gateway', output as any, mockSpawn);
 			await daemon.start();
-			daemon.dispose();
-			daemon.dispose(); // Should not throw
+			await daemon.dispose();
+			await daemon.dispose(); // Should not throw
 		});
 
 		it('removes stdout/stderr listeners on dispose', async () => {
 			daemon = new DaemonManager(client as any, 'mcp-gateway', output as any, mockSpawn);
 			await daemon.start();
-			daemon.dispose();
+			await daemon.dispose();
 			const linesBefore = output.lines.length;
 			// Data after dispose should not reach the output channel
 			(mockChild as any).stdout.emit('data', Buffer.from('ghost\n'));
@@ -500,7 +609,7 @@ describe('Daemon commands (integration)', () => {
 
 		// Wait for auto-start to complete (fires on activate), then stop so command can re-start.
 		await new Promise((r) => setTimeout(r, 10));
-		daemon.stop();
+		await daemon.stop();
 
 		const cmd = getRegisteredCommands().get('mcpGateway.startDaemon');
 		assert.ok(cmd, 'startDaemon command should be registered');

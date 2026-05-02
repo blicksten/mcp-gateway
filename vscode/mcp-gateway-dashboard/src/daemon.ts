@@ -92,15 +92,86 @@ export class DaemonManager {
 		}
 	}
 
-	/** Stop the daemon by sending SIGTERM. */
-	stop(): void {
+	/**
+	 * Stop the daemon gracefully.
+	 *
+	 * AUDIT B-NEW-25 (Phase 9): on Windows, Node maps `child.kill('SIGTERM')`
+	 * to `TerminateProcess`, which gives the daemon NO chance to run signal
+	 * handlers (no `defer pidfile.Remove()`, no graceful session cleanup).
+	 * The fix is to attempt REST `/shutdown` first — works for any daemon
+	 * regardless of which process spawned it, and the daemon's own signal
+	 * handler runs to completion. SIGTERM remains as a last-resort fallback
+	 * when the REST flow fails AND we still own a child handle.
+	 *
+	 * Mirrors the REST-first flow already in restart(); this is the second
+	 * caller of that pattern (B-NEW-25 said "stop() and dispose() did not
+	 * get the upgrade" — Phase 9 closes that gap).
+	 *
+	 * Returns a Promise so callers can `await` the graceful flow. Both
+	 * production callsites (extension.ts:683 stopDaemon command, dispose()
+	 * below) are already in async contexts and just need an `await`.
+	 */
+	async stop(timeoutMs = 5_000): Promise<void> {
 		// AUDIT A-M1: reject during restart to avoid racing with the
-		// restart() kill+spawn sequence.
-		if (!this.child || this.stopping || this.restarting) { return; }
+		// restart() kill+spawn sequence. Also re-entry guard for stop().
+		if (this.stopping || this.restarting) { return; }
+		// Nothing to stop and no daemon reachable to ask politely — bail out.
+		if (!this.child) {
+			const reachable = await this.client.getHealth().then(() => true, () => false);
+			if (!reachable) { return; }
+		}
 		this.stopping = true;
 		if (!this.disposed) { logger.info('daemon', 'Stopping...'); }
-		this.child.kill('SIGTERM');
-		// child = undefined and stopping = false will be set by the 'exit' handler.
+
+		// 1. Graceful REST shutdown — works for external daemons too.
+		// On success: poll until /health unreachable so the daemon's signal
+		// handler runs to completion (defer pidfile.Remove, etc.). On
+		// failure: fall through to SIGTERM if we own a child.
+		let restShutdownAccepted = false;
+		try {
+			await this.client.shutdown();
+			restShutdownAccepted = true;
+		} catch (err) {
+			// REST failed (network down, 401, 5xx). Log; SIGTERM fallback
+			// may still close out our owned child below.
+			logger.warn('daemon', 'REST shutdown failed — will fall back to SIGTERM if local child is owned.', err);
+		}
+
+		// 2. If REST accepted, poll /health until unreachable bounded by timeoutMs.
+		// (When REST rejected we don't poll — it would just hit the same error
+		// every iteration and waste the deadline before reaching SIGTERM fallback.)
+		// NOTE: we deliberately do NOT short-circuit on this.disposed here. The
+		// poll's own deadline bounds the wait, and dispose() calls stop() with
+		// disposed=true — exiting early on disposed would skip past the
+		// reachability check and fall through to the SIGTERM fallback even
+		// when REST shutdown already gracefully terminated the daemon.
+		if (restShutdownAccepted) {
+			const deadline = Date.now() + timeoutMs;
+			while (Date.now() < deadline) {
+				const reachable = await this.client.getHealth().then(() => true, () => false);
+				if (!reachable) {
+					// Daemon shut down gracefully. If we owned a child, its
+					// 'exit' handler will clear state; otherwise we clear
+					// the stopping flag explicitly.
+					if (!this.child) { this.stopping = false; }
+					return;
+				}
+				await new Promise((resolve) => setTimeout(resolve, 200));
+			}
+			// Deadline passed but daemon still reachable — fall through to SIGTERM
+			// for our child if we own it (last resort).
+			if (!this.disposed) { logger.warn('daemon', 'Graceful shutdown timed out — falling back to SIGTERM.'); }
+		}
+
+		// 3. SIGTERM fallback: only if we own a child. If not, there's nothing
+		// local to kill — the daemon was started externally and didn't honour
+		// our REST shutdown. Operator must intervene.
+		if (this.child) {
+			this.child.kill('SIGTERM');
+			// child = undefined and stopping = false set by the 'exit' handler.
+		} else {
+			this.stopping = false;
+		}
 	}
 
 	/**
@@ -186,14 +257,37 @@ export class DaemonManager {
 		return this.child !== undefined && !this.stopping;
 	}
 
-	dispose(): void {
+	/**
+	 * Dispose: best-effort graceful shutdown of an OWNED child via the
+	 * REST-first flow. VSCode treats sync and async dispose()
+	 * interchangeably so returning a Promise is safe. Errors from the
+	 * shutdown chain are swallowed — dispose must not throw.
+	 *
+	 * AUDIT B-NEW-25: previously called `this.stop()` synchronously, which
+	 * went straight to SIGTERM = TerminateProcess on Windows and stranded
+	 * the daemon's pidfile. Now we await the same graceful path.
+	 *
+	 * Scope: dispose() ONLY shuts down a child this manager spawned. If we
+	 * don't own the child, dispose is a no-op — the extension being
+	 * deactivated is not authority to terminate an externally-started
+	 * daemon (that decision belongs to the operator via mcpGateway.stopDaemon).
+	 */
+	async dispose(): Promise<void> {
 		if (this.disposed) { return; }
 		this.disposed = true;
-		if (this.child) {
-			this.child.stdout?.removeAllListeners();
-			this.child.stderr?.removeAllListeners();
-			this.child.removeAllListeners();
+		const ownedChild = this.child;
+		if (ownedChild) {
+			ownedChild.stdout?.removeAllListeners();
+			ownedChild.stderr?.removeAllListeners();
+			ownedChild.removeAllListeners();
+			try {
+				// Shorter timeout than stop() — extension-deactivate path
+				// must return briskly to VS Code.
+				await this.stop(2_000);
+			} catch (err) {
+				// dispose() must not throw. Log and move on.
+				logger.warn('daemon', 'dispose: graceful stop failed', err);
+			}
 		}
-		this.stop();
 	}
 }

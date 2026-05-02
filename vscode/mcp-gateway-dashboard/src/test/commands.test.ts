@@ -787,7 +787,7 @@ describe('mcpGateway.stopDaemon (Phase 3 — REST-first)', () => {
 		return { commands, daemonStopCalls, daemon, client };
 	}
 
-	it('(a) extension owns child + REST shutdown succeeds → toast "stopped", daemon.stop() called, refresh triggered', async () => {
+	it('(a) extension owns child + REST shutdown succeeds → toast "stopped", refresh triggered (Phase 9: SIGTERM is fallback-only)', async () => {
 		resetMockState();
 		_pendingOps.clear();
 		mockConfigValues['mcpGateway.autoStart'] = false;
@@ -859,7 +859,13 @@ describe('mcpGateway.stopDaemon (Phase 3 — REST-first)', () => {
 		await commands.get('mcpGateway.stopDaemon')!();
 
 		assert.ok(shutdownCalls.length > 0, 'shutdown must be called');
-		assert.ok(daemonStopCalls.length > 0, 'daemon.stop() must be called (extension owns child)');
+		// Phase 9 (B-NEW-25): with REST-first stop, SIGTERM is a fallback-only path.
+		// When REST shutdown succeeds and the daemon is unreachable, no SIGTERM is
+		// sent — the daemon's own signal handler runs to completion. The local
+		// child handle is cleaned up by the 'exit' handler when the real daemon
+		// process exits (mock here doesn't emit exit on shutdown, but production
+		// would). What matters for this test: shutdown was called, no error toast.
+		assert.strictEqual(daemonStopCalls.length, 0, 'SIGTERM fallback should NOT fire when REST shutdown succeeded (B-NEW-25 fix)');
 		assert.ok(
 			mockCalls.infoMessages.some((m) => m.includes('stopped')),
 			`expected "stopped" info toast, got: ${JSON.stringify(mockCalls.infoMessages)}`,

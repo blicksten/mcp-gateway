@@ -663,7 +663,7 @@ function registerCommands(
 			// Connection-level failure — fall through to daemon.stop() if available.
 			logger.warn('extension', 'stopDaemon: REST shutdown failed — falling back to local stop', err);
 			if (daemon.running) {
-				daemon.stop();
+				await daemon.stop();
 			} else {
 				vscode.window.showInformationMessage('Could not reach daemon for shutdown.');
 				return;
@@ -680,7 +680,7 @@ function registerCommands(
 
 		// Step 4: also stop local child handle if we own one (clean up spawn handle).
 		if (daemon.running) {
-			daemon.stop();
+			await daemon.stop();
 		}
 
 		void cache.refresh();
