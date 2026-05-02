@@ -9,8 +9,11 @@ import {
 	looksLikeToken,
 	resolveToken,
 	buildAuthHeader,
+	resolveTokenAsync,
+	buildAuthHeaderAsync,
 	resolveTokenPath,
 	defaultTokenPath,
+	_clearTokenCacheForTests,
 } from '../auth-header';
 
 const BASE64URL = 'A'.repeat(MIN_TOKEN_LEN); // minimal valid shape
@@ -126,6 +129,95 @@ describe('auth-header', () => {
 			try {
 				fs.writeFileSync(p, BASE64URL);
 				assert.equal(buildAuthHeader(p), 'Bearer ' + BASE64URL);
+			} finally { cleanupTokenPath(p); }
+		});
+	});
+
+	describe('resolveTokenAsync (B-NEW-29 async cache)', () => {
+		beforeEach(() => {
+			// Reset the module-level cache between tests for isolation.
+			_clearTokenCacheForTests();
+		});
+
+		it('returns token from file on first call', async () => {
+			const p = freshTokenPath();
+			try {
+				fs.writeFileSync(p, BASE64URL);
+				const tok = await resolveTokenAsync(p);
+				assert.equal(tok, BASE64URL);
+			} finally { cleanupTokenPath(p); }
+		});
+
+		it('cache hit — re-read not triggered when mtime is stable', async () => {
+			const p = freshTokenPath();
+			let readCount = 0;
+			const realReadFile = fs.promises.readFile.bind(fs.promises);
+			(fs.promises as any).readFile = async (...args: unknown[]) => {
+				if (typeof args[0] === 'string' && (args[0] as string).includes('auth')) {
+					readCount++;
+				}
+				return realReadFile(...(args as Parameters<typeof fs.promises.readFile>));
+			};
+			try {
+				fs.writeFileSync(p, BASE64URL);
+				// First call loads from disk.
+				await resolveTokenAsync(p);
+				const countAfterFirst = readCount;
+				// Second call with same file (mtime unchanged) → cache hit, no re-read.
+				await resolveTokenAsync(p);
+				assert.equal(readCount, countAfterFirst, 'readFile must NOT be called again when mtime is stable');
+			} finally {
+				(fs.promises as any).readFile = realReadFile;
+				cleanupTokenPath(p);
+			}
+		});
+
+		it('token rotation invalidates cache — re-read on mtime change', async () => {
+			const p = freshTokenPath();
+			const tokenV1 = BASE64URL;
+			const tokenV2 = 'B'.repeat(MIN_TOKEN_LEN);
+			try {
+				fs.writeFileSync(p, tokenV1);
+				const v1 = await resolveTokenAsync(p);
+				assert.equal(v1, tokenV1);
+
+				// Simulate token rotation: overwrite file and advance mtime by
+				// touching it 10ms later. fs.utimesSync lets us set a future mtime
+				// without relying on wall-clock drift across the test.
+				const futureMs = Date.now() + 1000;
+				const futureSec = futureMs / 1000;
+				fs.writeFileSync(p, tokenV2);
+				fs.utimesSync(p, futureSec, futureSec);
+
+				// Next call should see different mtime → re-read → new token.
+				const v2 = await resolveTokenAsync(p);
+				assert.equal(v2, tokenV2, 'token rotation must invalidate cache and return new token (B-NEW-29)');
+			} finally { cleanupTokenPath(p); }
+		});
+
+		it('env var wins over file and does not pollute cache', async () => {
+			const p = freshTokenPath();
+			try {
+				fs.writeFileSync(p, BASE64URL);
+				process.env[ENV_VAR_NAME] = 'E'.repeat(MIN_TOKEN_LEN);
+				const tok = await resolveTokenAsync(p);
+				assert.equal(tok, 'E'.repeat(MIN_TOKEN_LEN), 'env var must win over file');
+				delete process.env[ENV_VAR_NAME];
+				// Cache should hold file content; verify by reading again without env.
+				const tok2 = await resolveTokenAsync(p);
+				assert.equal(tok2, BASE64URL, 'after env removed, file value returned');
+			} finally {
+				delete process.env[ENV_VAR_NAME];
+				cleanupTokenPath(p);
+			}
+		});
+
+		it('buildAuthHeaderAsync returns "Bearer <token>"', async () => {
+			const p = freshTokenPath();
+			try {
+				fs.writeFileSync(p, BASE64URL);
+				const hdr = await buildAuthHeaderAsync(p);
+				assert.equal(hdr, 'Bearer ' + BASE64URL);
 			} finally { cleanupTokenPath(p); }
 		});
 	});

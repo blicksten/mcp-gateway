@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { GatewayClient, GatewayError } from './gateway-client';
-import { buildAuthHeader, resolveTokenPath, AuthTokenError } from './auth-header';
+import { buildAuthHeader, buildAuthHeaderAsync, resolveTokenPath, AuthTokenError } from './auth-header';
 import { runKeepassImport, applyImportedCredentials, KeepassImportError } from './keepass-importer';
 import { BackendTreeProvider } from './backend-tree-provider';
 import { BackendItem } from './backend-item';
@@ -75,9 +75,12 @@ export function activate(
 	// (e.g. operator hot-swaps the binary) so users are re-notified.
 	let versionCompatChecked = false;
 	let lastCheckedDaemonVersion: string | undefined;
-	const authHeader = (): string | undefined => {
+	// B-NEW-29 (Phase 11): async provider uses the mtime-cached
+	// buildAuthHeaderAsync so fs.readFileSync no longer blocks the event loop
+	// on every REST call.
+	const authHeader = async (): Promise<string | undefined> => {
 		try {
-			return buildAuthHeader(tokenPath);
+			return await buildAuthHeaderAsync(tokenPath);
 		} catch (err) {
 			if (err instanceof AuthTokenError && !authErrorNotified) {
 				authErrorNotified = true;
@@ -161,7 +164,14 @@ export function activate(
 	// Phase 2.7: log viewer — SSE-based live logs per backend.
 	// T12A.9: share the same authHeader provider with GatewayClient so
 	// rotating the token (via Reload token action) affects both.
-	const logViewer = new LogViewer(apiUrl, { authHeader });
+	// LogViewer uses authHeader at SSE connection time only (rare event vs
+	// per-request). Its interface expects sync () => string|undefined, so
+	// provide a separate sync wrapper using the non-cached buildAuthHeader.
+	// The perf concern (B-NEW-29) targets the per-request REST path, not SSE.
+	const authHeaderSync = (): string | undefined => {
+		try { return buildAuthHeader(tokenPath); } catch { return undefined; }
+	};
+	const logViewer = new LogViewer(apiUrl, { authHeader: authHeaderSync });
 	context.subscriptions.push(logViewer);
 
 	// Phase 17.1: sidebar ServerDetail view removed. Details are shown on demand

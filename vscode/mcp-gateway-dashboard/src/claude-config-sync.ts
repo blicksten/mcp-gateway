@@ -108,10 +108,10 @@ export class ClaudeConfigSync implements vscode.Disposable {
 
 	// --- Public API (also exercised by tests) ---
 
-	buildDesired(servers: ServerView[]): Record<string, ManagedHttpEntry> {
+	async buildDesired(servers: ServerView[]): Promise<Record<string, ManagedHttpEntry>> {
 		const prefix = this.opts.namespacePrefix();
 		const baseUrl = this.opts.gatewayUrl().replace(/\/+$/, '');
-		const auth = safeCallAuth(this.opts.authHeader);
+		const auth = await safeCallAuth(this.opts.authHeader);
 		const out: Record<string, ManagedHttpEntry> = {};
 
 		// Aggregate-gateway entry (e.g. "mcp-gateway") — exposes the
@@ -145,7 +145,7 @@ export class ClaudeConfigSync implements vscode.Disposable {
 	}
 
 	async reconcile(servers: ServerView[]): Promise<void> {
-		await this.safeUpdateMcpServers(this.buildDesired(servers));
+		await this.safeUpdateMcpServers(await this.buildDesired(servers));
 	}
 
 	async cleanup(): Promise<void> {
@@ -153,7 +153,7 @@ export class ClaudeConfigSync implements vscode.Disposable {
 	}
 
 	async preview(servers: ServerView[]): Promise<PreviewDiff> {
-		const desired = this.buildDesired(servers);
+		const desired = await this.buildDesired(servers);
 		const { parsed } = await this.readWithRetry();
 		const existing = (parsed.mcpServers ?? {}) as Record<string, unknown>;
 		const currentManaged = this.pickManaged(existing);
@@ -417,9 +417,9 @@ function canonicalize(v: unknown): string {
 	return JSON.stringify(v);
 }
 
-function safeCallAuth(provider: AuthHeaderProvider): string | undefined {
+async function safeCallAuth(provider: AuthHeaderProvider): Promise<string | undefined> {
 	try {
-		return provider();
+		return await provider();
 	} catch {
 		return undefined;
 	}

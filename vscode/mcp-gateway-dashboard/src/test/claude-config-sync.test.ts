@@ -73,7 +73,7 @@ function makeOpts(overrides: Partial<{
 		namespacePrefix: () => prefix,
 		configPath: () => configPath,
 		gatewayUrl: () => gatewayUrl,
-		authHeader: () => {
+		authHeader: async () => {
 			if (throws) { throw new Error('auth missing'); }
 			return auth;
 		},
@@ -327,7 +327,7 @@ describe('claude-config-sync', () => {
 				namespacePrefix: () => 'mcp-gateway:',
 				configPath: () => cfg,
 				gatewayUrl: () => 'http://localhost:8765',
-				authHeader: () => 'Bearer T',
+				authHeader: async () => 'Bearer T',
 			};
 
 			const { cache, fire } = fakeCache();

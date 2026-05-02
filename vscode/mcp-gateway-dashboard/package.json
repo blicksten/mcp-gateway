@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.21.0",
+  "version": "1.22.0",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {

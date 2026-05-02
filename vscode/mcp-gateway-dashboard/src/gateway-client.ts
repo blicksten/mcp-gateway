@@ -16,8 +16,13 @@ export type GatewayErrorKind = 'connection' | 'http' | 'parse' | 'timeout' | 'au
  * Function that returns the "Authorization" header value on demand, or
  * undefined to skip auth (legacy path). Errors from the function are
  * surfaced to the caller verbatim.
+ *
+ * AUDIT B-NEW-29 (Phase 11): updated to async to support the mtime-cached
+ * resolveTokenAsync path. Callers that previously returned a string
+ * synchronously can still do so via `async () => 'Bearer ...'` or wrap in
+ * `Promise.resolve`.
  */
-export type AuthHeaderProvider = () => string | undefined;
+export type AuthHeaderProvider = () => Promise<string | undefined>;
 
 export class GatewayError extends Error {
 	constructor(
@@ -119,40 +124,43 @@ export class GatewayClient {
 
 	// --- Core HTTP ---
 
-	private request<T>(method: string, path: string, body?: unknown): Promise<T> {
-		return new Promise((resolve, reject) => {
-			const url = new URL(path, this.baseUrl);
+	// AUDIT B-NEW-29 (Phase 11): request is now async so it can await the
+	// async authHeader provider. Previously authHeader was called synchronously
+	// inside a new Promise() constructor, which meant fs.readFileSync blocked
+	// the event loop on every REST call. The async provider uses the mtime-
+	// cached resolveTokenAsync path instead.
+	private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+		const url = new URL(path, this.baseUrl);
 
-			const headers: Record<string, string> = {};
-			if (body !== undefined) {
-				headers['Content-Type'] = 'application/json';
-			}
+		const headers: Record<string, string> = {};
+		if (body !== undefined) {
+			headers['Content-Type'] = 'application/json';
+		}
 
-			// Attach Authorization header if the caller supplied a provider.
-			// Provider errors surface as GatewayError('auth', ...) so UI code
-			// can distinguish "no token" from network failures.
-			if (this.authHeader) {
-				try {
-					const hdr = this.authHeader();
-					if (hdr) { headers['Authorization'] = hdr; }
-				} catch (err) {
-					if (err instanceof AuthTokenError) {
-						reject(new GatewayError('auth', err.message));
-						return;
-					}
-					reject(err);
-					return;
+		// Attach Authorization header if the caller supplied a provider.
+		// Provider errors surface as GatewayError('auth', ...) so UI code
+		// can distinguish "no token" from network failures.
+		if (this.authHeader) {
+			try {
+				const hdr = await this.authHeader();
+				if (hdr) { headers['Authorization'] = hdr; }
+			} catch (err) {
+				if (err instanceof AuthTokenError) {
+					throw new GatewayError('auth', err.message);
 				}
+				throw err;
 			}
+		}
 
-			const options: http.RequestOptions = {
-				method,
-				hostname: url.hostname,
-				port: url.port,
-				path: url.pathname + url.search,
-				headers,
-				timeout: this.timeoutMs,
-			};
+		return new Promise<T>((resolve, reject) => {
+		const options: http.RequestOptions = {
+			method,
+			hostname: url.hostname,
+			port: url.port,
+			path: url.pathname + url.search,
+			headers,
+			timeout: this.timeoutMs,
+		};
 
 			const req = http.request(options, (res) => {
 				let data = '';
@@ -202,7 +210,7 @@ export class GatewayClient {
 				req.write(JSON.stringify(body));
 			}
 			req.end();
-		});
+		}); // closes new Promise<T>
 	}
 }
 
