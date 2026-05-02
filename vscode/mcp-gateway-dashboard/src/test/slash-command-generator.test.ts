@@ -219,6 +219,50 @@ describe('SlashCommandGenerator', () => {
 			assert.ok(fs.existsSync(orphanPath), 'orphan must be preserved during daemon outage');
 		});
 
+		// Phase 10 — B-NEW-26 atomic write
+		it('writes via tmp+rename (no truncated final file when rename fails)', async () => {
+			// Simulate a crash mid-write by intercepting fs.promises.rename
+			// to throw. The post-crash directory must contain neither the
+			// truncated `.md` nor a stranded `.md.tmp` (cleanup unlinks tmp on
+			// rename failure). Pre-Phase-10 the writeFile would have
+			// produced a truncated `alpha.md` directly.
+			const fsP = fs.promises as any;
+			const realRename = fsP.rename.bind(fsP);
+			let renameCalled = 0;
+			fsP.rename = async (..._args: unknown[]) => {
+				renameCalled++;
+				throw new Error('simulated mid-write crash');
+			};
+			try {
+				gen.enable();
+				fireRefresh(makePayload([makeServer('alpha', 'stopped')]));
+				fireRefresh(makePayload([makeServer('alpha', 'running')]));
+				await drain();
+
+				assert.equal(renameCalled, 1, 'rename was attempted (atomic-write path)');
+				const filePath = path.join(tmpDir, 'alpha.md');
+				const tmpPath = path.join(tmpDir, 'alpha.md.tmp');
+				assert.ok(!fs.existsSync(filePath), 'no truncated final file after rename failure (B-NEW-26)');
+				assert.ok(!fs.existsSync(tmpPath), 'tmp file unlinked on rename failure');
+			} finally {
+				fsP.rename = realRename;
+			}
+		});
+
+		it('cleanOrphans scrubs leftover .md.tmp from a prior crashed write', async () => {
+			// A prior crashed run left `dead.md.tmp` next to the live files.
+			// Next refresh must remove it as part of orphan cleanup.
+			const tmpOrphan = path.join(tmpDir, 'dead.md.tmp');
+			fs.writeFileSync(tmpOrphan, '<truncated>', 'utf8');
+
+			gen.enable();
+			fireRefresh(makePayload([makeServer('live', 'running')]));
+			fireRefresh(makePayload([makeServer('live', 'running')]));
+			await drain();
+
+			assert.ok(!fs.existsSync(tmpOrphan), 'leftover .md.tmp must be scrubbed');
+		});
+
 		it('no-workspace scenario returns null and generator no-ops', async () => {
 			mockConfigValues['mcpGateway.slashCommandsPath'] = '${workspaceFolder}/.claude/commands';
 			mockVscode.workspace.workspaceFolders = undefined;

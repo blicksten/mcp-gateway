@@ -341,8 +341,15 @@ describe('claude-config-sync', () => {
 
 				enabled = true;
 				fire({ servers: [srv('alpha')], lastRefreshFailed: false, gatewayHealth: null });
-				await new Promise((r) => setTimeout(r, 30));
-				servers = readJson(cfg).mcpServers as Record<string, unknown>;
+				// Poll until the queued async write lands. The original test used
+				// setTimeout(30ms) which is timing-flaky on loaded test machines —
+				// poll up to 1500ms to absorb fs.writeFile latency under contention.
+				const deadline = Date.now() + 1500;
+				while (Date.now() < deadline) {
+					servers = readJson(cfg).mcpServers as Record<string, unknown>;
+					if (servers['mcp-gateway:alpha']) { break; }
+					await new Promise((r) => setTimeout(r, 20));
+				}
 				assert.ok(servers['mcp-gateway:alpha'], 'must write once enabled flips on');
 			} finally {
 				sync.dispose();

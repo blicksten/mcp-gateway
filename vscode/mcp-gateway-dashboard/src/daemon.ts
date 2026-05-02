@@ -21,6 +21,14 @@ export class DaemonManager {
 	// starting=true (auto-start in flight) and returns false → daemon dead,
 	// UI reports "did not restart".
 	private restarting = false;
+	// AUDIT B-NEW-30 (Phase 10): one-shot flag set by restart() after a
+	// successful REST shutdown so the next start() bypasses the
+	// `client.getHealth()` fast-path. Without this, if a successor daemon
+	// (started externally between our shutdown and our spawn) responds to
+	// the health probe, start() returns false ("already running") even
+	// though we never spawned anything. Result: `daemon.running` is false,
+	// next stopDaemon hits the no-op path, and UI reports inconsistent state.
+	private skipHealthFastPathOnce = false;
 
 	constructor(
 		private readonly client: IGatewayClient,
@@ -41,12 +49,20 @@ export class DaemonManager {
 
 		try {
 			// Check if gateway is already reachable — no need to spawn.
-			try {
-				await this.client.getHealth();
-				logger.info('daemon', 'Gateway already running — skipping spawn.');
-				return false;
-			} catch {
-				// Gateway offline — proceed to spawn.
+			// B-NEW-30: restart() sets `skipHealthFastPathOnce` after a
+			// successful REST shutdown so we don't mistake a successor
+			// daemon (started externally between our shutdown and our
+			// spawn) for "already running". Consume the flag exactly once.
+			if (this.skipHealthFastPathOnce) {
+				this.skipHealthFastPathOnce = false;
+			} else {
+				try {
+					await this.client.getHealth();
+					logger.info('daemon', 'Gateway already running — skipping spawn.');
+					return false;
+				} catch {
+					// Gateway offline — proceed to spawn.
+				}
 			}
 
 			if (this.disposed) { return false; }
@@ -245,6 +261,9 @@ export class DaemonManager {
 			// 4. Spawn a fresh daemon. Temporarily release the restarting mutex
 			// so start() can acquire its own starting flag — otherwise start()
 			// guards would reject the call as "restart in progress".
+			// B-NEW-30: arm the skip-flag BEFORE start() so its health
+			// fast-path is bypassed exactly once on this respawn.
+			this.skipHealthFastPathOnce = true;
 			this.restarting = false;
 			return await this.start();
 		} finally {

@@ -101,6 +101,49 @@ describe('CredentialStore', () => {
 			await store.reconcile();
 			assert.deepEqual(store.listServers(), ['s1']);
 		});
+
+		// Phase 10 — B-NEW-24 chainIndexMutation race regression
+		it('serializes concurrent reconcile + storeEnvVar through the index chain (no lost updates)', async () => {
+			// Seed: server 'A' with one secret. Reconcile() will iterate it
+			// and call secrets.get; while it's awaiting the get, we slip a
+			// concurrent storeEnvVar('B', ...) onto the chain. Pre-Phase-10
+			// behaviour: both read the index at the same revision, then both
+			// writeBack — last writer wins, the other entry is lost.
+			// Post-Phase-10: chainIndexMutation serializes the two segments
+			// so storeEnvVar's _addToIndex sees A's reconciled index, then
+			// B is appended cleanly. Both servers must be present at end.
+			await store.storeEnvVar('A', 'KEY_A', 'val_a');
+
+			// Slow secrets.get so reconcile is mid-loop while storeEnvVar fires.
+			const realGet = ctx.secrets.get.bind(ctx.secrets);
+			let getCalls = 0;
+			(ctx.secrets as any).get = async (key: string) => {
+				getCalls++;
+				// First reconcile-driven get: pause so the concurrent
+				// storeEnvVar can attempt to enqueue an index mutation.
+				if (getCalls === 1) {
+					await new Promise((r) => setTimeout(r, 30));
+				}
+				return realGet(key);
+			};
+
+			try {
+				const reconcileP = store.reconcile();
+				// Yield so reconcile gets onto the chain first, then start storeEnvVar.
+				await new Promise((r) => setImmediate(r));
+				const storeP = store.storeEnvVar('B', 'KEY_B', 'val_b');
+				await Promise.all([reconcileP, storeP]);
+			} finally {
+				(ctx.secrets as any).get = realGet;
+			}
+
+			const servers = store.listServers().sort();
+			assert.deepEqual(servers, ['A', 'B'],
+				'both A and B must survive — chain must serialize reconcile + storeEnvVar (B-NEW-24)');
+			// Verify both secrets are still resolvable (index entries match real secrets).
+			assert.equal(await store.getEnvVar('A', 'KEY_A'), 'val_a');
+			assert.equal(await store.getEnvVar('B', 'KEY_B'), 'val_b');
+		});
 	});
 
 	describe('_validateServerName', () => {

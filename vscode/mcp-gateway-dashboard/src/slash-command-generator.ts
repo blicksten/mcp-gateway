@@ -178,11 +178,27 @@ export class SlashCommandGenerator implements vscode.Disposable {
 		if (!owned) { return; }
 
 		const content = await this.buildContent(server);
+		// AUDIT B-NEW-26 (Phase 10): atomic write via tmp+rename.
+		// Plain `fs.promises.writeFile` is non-atomic — Node writes incrementally
+		// then fsyncs. A VS Code crash or power loss mid-write can leave a
+		// truncated `.md` file whose first line is cut off, which then fails
+		// `isOwnedFile()` (the MARKER on line 1 is no longer present). Result:
+		// the partial file becomes a permanent orphan in `~/.claude/commands/`
+		// that we never overwrite. Fix: write to `${filePath}.tmp`, then
+		// atomically rename. POSIX guarantees atomic rename; on Windows,
+		// `fs.promises.rename` is atomic when source and dest are on the same
+		// volume (always true here — both under `dir`).
+		const tmpPath = `${filePath}.tmp`;
 		try {
 			await fs.promises.mkdir(dir, { recursive: true });
-			await fs.promises.writeFile(filePath, content, 'utf8');
+			await fs.promises.writeFile(tmpPath, content, 'utf8');
+			await fs.promises.rename(tmpPath, filePath);
 		} catch {
-			// Log failure without throwing — queued writes must not break the chain.
+			// Log failure without throwing — queued writes must not break the
+			// chain. Best-effort cleanup of the tmp file so we do not leave a
+			// `.md.tmp` orphan if rename failed mid-flight (cleanOrphans also
+			// scrubs these on next refresh).
+			try { await fs.promises.unlink(tmpPath); } catch { /* ENOENT etc. */ }
 		}
 	}
 
@@ -208,6 +224,13 @@ export class SlashCommandGenerator implements vscode.Disposable {
 		}
 
 		for (const file of files) {
+			// AUDIT B-NEW-26 (Phase 10): scrub `.md.tmp` orphans left by a
+			// crashed atomic-write. They cannot be valid generator output and
+			// will only confuse subsequent runs. Deleted unconditionally.
+			if (file.endsWith('.md.tmp')) {
+				try { await fs.promises.unlink(path.join(dir, file)); } catch { /* best-effort */ }
+				continue;
+			}
 			if (!file.endsWith('.md')) { continue; }
 			const name = file.slice(0, -3);
 			if (currentNames.has(name)) { continue; }

@@ -129,6 +129,54 @@ export function groupSapSystems(servers: ServerView[]): { sap: SapSystem[]; mcp:
 		}
 	}
 
+	// AUDIT B-NEW-27 (Phase 10): same-SID merge pass.
+	// When the daemon reports e.g. `vsp-DEV` (no client) and `sap-gui-DEV-100`
+	// (with client), the loop above produces two separate SapSystem entries
+	// keyed "DEV" and "DEV-100", each missing one component. The user sees
+	// them as unrelated rows even though they're the same SAP installation.
+	// Merge rule: when a bare-SID entry shares its SID with EXACTLY ONE
+	// client-bearing entry, fold the bare entry's vsp/gui into the
+	// client-bearing one (the more specific row wins per PLAN_FILE B-NEW-27).
+	// If multiple client variants exist for one SID, the merge is ambiguous
+	// and the bare entry stays as-is.
+	const bareBySid = new Map<string, string>(); // sid → bareKey
+	const clientCountBySid = new Map<string, number>();
+	const clientKeyBySid = new Map<string, string>(); // sid → single clientKey when count=1
+	for (const system of sapMap.values()) {
+		if (system.client === undefined) {
+			bareBySid.set(system.sid, system.key);
+		} else {
+			clientCountBySid.set(system.sid, (clientCountBySid.get(system.sid) ?? 0) + 1);
+			clientKeyBySid.set(system.sid, system.key);
+		}
+	}
+	for (const [sid, bareKey] of bareBySid) {
+		if (clientCountBySid.get(sid) !== 1) { continue; }
+		const clientKey = clientKeyBySid.get(sid);
+		if (!clientKey) { continue; }
+		const bare = sapMap.get(bareKey);
+		const client = sapMap.get(clientKey);
+		if (!bare || !client) { continue; }
+		// Conservative merge: only fold the bare entry into the client when
+		// the bare contributes a component the client is currently missing
+		// AND the bare itself does not have any component that overlaps with
+		// the client. The "vsp-DEV is a separate transport-mgmt server next
+		// to DEV-100 install" scenario must keep both rows distinct — see
+		// sap-detector.test.ts:118 'groups mixed list correctly'. Merging
+		// only happens for the asymmetric case the bug describes:
+		//   vsp-DEV (bare) + sap-gui-DEV-100 (client, no vsp) → single row
+		// or vsp-DEV-100 (client, no gui) + sap-gui-DEV (bare).
+		const bareAddsVsp = bare.vsp !== undefined && client.vsp === undefined;
+		const bareAddsGui = bare.gui !== undefined && client.gui === undefined;
+		const bareOverlapsVsp = bare.vsp !== undefined && client.vsp !== undefined;
+		const bareOverlapsGui = bare.gui !== undefined && client.gui !== undefined;
+		if (!(bareAddsVsp || bareAddsGui)) { continue; } // bare has nothing new to give
+		if (bareOverlapsVsp || bareOverlapsGui) { continue; } // distinct installs sharing SID
+		if (bareAddsVsp) { client.vsp = bare.vsp; }
+		if (bareAddsGui) { client.gui = bare.gui; }
+		sapMap.delete(bareKey);
+	}
+
 	// Compute composite status for each system.
 	const sap: SapSystem[] = [];
 	for (const system of sapMap.values()) {

@@ -9,14 +9,36 @@ const CURRENT_VERSION = 1;
  * Manages server credentials using VS Code SecretStorage (OS keychain).
  * Secrets are keyed as mcpGateway/{serverName}/env/{KEY} or .../header/{KEY}.
  * A non-secret index in globalState tracks which keys exist per server.
+ *
+ * AUDIT B-NEW-24 (Phase 10): all index read-modify-write segments serialize
+ * through `_indexChain`. Without this, `reconcile()` (which awaits many
+ * `secrets.get` calls between read and write) can race with concurrent
+ * `storeEnvVar`/`storeHeader` and lose updates — last writer wins, the
+ * other's mutation is dropped silently. The chain pattern mirrors
+ * `SlashCommandGenerator.lastTask` (slash-command-generator.ts:165): each
+ * mutation enqueues onto a tail Promise and the chain catches errors so a
+ * single failed mutation does not break the rest of the queue.
  */
 export class CredentialStore {
 	private readonly secrets: vscode.SecretStorage;
 	private readonly globalState: vscode.Memento;
+	private _indexChain: Promise<void> = Promise.resolve();
 
 	constructor(context: vscode.ExtensionContext) {
 		this.secrets = context.secrets;
 		this.globalState = context.globalState;
+	}
+
+	/**
+	 * Serialize an index-mutating task through `_indexChain`. The returned
+	 * Promise resolves with the task's value; the chain itself is updated
+	 * to wait for this task (with errors swallowed so one failed mutation
+	 * does not stall the rest).
+	 */
+	private _chainIndexMutation<T>(task: () => Promise<T>): Promise<T> {
+		const result = this._indexChain.then(task);
+		this._indexChain = result.then(() => undefined, () => undefined);
+		return result;
 	}
 
 	async storeEnvVar(server: string, key: string, value: string): Promise<void> {
@@ -24,14 +46,15 @@ export class CredentialStore {
 		this._validateKey(key, 'env');
 		// Index first — an orphaned index entry is prunable by reconcile().
 		// An orphaned secret (secret first, then crash) is unrecoverable.
-		await this._addToIndex(server, 'env', key);
+		// B-NEW-24: index mutation runs through the serialization chain.
+		await this._chainIndexMutation(() => this._addToIndex(server, 'env', key));
 		await this.secrets.store(`mcpGateway/${server}/env/${key}`, value);
 	}
 
 	async storeHeader(server: string, key: string, value: string): Promise<void> {
 		this._validateServerName(server);
 		this._validateKey(key, 'header');
-		await this._addToIndex(server, 'headers', key);
+		await this._chainIndexMutation(() => this._addToIndex(server, 'headers', key));
 		await this.secrets.store(`mcpGateway/${server}/header/${key}`, value);
 	}
 
@@ -76,10 +99,12 @@ export class CredentialStore {
 
 	async deleteServerCredentials(server: string): Promise<void> {
 		this._validateServerName(server);
-		const index = this._getIndex();
-		const entry = index.servers[server];
-
-		if (entry) {
+		// B-NEW-24: serialize the read-delete-write index segment so it can
+		// not interleave with a concurrent reconcile() that's mid-loop.
+		await this._chainIndexMutation(async () => {
+			const index = this._getIndex();
+			const entry = index.servers[server];
+			if (!entry) { return; }
 			for (const key of entry.env) {
 				await this.secrets.delete(`mcpGateway/${server}/env/${key}`);
 			}
@@ -88,7 +113,7 @@ export class CredentialStore {
 			}
 			delete index.servers[server];
 			await this._setIndex(index);
-		}
+		});
 	}
 
 	listServers(): string[] {
@@ -97,6 +122,16 @@ export class CredentialStore {
 	}
 
 	async reconcile(): Promise<void> {
+		// B-NEW-24: the entire reconcile pass — read index, await many
+		// secrets.get calls, write back the pruned index — runs as one
+		// serialized chain entry. This prevents an interleaving
+		// `storeEnvVar` from writing the index while we're still reading
+		// secrets, which would cause our final `_setIndex` to undo their
+		// addition.
+		await this._chainIndexMutation(() => this._reconcileLocked());
+	}
+
+	private async _reconcileLocked(): Promise<void> {
 		const index = this._getIndex();
 		let modified = false;
 

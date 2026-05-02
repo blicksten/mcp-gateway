@@ -137,6 +137,63 @@ describe('groupSapSystems', () => {
 		assert.equal(dev100!.gui?.name, 'sap-gui-DEV-100');
 	});
 
+	// Phase 10 — B-NEW-27 same-SID merge
+	it('merges bare-SID + single client-SID when only one client variant exists', () => {
+		// Setup: vsp-DEV (bare, vsp only) + sap-gui-DEV-100 (client, gui only).
+		// Pre-Phase-10 produced 2 entries (DEV with vsp, DEV-100 with gui).
+		// Phase 10 merge folds bare into the unique client entry → 1 entry
+		// "DEV-100" with vsp + gui from both sources. The more-specific
+		// (client-bearing) row wins.
+		const servers: ServerView[] = [
+			{ name: 'vsp-DEV', status: 'running', transport: 'stdio', restart_count: 0 },
+			{ name: 'sap-gui-DEV-100', status: 'running', transport: 'http', restart_count: 0 },
+		];
+		const { sap } = groupSapSystems(servers);
+		assert.equal(sap.length, 1, 'bare DEV should have folded into DEV-100');
+		const merged = sap[0];
+		assert.equal(merged.key, 'DEV-100');
+		assert.equal(merged.client, '100');
+		assert.equal(merged.vsp?.name, 'vsp-DEV', 'merged vsp comes from the bare entry');
+		assert.equal(merged.gui?.name, 'sap-gui-DEV-100', 'gui stays in the client entry');
+	});
+
+	it('does NOT merge when bare entry overlaps with the client entry (distinct installs sharing SID)', () => {
+		// Setup: vsp-DEV (bare, vsp) + vsp-DEV-100 + sap-gui-DEV-100 (client, vsp+gui).
+		// The bare entry has vsp; the client entry already has vsp.
+		// Overlap → keep both rows distinct (they are independent installs).
+		// This is the canary the original 'groups mixed list correctly' test
+		// pins down — Phase 10 merge must not regress it.
+		const servers: ServerView[] = [
+			{ name: 'vsp-DEV', status: 'running', transport: 'stdio', restart_count: 0 },
+			{ name: 'vsp-DEV-100', status: 'running', transport: 'stdio', restart_count: 0 },
+			{ name: 'sap-gui-DEV-100', status: 'running', transport: 'http', restart_count: 0 },
+		];
+		const { sap } = groupSapSystems(servers);
+		assert.equal(sap.length, 2, 'distinct installs sharing SID stay separate');
+		const dev = sap.find((s) => s.key === 'DEV');
+		const dev100 = sap.find((s) => s.key === 'DEV-100');
+		assert.ok(dev, 'bare DEV row preserved');
+		assert.ok(dev100, 'client DEV-100 row preserved');
+		assert.equal(dev!.vsp?.name, 'vsp-DEV');
+		assert.equal(dev100!.vsp?.name, 'vsp-DEV-100');
+		assert.equal(dev100!.gui?.name, 'sap-gui-DEV-100');
+	});
+
+	it('does NOT merge when multiple client variants exist for one SID (ambiguous)', () => {
+		// Setup: vsp-DEV (bare) + sap-gui-DEV-100 + sap-gui-DEV-200.
+		// Two client entries → ambiguous which one absorbs bare → leave bare alone.
+		const servers: ServerView[] = [
+			{ name: 'vsp-DEV', status: 'running', transport: 'stdio', restart_count: 0 },
+			{ name: 'sap-gui-DEV-100', status: 'running', transport: 'http', restart_count: 0 },
+			{ name: 'sap-gui-DEV-200', status: 'running', transport: 'http', restart_count: 0 },
+		];
+		const { sap } = groupSapSystems(servers);
+		assert.equal(sap.length, 3, 'all three rows preserved on ambiguity');
+		assert.ok(sap.find((s) => s.key === 'DEV'));
+		assert.ok(sap.find((s) => s.key === 'DEV-100'));
+		assert.ok(sap.find((s) => s.key === 'DEV-200'));
+	});
+
 	it('returns only MCP servers when no SAP', () => {
 		const servers: ServerView[] = [
 			{ name: 'a', status: 'running', transport: 'stdio', restart_count: 0 },
