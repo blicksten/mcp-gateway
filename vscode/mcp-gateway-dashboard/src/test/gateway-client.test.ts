@@ -55,7 +55,7 @@ after((done) => {
 describe('GatewayClient', () => {
 	describe('getHealth', () => {
 		it('returns health response', async () => {
-			addRoute('GET', '/api/health', () => ({
+			addRoute('GET', '/api/v1/health', () => ({
 				status: 200,
 				body: { status: 'ok', servers: 3, running: 2 } satisfies HealthResponse,
 			}));
@@ -72,7 +72,7 @@ describe('GatewayClient', () => {
 				{ name: 'ctx7', status: 'running', transport: 'http', restart_count: 0, tools: [] },
 				{ name: 'orch', status: 'stopped', transport: 'stdio', restart_count: 1 },
 			];
-			addRoute('GET', '/api/servers', () => ({ status: 200, body: servers }));
+			addRoute('GET', '/api/v1/servers', () => ({ status: 200, body: servers }));
 			const result = await client.listServers();
 			assert.strictEqual(result.length, 2);
 			assert.strictEqual(result[0].name, 'ctx7');
@@ -83,13 +83,13 @@ describe('GatewayClient', () => {
 	describe('getServer', () => {
 		it('returns single server', async () => {
 			const sv: ServerView = { name: 'ctx7', status: 'running', transport: 'http', restart_count: 0 };
-			addRoute('GET', '/api/servers/ctx7', () => ({ status: 200, body: sv }));
+			addRoute('GET', '/api/v1/servers/ctx7', () => ({ status: 200, body: sv }));
 			const result = await client.getServer('ctx7');
 			assert.strictEqual(result.name, 'ctx7');
 		});
 
 		it('throws on 404', async () => {
-			addRoute('GET', '/api/servers/missing', () => ({
+			addRoute('GET', '/api/v1/servers/missing', () => ({
 				status: 404, body: { error: 'server "missing" not found' },
 			}));
 			await assert.rejects(
@@ -105,7 +105,7 @@ describe('GatewayClient', () => {
 
 	describe('addServer', () => {
 		it('returns status response (not ServerView)', async () => {
-			addRoute('POST', '/api/servers', (_req, body) => {
+			addRoute('POST', '/api/v1/servers', (_req, body) => {
 				const parsed = JSON.parse(body);
 				assert.strictEqual(parsed.name, 'new-srv');
 				assert.strictEqual(parsed.config.url, 'http://localhost:3000/mcp');
@@ -118,7 +118,7 @@ describe('GatewayClient', () => {
 
 	describe('removeServer', () => {
 		it('returns status response', async () => {
-			addRoute('DELETE', '/api/servers/old-srv', () => ({ status: 200, body: { status: 'removed' } }));
+			addRoute('DELETE', '/api/v1/servers/old-srv', () => ({ status: 200, body: { status: 'removed' } }));
 			const result = await client.removeServer('old-srv');
 			assert.strictEqual(result.status, 'removed');
 		});
@@ -126,7 +126,7 @@ describe('GatewayClient', () => {
 
 	describe('patchServer', () => {
 		it('sends disabled flag', async () => {
-			addRoute('PATCH', '/api/servers/ctx7', (_req, body) => {
+			addRoute('PATCH', '/api/v1/servers/ctx7', (_req, body) => {
 				const parsed = JSON.parse(body);
 				assert.strictEqual(parsed.disabled, true);
 				return { status: 200, body: { status: 'updated' } };
@@ -138,13 +138,13 @@ describe('GatewayClient', () => {
 
 	describe('restartServer', () => {
 		it('returns status on success', async () => {
-			addRoute('POST', '/api/servers/ctx7/restart', () => ({ status: 200, body: { status: 'restarted' } }));
+			addRoute('POST', '/api/v1/servers/ctx7/restart', () => ({ status: 200, body: { status: 'restarted' } }));
 			const result = await client.restartServer('ctx7');
 			assert.strictEqual(result.status, 'restarted');
 		});
 
 		it('provides friendly message on not-found (SP-2)', async () => {
-			addRoute('POST', '/api/servers/gone/restart', () => ({
+			addRoute('POST', '/api/v1/servers/gone/restart', () => ({
 				status: 500, body: { error: 'server "gone" not found' },
 			}));
 			await assert.rejects(
@@ -159,7 +159,7 @@ describe('GatewayClient', () => {
 
 	describe('resetCircuit', () => {
 		it('returns status on success', async () => {
-			addRoute('POST', '/api/servers/ctx7/reset-circuit', () => ({
+			addRoute('POST', '/api/v1/servers/ctx7/reset-circuit', () => ({
 				status: 200, body: { status: 'circuit reset' },
 			}));
 			const result = await client.resetCircuit('ctx7');
@@ -167,7 +167,7 @@ describe('GatewayClient', () => {
 		});
 
 		it('handles 503 when monitor unavailable (SP-5)', async () => {
-			addRoute('POST', '/api/servers/ctx7/reset-circuit', () => ({
+			addRoute('POST', '/api/v1/servers/ctx7/reset-circuit', () => ({
 				status: 503, body: { error: 'health monitor not available' },
 			}));
 			await assert.rejects(
@@ -186,7 +186,7 @@ describe('GatewayClient', () => {
 			const tools: ToolInfo[] = [
 				{ name: 'ctx7__query-docs', description: 'Query docs', server: 'ctx7' },
 			];
-			addRoute('GET', '/api/tools', () => ({ status: 200, body: tools }));
+			addRoute('GET', '/api/v1/tools', () => ({ status: 200, body: tools }));
 			const result = await client.listTools();
 			assert.strictEqual(result.length, 1);
 			assert.strictEqual(result[0].server, 'ctx7');
@@ -195,7 +195,7 @@ describe('GatewayClient', () => {
 
 	describe('callTool', () => {
 		it('sends tool call and returns result', async () => {
-			addRoute('POST', '/api/servers/ctx7/call', (_req, body) => {
+			addRoute('POST', '/api/v1/servers/ctx7/call', (_req, body) => {
 				const parsed = JSON.parse(body);
 				assert.strictEqual(parsed.tool, 'query-docs');
 				return {
@@ -209,7 +209,7 @@ describe('GatewayClient', () => {
 		});
 
 		it('sends tool call without arguments (F-03)', async () => {
-			addRoute('POST', '/api/servers/ctx7/call', (_req, body) => {
+			addRoute('POST', '/api/v1/servers/ctx7/call', (_req, body) => {
 				const parsed = JSON.parse(body);
 				assert.strictEqual(parsed.tool, 'ping');
 				assert.strictEqual(parsed.arguments, undefined);
@@ -226,7 +226,7 @@ describe('GatewayClient', () => {
 
 	describe('URL encoding (F-04)', () => {
 		it('encodes server names with special characters', async () => {
-			addRoute('GET', '/api/servers/my%20server', () => ({
+			addRoute('GET', '/api/v1/servers/my%20server', () => ({
 				status: 200,
 				body: { name: 'my server', status: 'stopped', transport: 'stdio', restart_count: 0 },
 			}));

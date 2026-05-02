@@ -102,7 +102,7 @@ describe('LogViewer', () => {
 
 	describe('SSE parsing', () => {
 		it('receives and displays log lines from SSE stream', async () => {
-			sseRoutes.set('/api/servers/test-backend/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/test-backend/logs', (_req, res) => {
 				res.writeHead(200, {
 					'Content-Type': 'text/event-stream',
 					'Cache-Control': 'no-cache',
@@ -129,7 +129,7 @@ describe('LogViewer', () => {
 		});
 
 		it('handles data: with no space after colon', async () => {
-			sseRoutes.set('/api/servers/compact/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/compact/logs', (_req, res) => {
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write('data:no-space\n\n');
 			});
@@ -144,7 +144,7 @@ describe('LogViewer', () => {
 		});
 
 		it('handles multi-line SSE frames', async () => {
-			sseRoutes.set('/api/servers/multi/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/multi/logs', (_req, res) => {
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write('data: first\ndata: second\n\n');
 			});
@@ -160,7 +160,7 @@ describe('LogViewer', () => {
 		});
 
 		it('handles chunked data arriving in fragments', async () => {
-			sseRoutes.set('/api/servers/chunked/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/chunked/logs', (_req, res) => {
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write('data: hel');
 				setTimeout(() => {
@@ -178,7 +178,7 @@ describe('LogViewer', () => {
 		});
 
 		it('ignores non-data SSE fields', async () => {
-			sseRoutes.set('/api/servers/fields/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/fields/logs', (_req, res) => {
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write('event: log\nid: 42\ndata: actual data\nretry: 5000\n\n');
 			});
@@ -218,7 +218,7 @@ describe('LogViewer', () => {
 	describe('reconnect logic', () => {
 		it('reconnects on stream end', async () => {
 			let connectCount = 0;
-			sseRoutes.set('/api/servers/flaky/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/flaky/logs', (_req, res) => {
 				connectCount++;
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write(`data: connect-${connectCount}\n\n`);
@@ -239,7 +239,7 @@ describe('LogViewer', () => {
 
 		it('reconnects on non-200 HTTP status', async () => {
 			let connectCount = 0;
-			sseRoutes.set('/api/servers/error-srv/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/error-srv/logs', (_req, res) => {
 				connectCount++;
 				if (connectCount === 1) {
 					res.writeHead(500, { 'Content-Type': 'text/plain' });
@@ -262,7 +262,7 @@ describe('LogViewer', () => {
 
 		it('resets retry counter on successful connection', async () => {
 			let connectCount = 0;
-			sseRoutes.set('/api/servers/reset-retry/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/reset-retry/logs', (_req, res) => {
 				connectCount++;
 				if (connectCount <= 2) {
 					// First two: fail with 500
@@ -292,7 +292,7 @@ describe('LogViewer', () => {
 
 		it('gives up after maxRetries', async () => {
 			let connectCount = 0;
-			sseRoutes.set('/api/servers/hopeless/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/hopeless/logs', (_req, res) => {
 				connectCount++;
 				res.writeHead(500);
 				res.end('fail');
@@ -320,7 +320,7 @@ describe('LogViewer', () => {
 
 			// Check messages contain increasing delay values
 			let connectCount = 0;
-			sseRoutes.set('/api/servers/backoff/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/backoff/logs', (_req, res) => {
 				connectCount++;
 				res.writeHead(500);
 				res.end('fail');
@@ -342,7 +342,7 @@ describe('LogViewer', () => {
 
 	describe('show / close / isConnected', () => {
 		it('show() creates OutputChannel and connects', async () => {
-			sseRoutes.set('/api/servers/srv1/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/srv1/logs', (_req, res) => {
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write('data: hello\n\n');
 			});
@@ -359,7 +359,7 @@ describe('LogViewer', () => {
 		});
 
 		it('show() on already-connected server reuses channel (no duplicate)', async () => {
-			sseRoutes.set('/api/servers/reuse/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/reuse/logs', (_req, res) => {
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write('data: initial\n\n');
 			});
@@ -374,7 +374,7 @@ describe('LogViewer', () => {
 		});
 
 		it('close() stops the stream and disposes channel', async () => {
-			sseRoutes.set('/api/servers/closeme/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/closeme/logs', (_req, res) => {
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write('data: before-close\n\n');
 			});
@@ -406,7 +406,7 @@ describe('LogViewer', () => {
 
 		it('show() after close() creates a fresh connection', async () => {
 			let connectCount = 0;
-			sseRoutes.set('/api/servers/reopen/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/reopen/logs', (_req, res) => {
 				connectCount++;
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write(`data: conn-${connectCount}\n\n`);
@@ -427,11 +427,11 @@ describe('LogViewer', () => {
 
 	describe('multiple servers', () => {
 		it('maintains separate channels per server', async () => {
-			sseRoutes.set('/api/servers/alpha/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/alpha/logs', (_req, res) => {
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write('data: from-alpha\n\n');
 			});
-			sseRoutes.set('/api/servers/beta/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/beta/logs', (_req, res) => {
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write('data: from-beta\n\n');
 			});
@@ -453,11 +453,11 @@ describe('LogViewer', () => {
 		});
 
 		it('closing one server does not affect others', async () => {
-			sseRoutes.set('/api/servers/keep/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/keep/logs', (_req, res) => {
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write('data: kept\n\n');
 			});
-			sseRoutes.set('/api/servers/drop/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/drop/logs', (_req, res) => {
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write('data: dropped\n\n');
 			});
@@ -480,11 +480,11 @@ describe('LogViewer', () => {
 
 	describe('dispose', () => {
 		it('disposes all channels and closes connections', async () => {
-			sseRoutes.set('/api/servers/d1/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/d1/logs', (_req, res) => {
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write('data: d1\n\n');
 			});
-			sseRoutes.set('/api/servers/d2/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/d2/logs', (_req, res) => {
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write('data: d2\n\n');
 			});
@@ -518,7 +518,7 @@ describe('LogViewer', () => {
 
 		it('no data reaches channel after dispose', async () => {
 			let res_: http.ServerResponse | undefined;
-			sseRoutes.set('/api/servers/post-dispose/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/post-dispose/logs', (_req, res) => {
 				res_ = res;
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write('data: before\n\n');
@@ -563,7 +563,7 @@ describe('LogViewer', () => {
 	describe('connection timeout', () => {
 		it('reconnects on connection timeout (single reconnect, no double-fire)', async () => {
 			let connectCount = 0;
-			sseRoutes.set('/api/servers/slow/logs', (_req, res) => {
+			sseRoutes.set('/api/v1/servers/slow/logs', (_req, res) => {
 				connectCount++;
 				if (connectCount === 1) {
 					// First connection: never respond — let timeout fire.
@@ -594,7 +594,7 @@ describe('LogViewer', () => {
 	describe('URL encoding', () => {
 		it('encodes server names with special characters', async () => {
 			const specialName = 'my server/test';
-			const encodedPath = `/api/servers/${encodeURIComponent(specialName)}/logs`;
+			const encodedPath = `/api/v1/servers/${encodeURIComponent(specialName)}/logs`;
 			sseRoutes.set(encodedPath, (_req, res) => {
 				res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 				res.write('data: special\n\n');
