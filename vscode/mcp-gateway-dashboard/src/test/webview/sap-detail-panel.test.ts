@@ -1,7 +1,7 @@
 import '../mock-vscode';
 import { strict as assert } from 'node:assert';
 import { mockWebviewPanels, resetMockState, getRegisteredCommands } from '../mock-vscode';
-import { SapDetailPanel } from '../../webview/sap-detail-panel';
+import { SapDetailPanel, REMOVED_AUTO_CLOSE_MS } from '../../webview/sap-detail-panel';
 import { MockSecretStorage, MockMemento } from '../mock-vscode';
 import { CredentialStore } from '../../credential-store';
 import type { SapSystem } from '../../sap-detector';
@@ -198,5 +198,88 @@ describe('SapDetailPanel', () => {
 
 		assert.ok(html2.includes('degraded'));
 		assert.notEqual(html1, html2);
+	});
+
+	// Phase 8 (B-NEW-20) — SAP detail-panel reconcile when system is removed.
+	describe('showRemoved / updateAll reconcile (B-NEW-20)', () => {
+		it('updateAll() with empty list switches the panel to a removed banner', async () => {
+			await SapDetailPanel.createOrShow(ctx.extensionUri as any, testSystem, credStore, client as any);
+			const before = mockWebviewPanels[0].webview.html;
+			assert.ok(before.includes('DEV-100'));
+
+			await SapDetailPanel.updateAll([]);
+
+			const after = mockWebviewPanels[0].webview.html;
+			assert.ok(after.includes('was removed'),
+				`expected SAP removed banner — actual: ${after.slice(0, 200)}`);
+			assert.ok(after.includes('DEV-100'),
+				'banner should name the removed SAP system key');
+			assert.ok(after.includes('SAP system'),
+				'banner should label this as a SAP system removal');
+			assert.ok(after.includes('disabled'),
+				'action buttons in the removed banner must be disabled');
+		});
+
+		it('showRemoved() is idempotent', async () => {
+			const panel = await SapDetailPanel.createOrShow(
+				ctx.extensionUri as any, testSystem, credStore, client as any);
+			panel.showRemoved();
+			const first = mockWebviewPanels[0].webview.html;
+			panel.showRemoved();
+			const second = mockWebviewPanels[0].webview.html;
+			assert.equal(first, second);
+		});
+
+		it('update() after showRemoved() is a no-op', async () => {
+			const panel = await SapDetailPanel.createOrShow(
+				ctx.extensionUri as any, testSystem, credStore, client as any);
+			panel.showRemoved();
+			const removedHtml = mockWebviewPanels[0].webview.html;
+			await panel.update(testSystem);
+			assert.equal(mockWebviewPanels[0].webview.html, removedHtml);
+		});
+
+		it('auto-disposes panel after REMOVED_AUTO_CLOSE_MS', async () => {
+			const originalSetTimeout = globalThis.setTimeout;
+			const scheduled: Array<{ ms: number; cb: () => void }> = [];
+			(globalThis as any).setTimeout = (cb: () => void, ms: number): NodeJS.Timeout => {
+				scheduled.push({ ms, cb });
+				return { ref: () => undefined, unref: () => undefined } as any;
+			};
+			try {
+				const panel = await SapDetailPanel.createOrShow(
+					ctx.extensionUri as any, testSystem, credStore, client as any);
+				panel.showRemoved();
+				assert.equal(scheduled.length, 1);
+				assert.equal(scheduled[0].ms, REMOVED_AUTO_CLOSE_MS);
+
+				scheduled[0].cb();
+				assert.equal(mockWebviewPanels[0].disposed, true);
+			} finally {
+				globalThis.setTimeout = originalSetTimeout;
+			}
+		});
+
+		it('reconciles only missing panels — present panel stays, missing panel goes to banner', async () => {
+			const other: SapSystem = {
+				key: 'QAS-200',
+				sid: 'QAS',
+				client: '200',
+				vsp: { name: 'vsp-QAS-200', status: 'running', transport: 'stdio', restart_count: 0 },
+				status: 'running',
+			};
+			await SapDetailPanel.createOrShow(ctx.extensionUri as any, testSystem, credStore, client as any);
+			await SapDetailPanel.createOrShow(ctx.extensionUri as any, other, credStore, client as any);
+			assert.equal(mockWebviewPanels.length, 2);
+
+			await SapDetailPanel.updateAll([testSystem]);
+
+			const otherPanel = mockWebviewPanels.find((p) => p.title === 'SAP QAS-200');
+			const testPanel = mockWebviewPanels.find((p) => p.title === 'SAP DEV-100');
+			assert.ok(otherPanel);
+			assert.ok(testPanel);
+			assert.ok(otherPanel.webview.html.includes('was removed'));
+			assert.ok(!testPanel.webview.html.includes('was removed'));
+		});
 	});
 });

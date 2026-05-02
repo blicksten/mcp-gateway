@@ -36,6 +36,52 @@ interface SapDetailData {
 	cspSource: string;
 }
 
+/** Build "removed" banner HTML for a detail panel whose underlying entity
+ *  (server or SAP system) is no longer present in the latest cache refresh.
+ *  Phase 8 (B-NEW-20) — replaces the previous-state HTML so action buttons
+ *  cannot fire 500s against a removed backend; auto-close is driven by the
+ *  caller (panel.dispose() after a short grace period). */
+export function buildRemovedHtml(
+	displayName: string,
+	kind: 'server' | 'sap',
+	nonce: string,
+	cspSource: string,
+): string {
+	// Use `kind` directly for the heading word so a future change to escapeHtml
+	// (e.g. different quote handling) cannot silently break the comparison.
+	const heading = kind === 'sap' ? 'SAP system' : 'Server';
+	const labelLower = kind === 'sap' ? 'SAP system' : 'server';
+	const safeName = escapeHtml(displayName);
+	const safeLabelLower = escapeHtml(labelLower);
+	return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src ${cspSource} 'nonce-${nonce}'; script-src 'none';">
+<title>${safeName} — removed</title>
+<style nonce="${nonce}">
+body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); padding: 16px; margin: 0; }
+.banner { padding: 12px 16px; border-radius: 3px; background: var(--vscode-inputValidation-warningBackground, var(--vscode-editorWarning-background)); color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground)); border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-foreground)); }
+.banner h1 { font-size: 1.1em; margin: 0 0 6px 0; }
+.banner p { margin: 0; font-size: 0.9em; color: var(--vscode-descriptionForeground); }
+.actions { margin-top: 12px; display: flex; gap: 6px; flex-wrap: wrap; }
+button { padding: 4px 12px; border: 1px solid var(--vscode-button-border, var(--vscode-panel-border)); background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-radius: 3px; font-family: inherit; opacity: 0.5; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<div class="banner" role="alert" aria-live="polite">
+<h1>${heading} "${safeName}" was removed.</h1>
+<p>This panel will close automatically. Action buttons are disabled because the ${safeLabelLower} no longer exists on the daemon.</p>
+</div>
+<div class="actions" aria-label="Disabled actions">
+<button disabled aria-disabled="true">Restart</button>
+<button disabled aria-disabled="true">Show Logs</button>
+</div>
+</body>
+</html>`;
+}
+
 /** Build empty-state HTML for the sidebar detail view (no server selected). */
 export function buildDetailPlaceholderHtml(nonce: string, cspSource: string): string {
 	return `<!DOCTYPE html>

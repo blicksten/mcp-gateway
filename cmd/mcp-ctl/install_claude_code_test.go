@@ -253,10 +253,40 @@ func TestInstallClaudeCode_CheckOnly_MissingPluginReturnsExit3(t *testing.T) {
 	assert.Equal(t, installExitDriftUnresolved, extractExitCode(err))
 }
 
-func TestInstallClaudeCode_PluginSyncConflictTriggersRollback(t *testing.T) {
-	// Skip on Windows because the apply-script existence check short-
-	// circuits on any path — but we want this test to get past the plugin-
-	// sync call. Windows path with /bin/sh missing already tested elsewhere.
+// TestInstallClaudeCode_PluginSyncConflictIsNonFatal documents the
+// REVIEW-4B-F1 contract (see install_claude_code.go:39-48): when the
+// gateway returns HTTP 409 from /plugin-sync, the install MUST continue
+// (the plugin is on disk; the operator just needs to restart the daemon
+// once). Rolling back a successful install over a recoverable warning is
+// worse UX than leaving the plugin in place with a hint. This test pins
+// that contract so a regression to the older "409 = rollback" behaviour
+// would fail in CI.
+func TestInstallClaudeCode_PluginSyncConflictIsNonFatal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("apply-script existence check blocks this path on Windows; covered on POSIX")
+	}
+
+	fr := newFakeRunner()
+	fr.respond("claude --version", &fakeCommand{})
+	fr.respond("claude plugin marketplace add", &fakeCommand{})
+	fr.respond("claude plugin install", &fakeCommand{})
+	fr.respond("claude plugin uninstall", &fakeCommand{}) // must NOT be called
+	// /plugin-sync returns 409 — non-fatal per REVIEW-4B-F1.
+	srv := mockGateway(t, true, false)
+	ins, cmd := testInstaller(t, fr, srv)
+
+	err := ins.run(cmd, installOpts{Mode: "proxy", Scope: "workspace", NoPatch: true})
+	assert.NoError(t, err, "409 from plugin-sync must be a non-fatal warning, not a rollback trigger")
+	assert.Equal(t, 0, fr.callsFor("claude plugin uninstall"),
+		"rollback must NOT fire for a recoverable 409 from plugin-sync")
+}
+
+// TestInstallClaudeCode_PluginSyncFatalErrorTriggersRollback covers the
+// rollback path that was historically wired through the 409 case before
+// REVIEW-4B-F1 narrowed the contract. Any non-OK, non-409 response
+// (here: HTTP 500) is still treated as a hard failure and must trigger
+// `claude plugin uninstall` via the rollback stack.
+func TestInstallClaudeCode_PluginSyncFatalErrorTriggersRollback(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("apply-script existence check blocks this path on Windows; covered on POSIX")
 	}
@@ -266,15 +296,29 @@ func TestInstallClaudeCode_PluginSyncConflictTriggersRollback(t *testing.T) {
 	fr.respond("claude plugin marketplace add", &fakeCommand{})
 	fr.respond("claude plugin install", &fakeCommand{})
 	fr.respond("claude plugin uninstall", &fakeCommand{}) // expected rollback step
-	// /plugin-sync returns 409 — triggers rollback.
-	srv := mockGateway(t, true, false)
+
+	// Inline httptest server returning HTTP 500 from plugin-sync — health OK
+	// so the early reachability probe passes, then plugin-sync trips the
+	// rollback path.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/health":
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{"status":"ok"}`)
+		case "/api/v1/claude-code/plugin-sync":
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
 	ins, cmd := testInstaller(t, fr, srv)
 
 	err := ins.run(cmd, installOpts{Mode: "proxy", Scope: "workspace", NoPatch: true})
 	require.Error(t, err)
 	assert.Equal(t, installExitRollback, extractExitCode(err))
 	assert.Equal(t, 1, fr.callsFor("claude plugin uninstall"),
-		"rollback must invoke `claude plugin uninstall` once")
+		"rollback must invoke `claude plugin uninstall` once on a fatal plugin-sync error")
 }
 
 func TestInstallClaudeCode_NoPatchFlagSkipsApplyScript(t *testing.T) {

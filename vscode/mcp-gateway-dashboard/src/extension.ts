@@ -369,6 +369,51 @@ export function activate(
 			if (enabled) { slashGen.enable(); } else { slashGen.disable(); }
 		}
 	}));
+
+	// Phase 8 (B-NEW-22) — Reload-required settings: these are read once on
+	// activation and not re-resolved on every poll, so flipping them in
+	// settings.json has no effect until the window is reloaded. Surface a
+	// one-shot informational toast with a Reload Window action so the user
+	// is not left wondering why a setting change appeared to do nothing.
+	// Settings already handled by dedicated watchers (keepassEnabled,
+	// sapSystemsEnabled, slashCommandsEnabled, claudeConfigSync.*) are NOT
+	// included here — they apply live and need no reload.
+	const RELOAD_REQUIRED_KEYS: readonly string[] = [
+		'mcpGateway.apiUrl',
+		'mcpGateway.pollInterval',
+		'mcpGateway.autoStart',
+		'mcpGateway.daemonPath',
+		'mcpGateway.authTokenPath',
+		'mcpGateway.mcpCtlPath',
+	];
+	let reloadPromptShown = false;
+	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
+		// Collect ALL affected reload-required keys so a bulk settings.json
+		// edit names every changed key in the toast — not just the first one
+		// in `RELOAD_REQUIRED_KEYS` order (PAL fallback finding F-2).
+		const changedKeys = RELOAD_REQUIRED_KEYS.filter((k) => e.affectsConfiguration(k));
+		if (changedKeys.length === 0 || reloadPromptShown) { return; }
+		reloadPromptShown = true;
+		const prefix = 'mcpGateway.';
+		const shortNames = changedKeys.map((k) =>
+			k.startsWith(prefix) ? k.slice(prefix.length) : k);
+		const label = shortNames.length === 1
+			? `setting "${shortNames[0]}"`
+			: `settings ${shortNames.map((n) => `"${n}"`).join(', ')}`;
+		void vscode.window.showInformationMessage(
+			`MCP Gateway: ${label} changed — reload the window to apply.`,
+			'Reload Window',
+		).then((pick) => {
+			if (pick === 'Reload Window') {
+				void vscode.commands.executeCommand('workbench.action.reloadWindow');
+			} else {
+				// User dismissed without reloading — re-arm so a later edit
+				// re-prompts (otherwise a single dismissed toast silences all
+				// future setting changes for the lifetime of the window).
+				reloadPromptShown = false;
+			}
+		});
+	}));
 }
 
 export function deactivate(): void {

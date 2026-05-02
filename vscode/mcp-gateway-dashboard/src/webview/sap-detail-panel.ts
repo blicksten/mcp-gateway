@@ -3,12 +3,16 @@ import * as vscode from 'vscode';
 import type { SapSystem } from '../sap-detector';
 import type { CredentialStore } from '../credential-store';
 import type { IGatewayClient } from '../extension';
-import { buildSapDetailHtml } from './html-builder';
+import { buildSapDetailHtml, buildRemovedHtml } from './html-builder';
 import { logger } from '../logger';
 
 const ALLOWED_ACTIONS = new Set(['restart', 'showLogs']);
 const ALLOWED_COMPONENTS = new Set(['vsp', 'gui']);
 const SERVER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+
+/** Auto-close grace period after showRemoved() (B-NEW-20). Mirrors the value
+ *  in server-detail-panel.ts; exported for test assertions. */
+export const REMOVED_AUTO_CLOSE_MS = 3_000;
 
 export class SapDetailPanel {
 	private static readonly panels = new Map<string, SapDetailPanel>();
@@ -20,6 +24,10 @@ export class SapDetailPanel {
 	private disposed = false;
 	/** Latch so the render-error toast fires at most once per panel session (B-15). */
 	private renderErrorNotified = false;
+	/** Phase 8 (B-NEW-20) — once told its system was removed, the panel
+	 *  rejects further update() calls and only `dispose()` advances state. */
+	private removed = false;
+	private removedTimer: NodeJS.Timeout | undefined;
 
 	private constructor(
 		panel: vscode.WebviewPanel,
@@ -34,6 +42,10 @@ export class SapDetailPanel {
 
 		this.panel.onDidDispose(() => {
 			this.disposed = true;
+			if (this.removedTimer) {
+				clearTimeout(this.removedTimer);
+				this.removedTimer = undefined;
+			}
 			SapDetailPanel.panels.delete(this.systemKey);
 		});
 
@@ -69,8 +81,48 @@ export class SapDetailPanel {
 	}
 
 	async update(system: SapSystem): Promise<void> {
-		if (this.disposed) { return; }
+		if (this.disposed || this.removed) { return; }
 		await this._render(system);
+	}
+
+	/** Phase 8 (B-NEW-20) — render a "system removed" banner and schedule
+	 *  panel disposal after a short grace period. Idempotent.
+	 *
+	 *  Timer scheduled in `finally` so a render-time exception cannot leave
+	 *  the panel stuck without an auto-close (PAL fallback finding F-1). */
+	showRemoved(): void {
+		if (this.disposed || this.removed) { return; }
+		this.removed = true;
+		try {
+			const nonce = this._getNonce();
+			this.panel.webview.html = buildRemovedHtml(
+				this.systemKey,
+				'sap',
+				nonce,
+				this.panel.webview.cspSource,
+			);
+		} catch (err) {
+			logger.error(
+				'sap-detail-panel',
+				`Failed to render removed banner for system '${this.systemKey}'`,
+				err,
+			);
+		} finally {
+			this.removedTimer = setTimeout(() => {
+				this.removedTimer = undefined;
+				if (!this.disposed) {
+					try {
+						this.panel.dispose();
+					} catch (err) {
+						logger.error(
+							'sap-detail-panel',
+							`dispose() after removal failed for '${this.systemKey}'`,
+							err,
+						);
+					}
+				}
+			}, REMOVED_AUTO_CLOSE_MS);
+		}
 	}
 
 	private async _render(system: SapSystem): Promise<void> {
@@ -126,13 +178,19 @@ export class SapDetailPanel {
 		});
 	}
 
-	/** Update all open panels with refreshed SAP system data. */
+	/** Update all open panels with refreshed SAP system data.
+	 *  Phase 8 (B-NEW-20): when an open panel's system is no longer in the
+	 *  refreshed list, switch the panel into the removed-banner state. */
 	static async updateAll(systems: SapSystem[]): Promise<void> {
 		const byKey = new Map(systems.map((s) => [s.key, s]));
 		const promises: Promise<void>[] = [];
 		for (const [key, panel] of SapDetailPanel.panels) {
 			const system = byKey.get(key);
-			if (system) { promises.push(panel.update(system)); }
+			if (system) {
+				promises.push(panel.update(system));
+			} else {
+				panel.showRemoved();
+			}
 		}
 		await Promise.all(promises);
 	}

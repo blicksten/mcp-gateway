@@ -214,6 +214,91 @@ describe('Commands', () => {
 			}
 		});
 
+		// Phase 8 (B-NEW-22) — unified reload-required settings watcher.
+		// These keys are read once on activate() and have no live-watcher
+		// upstream; flipping them in settings.json must surface a Reload
+		// Window toast or the user is left wondering why nothing happened.
+		describe('reload-required settings watcher (B-NEW-22)', () => {
+			const reloadKeys = [
+				'mcpGateway.apiUrl',
+				'mcpGateway.pollInterval',
+				'mcpGateway.autoStart',
+				'mcpGateway.daemonPath',
+				'mcpGateway.authTokenPath',
+				'mcpGateway.mcpCtlPath',
+			];
+
+			for (const key of reloadKeys) {
+				it(`shows a Reload Window toast when ${key} changes`, () => {
+					const before = mockCalls.infoMessages.length;
+					mockConfigValues[key] = 'changed-value';
+					fireConfigChange(key);
+					assert.ok(
+						mockCalls.infoMessages.length > before,
+						`expected an info toast after ${key} changed`,
+					);
+					const last = mockCalls.infoMessages[mockCalls.infoMessages.length - 1];
+					const shortName = key.startsWith('mcpGateway.')
+						? key.slice('mcpGateway.'.length) : key;
+					assert.ok(last.includes(shortName),
+						`toast text should reference the changed setting "${shortName}"`);
+					assert.ok(/reload/i.test(last),
+						'toast text should mention reload');
+				});
+			}
+
+			it('does NOT show the toast for unrelated settings', () => {
+				const before = mockCalls.infoMessages.length;
+				// `slashCommandsEnabled` has its own watcher and applies live —
+				// it must NOT trigger the reload-required prompt.
+				mockConfigValues['mcpGateway.slashCommandsEnabled'] = true;
+				fireConfigChange('mcpGateway.slashCommandsEnabled');
+				const reloadToasts = mockCalls.infoMessages
+					.slice(before)
+					.filter((m) => /reload/i.test(m) && /apiUrl|pollInterval|autoStart|daemonPath|authTokenPath|mcpCtlPath/.test(m));
+				assert.strictEqual(reloadToasts.length, 0,
+					'live-applied settings must not trigger the reload-required toast');
+			});
+
+			it('debounces consecutive changes — second change does NOT re-prompt while toast is pending', () => {
+				const before = mockCalls.infoMessages.length;
+				mockConfigValues['mcpGateway.apiUrl'] = 'http://localhost:9000';
+				fireConfigChange('mcpGateway.apiUrl');
+				const afterFirst = mockCalls.infoMessages.length;
+				mockConfigValues['mcpGateway.pollInterval'] = 7000;
+				fireConfigChange('mcpGateway.pollInterval');
+				const afterSecond = mockCalls.infoMessages.length;
+				assert.strictEqual(afterFirst, before + 1, 'first change should toast once');
+				assert.strictEqual(afterSecond, afterFirst,
+					'second change while first toast is pending must not re-toast');
+			});
+
+			it('reloads window when user picks "Reload Window" action', async () => {
+				dialogResponses.showInformationMessage = 'Reload Window';
+				mockConfigValues['mcpGateway.apiUrl'] = 'http://localhost:9000';
+				fireConfigChange('mcpGateway.apiUrl');
+				// Allow the showInformationMessage promise to settle.
+				await new Promise((resolve) => setImmediate(resolve));
+				const reloaded = dispatchedCommands.find((c) => c.id === 'workbench.action.reloadWindow');
+				assert.ok(reloaded, 'expected workbench.action.reloadWindow dispatch when user picks Reload Window');
+			});
+
+			it('re-arms after dismissal so a later change re-prompts', async () => {
+				dialogResponses.showInformationMessage = undefined; // user dismisses
+				mockConfigValues['mcpGateway.apiUrl'] = 'http://localhost:9000';
+				fireConfigChange('mcpGateway.apiUrl');
+				const beforeSecond = mockCalls.infoMessages.length;
+				// Wait for the dismissal `then()` to re-arm the latch.
+				await new Promise((resolve) => setImmediate(resolve));
+				mockConfigValues['mcpGateway.daemonPath'] = '/usr/local/bin/mcp-gateway';
+				fireConfigChange('mcpGateway.daemonPath');
+				assert.ok(
+					mockCalls.infoMessages.length > beforeSecond,
+					'expected a re-prompt after the previous toast was dismissed',
+				);
+			});
+		});
+
 		it('onDidChangeConfiguration re-fires setContext and prompts window reload', () => {
 			// Precondition: activate() ran with default false — dispatch history
 			// already contains one setContext(..., false) entry from beforeEach.
