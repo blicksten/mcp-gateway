@@ -53,7 +53,11 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 		if (this.cache.lastRefreshFailed && servers.length === 0) {
 			return [new PlaceholderTreeItem()];
 		}
-		const items: vscode.TreeItem[] = servers.map((s) => new BackendItem(s));
+		// When the last refresh failed (gateway offline) but we still have
+		// cached servers, mark them as stale so the UI does not mislead the
+		// operator with green icons for servers that may no longer be running.
+		const stale = this.cache.lastRefreshFailed;
+		const items: vscode.TreeItem[] = servers.map((s) => new BackendItem(s, stale));
 		// Version footer: always shown at the bottom so the operator can see
 		// at a glance which mcp-gateway daemon is running. Hidden only when
 		// the daemon is completely unreachable (lastRefreshFailed + no servers).
@@ -88,9 +92,12 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 		// would produce the same fingerprint and suppress the re-fire,
 		// leaving the placeholder visible over an implicitly-empty list.
 		const placeholder = lastRefreshFailed && servers.length === 0;
+		// Include lastRefreshFailed explicitly so the tree re-renders when the
+		// gateway goes offline mid-session (stale icons need to become grey).
+		const staleMark = lastRefreshFailed ? 'S' : '';
 		// Only include version in fingerprint for real releases (not "dev").
 		const effectiveVersion = (version && version !== 'dev') ? version : '';
-		const parts: string[] = [placeholder ? 'P' : 'N', effectiveVersion];
+		const parts: string[] = [placeholder ? 'P' : 'N', staleMark, effectiveVersion];
 		for (const s of servers) {
 			parts.push([
 				s.name,

@@ -20,27 +20,42 @@ const STATUS_ICONS: Record<ServerStatus, IconDef> = {
 export class BackendItem extends vscode.TreeItem {
 	constructor(
 		public readonly server: ServerView,
+		/** When true the data is stale (gateway offline). Icon is greyed out. */
+		stale = false,
 	) {
 		super(server.name, vscode.TreeItemCollapsibleState.None);
 		this.contextValue = server.status;
 		const transport = server.transport || 'rest';
-		this.description = server.restart_count > 0
-			? `${transport} (x${server.restart_count})`
-			: transport;
-		this.tooltip = BackendItem.buildTooltip(server);
+		const restartSuffix = server.restart_count > 0 ? ` (x${server.restart_count})` : '';
+		// When stale, append "· offline" so the user sees data is from cache.
+		this.description = stale
+			? `${transport}${restartSuffix} · offline`
+			: `${transport}${restartSuffix}`;
+		this.tooltip = BackendItem.buildTooltip(server, stale);
 
-		const iconDef = STATUS_ICONS[server.status] ?? { id: 'question', color: 'editorWarning.foreground' };
-		this.iconPath = new vscode.ThemeIcon(
-			iconDef.id,
-			iconDef.color ? new vscode.ThemeColor(iconDef.color) : undefined,
-		);
+		if (stale) {
+			// Grey disconnected icon regardless of last-known status —
+			// we can't trust the status when the gateway is unreachable.
+			this.iconPath = new vscode.ThemeIcon('debug-disconnect',
+				new vscode.ThemeColor('disabledForeground'));
+		} else {
+			const iconDef = STATUS_ICONS[server.status] ?? { id: 'question', color: 'editorWarning.foreground' };
+			this.iconPath = new vscode.ThemeIcon(
+				iconDef.id,
+				iconDef.color ? new vscode.ThemeColor(iconDef.color) : undefined,
+			);
+		}
 	}
 
-	private static buildTooltip(server: ServerView): vscode.MarkdownString {
+	private static buildTooltip(server: ServerView, stale: boolean): vscode.MarkdownString {
 		const md = new vscode.MarkdownString();
 		md.isTrusted = false;
 		md.supportHtml = false;
-		md.appendMarkdown(`**${escapeMd(server.name)}** — ${server.status}\n\n`);
+		if (stale) {
+			md.appendMarkdown(`**${escapeMd(server.name)}** — *(gateway offline — showing last known state)*\n\n`);
+		} else {
+			md.appendMarkdown(`**${escapeMd(server.name)}** — ${server.status}\n\n`);
+		}
 		md.appendMarkdown(`- Transport: \`${escapeMd(server.transport || 'rest')}\`\n`);
 		if (server.pid) {
 			md.appendMarkdown(`- PID: \`${server.pid}\`\n`);
