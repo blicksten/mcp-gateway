@@ -104,12 +104,10 @@ describe('BackendTreeProvider', () => {
 			await cache.refresh();
 			provider = new BackendTreeProvider(cache);
 			const items = provider.getChildren();
-			// 7 servers + 1 GatewayVersionItem footer
-			assert.strictEqual(items.length, 8);
-			// Last item is the version footer — all before it are BackendItems
+			// 7 servers, no footer (mock getHealth returns {} — no release version).
+			assert.strictEqual(items.length, 7);
 			const serverItems = items.filter((i) => i instanceof BackendItem) as BackendItem[];
 			assert.strictEqual(serverItems.length, 7);
-			assert.ok(items[items.length - 1] instanceof GatewayVersionItem, 'last item should be GatewayVersionItem');
 			// Phase 17 follow-up: MCP rows are sorted by name so the tree does not
 			// jump on each daemon poll. Expected alphabetical order below.
 			const names = serverItems.map((i) => i.server.name);
@@ -124,13 +122,31 @@ describe('BackendTreeProvider', () => {
 			]);
 		});
 
-		it('returns only version footer when cache has no servers', () => {
+		it('shows version footer when daemon reports a real release version', async () => {
+			const client = {
+				listServers: async () => [] as ServerView[],
+				getHealth: async () => ({ status: 'ok', servers: 0, running: 0, version: '1.7.2' }),
+				getServer: async () => ({}), addServer: async () => ({}),
+				removeServer: async () => ({}), patchServer: async () => ({}),
+				restartServer: async () => ({}), resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }), listTools: async () => [],
+			};
+			cache = new ServerDataCache(client as any);
+			await cache.refresh();
+			provider = new BackendTreeProvider(cache);
+			const items = provider.getChildren();
+			assert.strictEqual(items.length, 1, 'exactly one item — the version footer');
+			assert.ok(items[0] instanceof GatewayVersionItem, 'should be GatewayVersionItem');
+			assert.strictEqual((items[0] as GatewayVersionItem).description, 'v1.7.2');
+		});
+
+		it('returns empty list (no footer) when no servers and daemon version is "dev"', () => {
+			// "dev" = local source build — not useful to show in the UI.
 			cache = new ServerDataCache(createMockClient([]) as any);
 			provider = new BackendTreeProvider(cache);
 			const items = provider.getChildren();
-			// No servers, but version footer is always shown when daemon is reachable
-			assert.strictEqual(items.length, 1);
-			assert.ok(items[0] instanceof GatewayVersionItem, 'only item should be GatewayVersionItem');
+			// Default mock returns {} for getHealth → no version → no footer.
+			assert.strictEqual(items.length, 0);
 		});
 
 		it('sets None state for all servers (flat list)', async () => {
@@ -181,8 +197,8 @@ describe('BackendTreeProvider', () => {
 			await cache.refresh();
 			provider = new BackendTreeProvider(cache);
 			const items = provider.getChildren();
-			// Only non-SAP servers should appear (7 original + 1 version footer, no vsp-DEV or sap-gui-DEV-100).
-			assert.strictEqual(items.length, 8);
+			// Only non-SAP servers should appear (7 original, no vsp-DEV or sap-gui-DEV-100, no footer for dev build).
+			assert.strictEqual(items.length, 7);
 			const names = items.filter((i) => i instanceof BackendItem).map((i) => (i as BackendItem).server.name);
 			assert.ok(!names.includes('vsp-DEV'), 'SAP VSP server should be filtered');
 			assert.ok(!names.includes('sap-gui-DEV-100'), 'SAP GUI server should be filtered');
@@ -286,9 +302,10 @@ describe('BackendTreeProvider', () => {
 
 			const items = provider.getChildren();
 			assert.strictEqual(cache.lastRefreshFailed, false);
-			// Empty-but-healthy: only version footer shown (no servers, no placeholder).
-			assert.ok(items.length === 1 && items[0] instanceof GatewayVersionItem,
-				'empty-but-healthy yields only version footer, no placeholder');
+			// Empty-but-healthy with a dev-build daemon: no servers, no footer (version="dev" is hidden), no placeholder.
+			assert.ok(!items.some((i) => i instanceof PlaceholderTreeItem),
+				'empty-but-healthy yields no placeholder');
+			assert.strictEqual(items.length, 0, 'no servers and no version footer for dev build');
 		});
 
 		it('fires onDidChangeTreeData when transitioning from cold-start-failed to first-success-empty', async () => {

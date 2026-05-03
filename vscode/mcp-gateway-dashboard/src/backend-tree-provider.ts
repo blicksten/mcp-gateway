@@ -57,7 +57,12 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 		// Version footer: always shown at the bottom so the operator can see
 		// at a glance which mcp-gateway daemon is running. Hidden only when
 		// the daemon is completely unreachable (lastRefreshFailed + no servers).
-		items.push(new GatewayVersionItem(this.cache.gatewayHealth?.version));
+		// Show version footer only when the daemon reports a real release version.
+		// "dev" means a local source build — not useful to show.
+		const version = this.cache.gatewayHealth?.version;
+		if (version && version !== 'dev') {
+			items.push(new GatewayVersionItem(version));
+		}
 		return items;
 	}
 
@@ -83,7 +88,9 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 		// would produce the same fingerprint and suppress the re-fire,
 		// leaving the placeholder visible over an implicitly-empty list.
 		const placeholder = lastRefreshFailed && servers.length === 0;
-		const parts: string[] = [placeholder ? 'P' : 'N', version ?? ''];
+		// Only include version in fingerprint for real releases (not "dev").
+		const effectiveVersion = (version && version !== 'dev') ? version : '';
+		const parts: string[] = [placeholder ? 'P' : 'N', effectiveVersion];
 		for (const s of servers) {
 			parts.push([
 				s.name,
