@@ -4,16 +4,23 @@ import { BackendItem } from './backend-item';
 import { PlaceholderTreeItem } from './tree-placeholder';
 import type { ServerView } from './types';
 
-/** Footer item shown at the bottom of the backends tree: "mcp-gateway v1.7.2" */
+/**
+ * Footer item shown at the bottom of the backends tree.
+ * Displays the running mcp-gateway daemon version so the operator
+ * can see it at a glance. Uses description (greyed-out secondary text)
+ * to avoid looking like a server entry, and ThemeIcon('info') + dim label.
+ */
 export class GatewayVersionItem extends vscode.TreeItem {
 	constructor(version: string | undefined) {
-		const label = version ? `mcp-gateway v${version}` : 'mcp-gateway';
-		super(label, vscode.TreeItemCollapsibleState.None);
+		// Label is empty-looking separator text; version goes in description
+		// (right-aligned grey text) so it does not blend with server names.
+		super('mcp-gateway daemon', vscode.TreeItemCollapsibleState.None);
+		this.description = version ? `v${version}` : 'version unknown';
 		this.contextValue = 'gatewayVersion';
-		this.iconPath = new vscode.ThemeIcon('versions');
+		this.iconPath = new vscode.ThemeIcon('info', new vscode.ThemeColor('descriptionForeground'));
 		this.tooltip = version
-			? `mcp-gateway daemon v${version}`
-			: 'mcp-gateway daemon (version unknown — old daemon without /health version field)';
+			? `mcp-gateway daemon version ${version}`
+			: 'mcp-gateway daemon (version not reported — old daemon or daemon offline)';
 	}
 }
 
