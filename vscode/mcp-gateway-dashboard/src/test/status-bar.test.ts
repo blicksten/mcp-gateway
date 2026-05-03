@@ -244,6 +244,62 @@ describe('McpStatusBar (cache-driven)', () => {
 		});
 	});
 
+	describe('daemon version in status bar text', () => {
+		function makeVersionClient(servers: ServerView[], version: string) {
+			const { client, state } = makeClient(servers);
+			(client as any).getHealth = async () => ({
+				status: 'ok',
+				servers: servers.length,
+				running: servers.filter((s) => s.status === 'running').length,
+				version,
+			});
+			return { client, state };
+		}
+
+		it('appends version suffix when all servers running', async () => {
+			const { client } = makeVersionClient(
+				[{ name: 'a', status: 'running', transport: 'stdio', restart_count: 0 }],
+				'1.22.0',
+			);
+			cache = new ServerDataCache(client as any);
+			bar = new McpStatusBar(cache);
+			await cache.refresh();
+			assert.strictEqual(latestItem().text, '$(check) MCP: 1/1 · v1.22.0');
+		});
+
+		it('appends version suffix when some servers offline', async () => {
+			const { client } = makeVersionClient(
+				[
+					{ name: 'a', status: 'running', transport: 'stdio', restart_count: 0 },
+					{ name: 'b', status: 'stopped', transport: 'http', restart_count: 0 },
+				],
+				'2.0.0',
+			);
+			cache = new ServerDataCache(client as any);
+			bar = new McpStatusBar(cache);
+			await cache.refresh();
+			assert.strictEqual(latestItem().text, '$(warning) MCP: 1/2 · v2.0.0');
+		});
+
+		it('appends version suffix when no servers configured', async () => {
+			const { client } = makeVersionClient([], '1.22.0');
+			cache = new ServerDataCache(client as any);
+			bar = new McpStatusBar(cache);
+			await cache.refresh();
+			assert.ok(latestItem().text.includes('· v1.22.0'), `expected version in: ${latestItem().text}`);
+		});
+
+		it('no version suffix when health has no version (older daemons)', async () => {
+			const servers = [{ name: 'a', status: 'running', transport: 'stdio', restart_count: 0 }];
+			const { client } = makeClient(servers as ServerView[]);
+			cache = new ServerDataCache(client as any);
+			bar = new McpStatusBar(cache);
+			await cache.refresh();
+			// No · v suffix — graceful degradation for daemons pre-dating D.1.
+			assert.strictEqual(latestItem().text, '$(check) MCP: 1/1');
+		});
+	});
+
 	describe('no legacy polling API', () => {
 		it('does not expose startPolling / stopPolling / poll', () => {
 			const { client } = makeClient([]);

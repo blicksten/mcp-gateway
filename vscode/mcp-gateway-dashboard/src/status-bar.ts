@@ -63,16 +63,21 @@ export class McpStatusBar implements vscode.Disposable {
 	): void {
 		this.resetStyle();
 
+		// Suffix like " \u00b7 v1.7.2" appended when the daemon version is known
+		// so the operator can see which gateway is running at a glance, without
+		// hovering. Falls back to empty string on older daemons that pre-date D.1.
+		const verSuffix = health?.version ? ` \u00b7 v${health.version}` : '';
+
 		if (total === 0) {
-			this.item.text = '$(circle-slash) MCP: \u2014';
+			this.item.text = `$(circle-slash) MCP: \u2014${verSuffix}`;
 		} else if (running === total) {
-			this.item.text = `$(check) MCP: ${running}/${total}`;
+			this.item.text = `$(check) MCP: ${running}/${total}${verSuffix}`;
 			this.item.color = new vscode.ThemeColor('testing.iconPassed');
 		} else if (running === 0) {
-			this.item.text = `$(error) MCP: 0/${total}`;
+			this.item.text = `$(error) MCP: 0/${total}${verSuffix}`;
 			this.item.color = new vscode.ThemeColor('testing.iconFailed');
 		} else {
-			this.item.text = `$(warning) MCP: ${running}/${total}`;
+			this.item.text = `$(warning) MCP: ${running}/${total}${verSuffix}`;
 			this.item.color = new vscode.ThemeColor('notificationsWarningIcon.foreground');
 		}
 
