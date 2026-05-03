@@ -4,7 +4,7 @@ import { MockMarkdownString } from './mock-vscode';
 
 import * as assert from 'node:assert';
 import { describe, it, beforeEach, afterEach } from 'mocha';
-import { BackendTreeProvider } from '../backend-tree-provider';
+import { BackendTreeProvider, GatewayVersionItem } from '../backend-tree-provider';
 import { BackendItem } from '../backend-item';
 import { PlaceholderTreeItem } from '../tree-placeholder';
 import { ServerDataCache } from '../server-data-cache';
@@ -104,11 +104,15 @@ describe('BackendTreeProvider', () => {
 			await cache.refresh();
 			provider = new BackendTreeProvider(cache);
 			const items = provider.getChildren();
-			assert.strictEqual(items.length, 7);
-			assert.ok(items[0] instanceof BackendItem);
+			// 7 servers + 1 GatewayVersionItem footer
+			assert.strictEqual(items.length, 8);
+			// Last item is the version footer — all before it are BackendItems
+			const serverItems = items.filter((i) => i instanceof BackendItem) as BackendItem[];
+			assert.strictEqual(serverItems.length, 7);
+			assert.ok(items[items.length - 1] instanceof GatewayVersionItem, 'last item should be GatewayVersionItem');
 			// Phase 17 follow-up: MCP rows are sorted by name so the tree does not
 			// jump on each daemon poll. Expected alphabetical order below.
-			const names = items.map((i) => (i as BackendItem).server.name);
+			const names = serverItems.map((i) => i.server.name);
 			assert.deepStrictEqual(names, [
 				'booting',
 				'ctx7',
@@ -120,11 +124,13 @@ describe('BackendTreeProvider', () => {
 			]);
 		});
 
-		it('returns empty when cache has no data', () => {
+		it('returns only version footer when cache has no servers', () => {
 			cache = new ServerDataCache(createMockClient([]) as any);
 			provider = new BackendTreeProvider(cache);
 			const items = provider.getChildren();
-			assert.strictEqual(items.length, 0);
+			// No servers, but version footer is always shown when daemon is reachable
+			assert.strictEqual(items.length, 1);
+			assert.ok(items[0] instanceof GatewayVersionItem, 'only item should be GatewayVersionItem');
 		});
 
 		it('sets None state for all servers (flat list)', async () => {
@@ -132,8 +138,9 @@ describe('BackendTreeProvider', () => {
 			await cache.refresh();
 			provider = new BackendTreeProvider(cache);
 			const items = provider.getChildren();
+			// All items (server rows + version footer) are non-collapsible.
 			for (const item of items) {
-				assert.strictEqual(item.collapsibleState, 0, `Expected None (0) for ${(item as BackendItem).server?.name}`);
+				assert.strictEqual(item.collapsibleState, 0, `Expected None (0) for item`);
 			}
 		});
 	});
@@ -174,9 +181,9 @@ describe('BackendTreeProvider', () => {
 			await cache.refresh();
 			provider = new BackendTreeProvider(cache);
 			const items = provider.getChildren();
-			// Only non-SAP servers should appear (7 original, no vsp-DEV or sap-gui-DEV-100).
-			assert.strictEqual(items.length, 7);
-			const names = items.map((i) => (i as BackendItem).server.name);
+			// Only non-SAP servers should appear (7 original + 1 version footer, no vsp-DEV or sap-gui-DEV-100).
+			assert.strictEqual(items.length, 8);
+			const names = items.filter((i) => i instanceof BackendItem).map((i) => (i as BackendItem).server.name);
 			assert.ok(!names.includes('vsp-DEV'), 'SAP VSP server should be filtered');
 			assert.ok(!names.includes('sap-gui-DEV-100'), 'SAP GUI server should be filtered');
 		});
@@ -186,7 +193,7 @@ describe('BackendTreeProvider', () => {
 			await cache.refresh();
 			provider = new BackendTreeProvider(cache);
 			const items = provider.getChildren();
-			const names = items.map((i) => (i as BackendItem).server.name);
+			const names = items.filter((i) => i instanceof BackendItem).map((i) => (i as BackendItem).server.name);
 			assert.ok(names.includes('ctx7'));
 			assert.ok(names.includes('orch'));
 		});
@@ -267,7 +274,8 @@ describe('BackendTreeProvider', () => {
 			for (const item of items) {
 				assert.ok(!(item instanceof PlaceholderTreeItem),
 					'PlaceholderTreeItem must not appear when preserved data exists');
-				assert.ok(item instanceof BackendItem);
+				// Each item is either a BackendItem (server row) or a GatewayVersionItem (footer).
+				assert.ok(item instanceof BackendItem || item instanceof GatewayVersionItem);
 			}
 		});
 
@@ -278,7 +286,9 @@ describe('BackendTreeProvider', () => {
 
 			const items = provider.getChildren();
 			assert.strictEqual(cache.lastRefreshFailed, false);
-			assert.strictEqual(items.length, 0, 'empty-but-healthy yields empty tree, no placeholder');
+			// Empty-but-healthy: only version footer shown (no servers, no placeholder).
+			assert.ok(items.length === 1 && items[0] instanceof GatewayVersionItem,
+				'empty-but-healthy yields only version footer, no placeholder');
 		});
 
 		it('fires onDidChangeTreeData when transitioning from cold-start-failed to first-success-empty', async () => {

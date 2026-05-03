@@ -4,6 +4,19 @@ import { BackendItem } from './backend-item';
 import { PlaceholderTreeItem } from './tree-placeholder';
 import type { ServerView } from './types';
 
+/** Footer item shown at the bottom of the backends tree: "mcp-gateway v1.7.2" */
+export class GatewayVersionItem extends vscode.TreeItem {
+	constructor(version: string | undefined) {
+		const label = version ? `mcp-gateway v${version}` : 'mcp-gateway';
+		super(label, vscode.TreeItemCollapsibleState.None);
+		this.contextValue = 'gatewayVersion';
+		this.iconPath = new vscode.ThemeIcon('versions');
+		this.tooltip = version
+			? `mcp-gateway daemon v${version}`
+			: 'mcp-gateway daemon (version unknown — old daemon without /health version field)';
+	}
+}
+
 export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem>, vscode.Disposable {
 	private readonly _onDidChangeTreeData = new vscode.EventEmitter<vscode.TreeItem | undefined | void>();
 	readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
@@ -21,7 +34,7 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 	refresh(): void {
 		if (this._disposed) { return; }
 		const servers = this.cache.getMcpServers();
-		const next = this.computeFingerprint(servers, this.cache.lastRefreshFailed);
+		const next = this.computeFingerprint(servers, this.cache.lastRefreshFailed, this.cache.gatewayHealth?.version);
 		if (next === this.lastFingerprint) { return; }
 		this.lastFingerprint = next;
 		this._onDidChangeTreeData.fire();
@@ -33,7 +46,12 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 		if (this.cache.lastRefreshFailed && servers.length === 0) {
 			return [new PlaceholderTreeItem()];
 		}
-		return servers.map((s) => new BackendItem(s));
+		const items: vscode.TreeItem[] = servers.map((s) => new BackendItem(s));
+		// Version footer: always shown at the bottom so the operator can see
+		// at a glance which mcp-gateway daemon is running. Hidden only when
+		// the daemon is completely unreachable (lastRefreshFailed + no servers).
+		items.push(new GatewayVersionItem(this.cache.gatewayHealth?.version));
+		return items;
 	}
 
 	getTreeItem(element: vscode.TreeItem): vscode.TreeItem {
@@ -45,7 +63,7 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 		return this.lastFingerprint;
 	}
 
-	private computeFingerprint(servers: readonly ServerView[], lastRefreshFailed: boolean): string {
+	private computeFingerprint(servers: readonly ServerView[], lastRefreshFailed: boolean, version?: string): string {
 		// Render-affecting fields only: tree rows depend on name, status, transport,
 		// restart_count (shown in description), pid and last_error (tooltip), and
 		// tools count (tooltip "Tools: N"). Full tools array is excluded to keep
@@ -58,7 +76,7 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 		// would produce the same fingerprint and suppress the re-fire,
 		// leaving the placeholder visible over an implicitly-empty list.
 		const placeholder = lastRefreshFailed && servers.length === 0;
-		const parts: string[] = [placeholder ? 'P' : 'N'];
+		const parts: string[] = [placeholder ? 'P' : 'N', version ?? ''];
 		for (const s of servers) {
 			parts.push([
 				s.name,

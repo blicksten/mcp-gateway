@@ -144,17 +144,64 @@ export class ClaudeConfigSync implements vscode.Disposable {
 		return out;
 	}
 
+	/**
+	 * All Claude config paths to keep in sync: the primary configPath()
+	 * plus any profile-specific ~/.claude_XXX/.claude.json files discovered
+	 * on disk. Lets per-profile instances (e.g. claude-personal) see
+	 * gateway servers without manual configuration.
+	 * NOTE: avoid "star-slash" in this comment — it closes the JSDoc block.
+	 */
+	getAllConfigPaths(): string[] {
+		const primary = this.opts.configPath();
+		const paths = new Set<string>();
+		paths.add(primary);
+		try {
+			const home = os.homedir();
+			const entries = fs.readdirSync(home, { withFileTypes: true });
+			for (const e of entries) {
+				if (e.isDirectory() && e.name.startsWith('.claude')) {
+					const candidate = path.join(home, e.name, '.claude.json');
+					if (fs.existsSync(candidate)) {
+						paths.add(candidate);
+					}
+				}
+			}
+		} catch { /* best-effort — missing home or permission error */ }
+		return [...paths];
+	}
+
 	async reconcile(servers: ServerView[]): Promise<void> {
-		await this.safeUpdateMcpServers(await this.buildDesired(servers));
+		const desired = await this.buildDesired(servers);
+		// Best-effort multi-path: primary path failures propagate (callers depend
+		// on the primary succeeding); secondary profile paths are best-effort.
+		const paths = this.getAllConfigPaths();
+		const [primary, ...secondaries] = paths;
+		if (primary) {
+			await this.safeUpdateMcpServers(desired, primary);
+		}
+		await Promise.allSettled(
+			secondaries.map((p) => this.safeUpdateMcpServers(desired, p).catch((err: unknown) => {
+				logger.warn(SOURCE, `secondary config path update failed: ${p}`, err);
+			})),
+		);
 	}
 
 	async cleanup(): Promise<void> {
-		await this.safeUpdateMcpServers({});
+		const paths = this.getAllConfigPaths();
+		const [primary, ...secondaries] = paths;
+		if (primary) {
+			await this.safeUpdateMcpServers({}, primary);
+		}
+		await Promise.allSettled(
+			secondaries.map((p) => this.safeUpdateMcpServers({}, p).catch((err: unknown) => {
+				logger.warn(SOURCE, `secondary config path cleanup failed: ${p}`, err);
+			})),
+		);
 	}
 
 	async preview(servers: ServerView[]): Promise<PreviewDiff> {
 		const desired = await this.buildDesired(servers);
-		const { parsed } = await this.readWithRetry();
+		const { parsed } = await this.readWithRetry(this.opts.configPath());
 		const existing = (parsed.mcpServers ?? {}) as Record<string, unknown>;
 		const currentManaged = this.pickManaged(existing);
 		const added: string[] = [];
@@ -221,11 +268,11 @@ export class ClaudeConfigSync implements vscode.Disposable {
 
 	private async safeUpdateMcpServers(
 		desiredManaged: Record<string, ManagedHttpEntry>,
+		target: string,
 	): Promise<void> {
-		const target = this.opts.configPath();
 
 		for (let attempt = 1; attempt <= CAS_RETRY_BUDGET; attempt++) {
-			const { hash, parsed } = await this.readWithRetry();
+			const { hash, parsed } = await this.readWithRetry(target);
 			const existingServers = (parsed.mcpServers ?? {}) as Record<string, unknown>;
 			const currentManaged = this.pickManaged(existingServers);
 
@@ -273,8 +320,7 @@ export class ClaudeConfigSync implements vscode.Disposable {
 		);
 	}
 
-	private async readRaw(): Promise<{ raw: string; hash: string }> {
-		const target = this.opts.configPath();
+	private async readRaw(target: string): Promise<{ raw: string; hash: string }> {
 		try {
 			const raw = await fs.promises.readFile(target, 'utf8');
 			const hash = crypto.createHash('sha256').update(raw).digest('hex');
@@ -287,14 +333,14 @@ export class ClaudeConfigSync implements vscode.Disposable {
 		}
 	}
 
-	private async readWithRetry(): Promise<{
+	private async readWithRetry(target: string): Promise<{
 		raw: string;
 		hash: string;
 		parsed: ClaudeJson;
 	}> {
 		let lastErr: unknown = null;
 		for (let attempt = 1; attempt <= PARSE_RETRY_BUDGET; attempt++) {
-			const { raw, hash } = await this.readRaw();
+			const { raw, hash } = await this.readRaw(target);
 			if (raw.length === 0 || raw.trim() === '') {
 				return { raw, hash, parsed: {} };
 			}
@@ -341,7 +387,7 @@ export class ClaudeConfigSync implements vscode.Disposable {
 		// Final CAS check immediately before rename. Reading the file is
 		// the cheapest way to detect a competing writer in the gap between
 		// our parse and our commit.
-		const { hash: hashJustBeforeRename } = await this.readRaw();
+		const { hash: hashJustBeforeRename } = await this.readRaw(target);
 		if (hashJustBeforeRename !== expectedHash) {
 			await safeUnlink(tmp);
 			return false;
