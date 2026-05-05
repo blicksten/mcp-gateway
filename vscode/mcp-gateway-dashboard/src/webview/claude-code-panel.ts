@@ -848,20 +848,22 @@ button:hover { background: var(--vscode-button-hoverBackground); }
     }
     if (msg.kind === 'activate-log') {
       // textContent — XSS-safe append. Truncate at 1 MB to cap memory.
-      const next = logEl.textContent + String(msg.line ?? '') + '\n';
+      // (Newlines must be double-escaped because this script lives inside
+      // an outer template literal in TS source.)
+      const next = logEl.textContent + String(msg.line ?? '') + '\\n';
       logEl.textContent = next.length > 1048576 ? next.slice(next.length - 1048576) : next;
       logEl.scrollTop = logEl.scrollHeight;
       return;
     }
     if (msg.kind === 'activate-done') {
       activateBtn.disabled = false;
-      logEl.textContent += '\n[exit ' + (msg.exitCode ?? 'null') + ']\n';
+      logEl.textContent += '\\n[exit ' + (msg.exitCode ?? 'null') + ']\\n';
       logEl.scrollTop = logEl.scrollHeight;
       return;
     }
     if (msg.kind === 'activate-error') {
       activateBtn.disabled = false;
-      logEl.textContent += '\n[error: ' + String(msg.message ?? '') + ']\n';
+      logEl.textContent += '\\n[error: ' + String(msg.message ?? '') + ']\\n';
       logEl.scrollTop = logEl.scrollHeight;
       return;
     }
