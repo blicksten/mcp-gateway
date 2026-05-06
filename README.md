@@ -363,6 +363,51 @@ See the [Claude Code plugin docs](https://docs.claude.com/en/docs/claude-code/)
 for the authoritative distinction between slash-command plugins and MCP
 plugins.
 
+## Gateway meta-tools vs Claude Code ToolSearch
+
+Phase 16.6 added three aggregate-only meta-tools to the gateway's `/mcp`
+surface — `gateway.list_servers`, `gateway.list_tools`, and
+`gateway.invoke`. They solve a context-budget problem: a host that loads
+every MCP tool schema into the prompt at session start would burn tens
+of kilobytes before the first call. The meta-tools let a client lazily
+discover topology and invoke any backend tool by name, keeping only
+three schemas in the prompt.
+
+Claude Code 2.x ships a built-in mechanism (`ToolSearch`) that solves the
+same context-budget problem at the harness level: every tool name is
+listed in a `system-reminder` block, and the model fetches a schema only
+when it needs to call that specific tool. So inside Claude Code there
+are two paths to the same call.
+
+**Both surfaces stay. They operate at different layers and target
+different clients.**
+
+| Concern | `ToolSearch` (Claude Code) | Gateway meta-tools | Gateway core |
+|---------|---------------------------|--------------------|--------------|
+| Lazy load tool schemas | yes — by name or keyword | yes — `gateway.list_tools` then `gateway.invoke` | n/a |
+| Manage MCP subprocess lifecycle | no | no | yes |
+| Health monitor + auto-restart | no | no | yes |
+| Circuit breaker | no | no | yes |
+| REST API for hot add/remove | no | no | yes |
+| Cross-tab subprocess multiplexing | no | no | yes |
+| Works for clients other than Claude Code | no | yes (Cursor / Continue.dev / Cline / SDK) | yes |
+
+**Inside Claude Code:** the namespaced tool surface
+(`mcp__mcp-gateway__<backend>__<tool>`) is the primary path. Each
+namespaced tool name appears in the deferred-tool list and Claude Code
+loads its schema via `ToolSearch` on demand. The meta-tools sit dormant
+but stay available as a fallback against `tools/list` cache bugs (Issue
+#13646) and topology changes mid-session.
+
+**Outside Claude Code** (Cursor, Continue.dev, Cline, custom Anthropic
+SDK apps): no `ToolSearch` equivalent exists. The meta-tools become the
+canonical lazy-discovery surface — `gateway.list_tools` enumerates every
+backend tool, `gateway.invoke` calls anything.
+
+Full decision rationale, alternatives considered, and the monitoring
+triggers that would reopen this question:
+[`docs/ADR-0006-toolsearch-vs-gateway-metatools.md`](docs/ADR-0006-toolsearch-vs-gateway-metatools.md).
+
 ## Managing the daemon
 
 The gateway daemon is a separate, long-lived process. That is the whole
