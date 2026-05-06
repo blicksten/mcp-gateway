@@ -77,9 +77,13 @@ describe('detectPluginInstalled', () => {
 	it('returns installed=true with version when spawn outputs JSON with mcp-gateway plugin', async () => {
 		const child = new FakeChild();
 		const calls = { count: 0 };
+		// Real CLI schema (verified against `claude plugin list --json` 2026-05-06):
+		//   { "id": "<plugin>@<marketplace>", "version": "...", "scope": "...", ... }
+		// NOT { name, marketplace } — that was a fabricated fixture matching the
+		// buggy detection code (audit Scope E SE-01/SE-02, fixed 2026-05-06).
 		const pluginList = JSON.stringify([
-			{ name: 'some-other-plugin', version: '0.1.0' },
-			{ name: 'mcp-gateway', version: '1.2.3', marketplace: 'mcp-gateway-local' },
+			{ id: 'some-other-plugin@claude-plugins-official', version: '0.1.0', scope: 'user', enabled: true },
+			{ id: 'mcp-gateway@mcp-gateway-local', version: '1.2.3', scope: 'user', enabled: true },
 		]);
 		child.succeed(pluginList);
 
@@ -89,6 +93,21 @@ describe('detectPluginInstalled', () => {
 		assert.strictEqual(result.version, '1.2.3');
 		assert.strictEqual(result.marketplace, 'mcp-gateway-local');
 		assert.strictEqual(calls.count, 1);
+	});
+
+	it('returns installed=false against real-CLI schema when mcp-gateway absent', async () => {
+		// Regression guard for SE-01 — fixture mirrors actual `claude plugin list --json`
+		// output for a system with mcp-gateway NOT installed.
+		const child = new FakeChild();
+		const pluginList = JSON.stringify([
+			{ id: 'agent-sdk-dev@claude-plugins-official', version: 'unknown', scope: 'user' },
+			{ id: 'claude-code-setup@claude-plugins-official', version: '1.0.0', scope: 'project' },
+		]);
+		child.succeed(pluginList);
+
+		const result = await detectPluginInstalled({ spawn: makeSpawnStub(child, { count: 0 }) });
+
+		assert.strictEqual(result.installed, false);
 	});
 
 	it('returns installed=false on ENOENT (claude binary missing)', async () => {
@@ -120,7 +139,7 @@ describe('detectPluginInstalled', () => {
 
 	it('returns installed=false when plugin list does not contain mcp-gateway', async () => {
 		const child = new FakeChild();
-		child.succeed(JSON.stringify([{ name: 'other-plugin', version: '1.0.0' }]));
+		child.succeed(JSON.stringify([{ id: 'other-plugin@some-marketplace', version: '1.0.0' }]));
 
 		const result = await detectPluginInstalled({ spawn: makeSpawnStub(child, { count: 0 }) });
 
@@ -130,7 +149,7 @@ describe('detectPluginInstalled', () => {
 	it('cache: second call within TTL returns same value without re-spawning', async () => {
 		const child1 = new FakeChild();
 		const calls = { count: 0 };
-		const pluginList = JSON.stringify([{ name: 'mcp-gateway', version: '2.0.0' }]);
+		const pluginList = JSON.stringify([{ id: 'mcp-gateway@mcp-gateway-local', version: '2.0.0' }]);
 		child1.succeed(pluginList);
 
 		const result1 = await detectPluginInstalled({ ctlPath: 'claude', spawn: makeSpawnStub(child1, calls) });
@@ -148,7 +167,7 @@ describe('detectPluginInstalled', () => {
 	it('cache: _resetDetectionCache clears the cache so next call re-spawns', async () => {
 		const child1 = new FakeChild();
 		const calls = { count: 0 };
-		child1.succeed(JSON.stringify([{ name: 'mcp-gateway', version: '1.0.0' }]));
+		child1.succeed(JSON.stringify([{ id: 'mcp-gateway@mcp-gateway-local', version: '1.0.0' }]));
 
 		await detectPluginInstalled({ ctlPath: 'my-claude', spawn: makeSpawnStub(child1, calls) });
 		assert.strictEqual(calls.count, 1);

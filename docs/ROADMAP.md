@@ -1,5 +1,46 @@
 # MCP Gateway — Roadmap
 
+## ⚠️ Active audit — audit-e7618c9c (resume in next session)
+
+**Pipeline:** `audit-e7618c9c` step 2/4 (specialist-auditor fan-out). Audit scope at `docs/REVIEW-AUDIT.md` (6 scopes A-F).
+
+**Trigger:** operator escalation 2026-05-06 — multiple bugs in production: status-bar `vdev`, missing version footer, compat-matrix 503, ClaudeCodePanel buttons unresponsive after v1.28.0 fix, Copy-Diagnostics shows `mcp-gateway: unknown`/`Plugin: not installed`/`Patch: not installed`.
+
+**Specialists status:**
+
+| Scope | Status | Findings | Recommended fix |
+|-------|--------|----------|-----------------|
+| **A** ldflags injection | ✅ COMPLETE (5 findings: F-A1..F-A5) | HIGH × 4, MEDIUM × 1 | `runtime/debug.ReadBuildInfo()` in `cmd/mcp-gateway/main.go` init() — ~30 min, operator-proof, also requires CI smoke-test assertion `health.version != "dev"` |
+| **B** CWD-relative configs/ | ✅ COMPLETE (6 findings: SB-1..SB-6) | HIGH × 3, MEDIUM × 2, LOW × 1 | `//go:embed configs/supported_claude_code_versions.json` — eliminates path resolution entirely. Plus delete misleading handler comment, rewrite defect-as-feature test (claude_code_handlers_test.go:373-392), fix .goreleaser.yml `files:` (separate concern) |
+| **C** Extension version display | ✅ COMPLETE (4 findings: SC-C-H1, SC-C-M1, SC-C-M2, SC-C-L1) | HIGH × 1, MEDIUM × 2, LOW × 1 | (1) Fix transient health-call cache wipe — `server-data-cache.ts:113` clears `cachedGatewayHealth=null` on /health rejection even when /servers succeeds; mirror server-list last-known-good preservation. **THIS is why operator sees `mcp-gateway: unknown` in Copy-Diagnostics, NOT Scope A.** (2) Extract `formatGatewayVersion(health, showDev)` helper and replace 4 inline sites (status-bar.ts:117, backend-tree-provider.ts:67, gateway-tree-provider.ts:129+141). (3) Show `dev build` in footer instead of hiding (current code hostile to local-dev users). |
+| **D** Footer perception | ✅ COMPLETE (1 LOW finding) | LOW × 1 | Footer WAS shipped (v1.24.0 commit 4d7707a, refined v1.25.0 633ec3b, dev-hide added v1.26.0 a828003). Operator's "promised but never delivered" is incorrect — footer hidden because daemon reports `version=dev` (downstream of Scope A). Recommend (independent ergonomics): show `mcp-gateway · dev build` for local-dev users instead of hiding entirely. **Confirmed: no spec in README/ROADMAP/CHANGELOG promised "footer at bottom of activity bar" beyond what was shipped.** Auto-resolves once Scope A ldflags fix lands. |
+| **E** ClaudeCodePanel post-v1.28.0 | ✅ COMPLETE — **CRITICAL bug uncovered** | **CRITICAL × 1**, HIGH × 1, MED × 1, LOW × 1 | **SE-01 CRITICAL** `src/claude-code/detection.ts:125-127` — `extractPluginDetection` reads `rec['name']` + `rec['marketplace']` but real `claude plugin list --json` outputs `rec['id']="mcp-gateway@mcp-gateway-local"`. Result: `detectPluginInstalled` ALWAYS returns `{installed:false}` regardless of actual state. **THIS is why operator sees "Plugin: not installed" while 6 backends Connected.** Fix: split `rec['id']` on `@` to extract pluginName + marketplaceName. **SE-02 HIGH** test fixture in detection.test.ts:80-83 uses fabricated `{name, marketplace}` schema matching neither real CLI nor production code — both agreed on non-existent schema, all 7 tests passed against false data. **Confirmed**: v1.28.0 fix IS deployed correctly (MD5 byte-match between `out/webview/claude-code-panel.js` and installed `1.28.0` extension). Buttons WILL respond after `Developer: Reload Window`. Regression test uses `new Function(body)` — genuine parser, not regex. 822 tests pass. |
+| **F** Daemon stability | ✅ COMPLETE (1 LOW finding) | LOW × 1 | **Operator perception is INCORRECT** — daemon NOT restarting (PID 20008 uptime 686s confirmed). H1 PRIMARY: per-MCP-server child restart loop noise conflated with daemon-level events (health monitor restarts children with NO backoff between attempts, only circuit breaker at 5/300s). H2 FALSE: extension never auto-respawns daemon after activation (`extension.ts:271-273` is one-shot). H3 SECONDARY: stale Output channel lines from pre-v1.28.0-reload session. **Fix:** add `daemon_start_count` field to `/api/v1/health` (persisted in `~/.mcp-gateway/daemon-stats.json`) so extension can show "restarted N times" in tooltip. Plus add per-server-restart backoff (currently 0ms between attempts — generates 15-20 log lines per cycle). |
+
+**To resume:** re-launch the 4 running specialists (C, D, E, F) — async background agents from previous session do NOT survive session close. Read `docs/REVIEW-AUDIT.md` for the exact scope each needs. After all 6 specialists return → step 3 architect cross-domain → step 4 lead-auditor synthesis + PAL `thinkdeep` CV-GATE.
+
+**Confirmed root causes (Lead Auditor hypothesis, validated by Scope A + B):**
+1. **HIGH** — `go install ./cmd/mcp-gateway` bypasses goreleaser ldflags → `version=dev` → cascades into status-bar `vdev`, hidden footer, Copy-Diagnostics `unknown`. Fix: `runtime/debug.ReadBuildInfo()` fallback in main.go.
+2. **HIGH** — `internal/api/claude_code_handlers.go:441` reads `configs/...` CWD-relative → 503 on every installed daemon. Fix: `//go:embed`.
+
+Plus Scope B uncovered:
+3. **HIGH** — `.goreleaser.yml:63-65` doesn't include `configs/` in release archive (orthogonal, but important).
+4. **HIGH** — `installer/install.ps1:113` Scheduled Task `WorkingDirectory = $ConfigDir`, not `$InstallDir` — third mismatch location.
+5. **MEDIUM** — `claude_code_handlers_test.go:373-392` defect-as-feature test (always passes via 200 branch since Phase 16.4.7 landed; 503 branch never exercised).
+6. **HIGH (revised) — Scope C revealed** — `mcp-gateway: unknown` in Copy-Diagnostics is NOT just a downstream of Scope A. It's a separate bug: `server-data-cache.ts:113` wipes `cachedGatewayHealth=null` whenever /health call independently rejects (even when /servers call succeeded). Hook returns `undefined` → `?? 'unknown'` fires. Fix: preserve last-known-good gatewayHealth on transient /health failure, mirroring the server-list preservation at lines 89-103.
+7. **CRITICAL — Scope E uncovered** — `src/claude-code/detection.ts:125-127` reads `rec['name']`/`rec['marketplace']` from `claude plugin list --json` but actual CLI emits `rec['id']="mcp-gateway@mcp-gateway-local"`. **`detectPluginInstalled` ALWAYS returns `{installed:false}` against real CLI output.** Operator's "Plugin: not installed" while 6 backends Connected is THIS bug, NOT Scope A or anything else. Fix: parse `rec['id'].split('@')`. The test fixture (detection.test.ts:80-83) uses fabricated `{name, marketplace}` schema — both code and test agreed on a non-existent schema, hiding the bug from CI.
+
+**Zero-bugs fix sequence** (sorted by severity):
+1. CRITICAL SE-01 → fix `detection.ts` field parsing (5 min)
+2. HIGH SE-02 → update detection.test.ts fixture to match real CLI schema (10 min)
+3. HIGH F-A1 (Scope A) → `runtime/debug.ReadBuildInfo()` in `cmd/mcp-gateway/main.go` init() (30 min)
+4. HIGH SB-1 (Scope B) → `//go:embed configs/supported_claude_code_versions.json` (15 min)
+5. HIGH SC-C-H1 (Scope C) → preserve last-known-good gatewayHealth on transient /health fail (15 min)
+6. MEDIUM (multiple) → batch follow-up: extract `formatGatewayVersion()` helper, fix .goreleaser.yml `files:`, fix install.ps1 WorkingDirectory, rewrite defect-as-feature test SB-5
+7. LOW (Scope D, F): defer — auto-resolve via fix #3 (Scope A)
+
+---
+
 ## Released
 
 | Version | Date | Description |

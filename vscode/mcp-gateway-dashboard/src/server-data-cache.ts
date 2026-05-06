@@ -108,11 +108,17 @@ export class ServerDataCache implements vscode.Disposable {
 				// returns Promise<unknown> for test mocks. AUDIT A-L2 was incorrect
 				// for this codebase.
 				this.cachedGatewayHealth = healthResult.value as HealthResponse;
-			} else {
-				// Clear health so consumers render "offline" uptime instead of
-				// a stale "2h 14m" after the daemon has gone away.
+			} else if (this._lastRefreshFailed) {
+				// Both /servers and /health failed — daemon is genuinely down or
+				// unreachable. Clear health so consumers render "offline".
 				this.cachedGatewayHealth = null;
 			}
+			// else: /servers succeeded but /health rejected (transient health-call
+			// failure while daemon is otherwise responsive). Preserve the last-known
+			// gatewayHealth — Copy-Diagnostics, status-bar version, and the backends
+			// footer should NOT flip to "unknown" / "offline" because of a brief
+			// /health hiccup. Mirrors the server-list preservation invariant at
+			// lines 89-103. Audit Scope C SC-C-H1 (HIGH), 2026-05-06.
 			const { sap, mcp } = groupSapSystems(this.cachedServers);
 			this.cachedMcp = mcp;
 			this.cachedSap = sap;

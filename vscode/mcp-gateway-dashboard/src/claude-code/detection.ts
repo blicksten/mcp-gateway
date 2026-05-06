@@ -114,7 +114,17 @@ export async function detectPluginInstalled(
 	return detection;
 }
 
-/** Extracts plugin detection from the JSON returned by `claude plugin list --json`. */
+/**
+ * Extracts plugin detection from the JSON returned by `claude plugin list --json`.
+ *
+ * The CLI emits each entry as:
+ *   { "id": "<plugin-name>@<marketplace-name>", "version": "...", ... }
+ *
+ * NOT as separate `name` + `marketplace` fields (which was the prior assumption,
+ * fixed 2026-05-06 audit Scope E SE-01 CRITICAL — the test fixture had been
+ * fabricated to match the buggy code, so all 7 detection.test.ts cases passed
+ * against a non-existent schema and the bug shipped silently).
+ */
 function extractPluginDetection(parsed: unknown): PluginDetection {
 	if (!Array.isArray(parsed)) {
 		return Object.freeze({ installed: false });
@@ -122,14 +132,17 @@ function extractPluginDetection(parsed: unknown): PluginDetection {
 	for (const entry of parsed) {
 		if (typeof entry !== 'object' || entry === null) { continue; }
 		const rec = entry as Record<string, unknown>;
-		const name = typeof rec['name'] === 'string' ? rec['name'] : '';
-		const marketplace = typeof rec['marketplace'] === 'string' ? rec['marketplace'] : '';
-		if (name === 'mcp-gateway' || marketplace === 'mcp-gateway-local') {
+		const id = typeof rec['id'] === 'string' ? rec['id'] : '';
+		// id format: "<plugin-name>@<marketplace-name>"
+		const atIdx = id.indexOf('@');
+		const pluginName = atIdx >= 0 ? id.slice(0, atIdx) : id;
+		const marketplaceName = atIdx >= 0 ? id.slice(atIdx + 1) : '';
+		if (pluginName === 'mcp-gateway' || marketplaceName === 'mcp-gateway-local') {
 			const version = typeof rec['version'] === 'string' ? rec['version'] : undefined;
 			return Object.freeze({
 				installed: true,
 				version,
-				marketplace: marketplace || undefined,
+				marketplace: marketplaceName || undefined,
 			});
 		}
 	}
