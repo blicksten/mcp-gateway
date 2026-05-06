@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0](https://github.com/blicksten/mcp-gateway/compare/v1.5.0...v1.6.0) (2026-05-06)
+
+
+### Features
+
+* **catalog-A:** server + command catalogs v1.5.0 — schemas, seeds, TS loader, CI ([54f8c16](https://github.com/blicksten/mcp-gateway/commit/54f8c16beac7ba708f9762aeb8fd641363e72045))
+* **catalog-B:** Add Server browse webview — catalog dropdown + host re-validation ([c49e6ef](https://github.com/blicksten/mcp-gateway/commit/c49e6ef422bba92b6a95189267002645ef68f58a))
+* **catalog-C:** slash-command template enrichment — catalog-aware SlashCommandGenerator ([6e70dbd](https://github.com/blicksten/mcp-gateway/commit/6e70dbd4b15e0dbbd5d36f2b7d598203fc3c1c1c))
+* **catalog-D:** v1.5.0 release gate — README + CHANGELOG + VSIX + final security codereview ([864c5d5](https://github.com/blicksten/mcp-gateway/commit/864c5d51cae7d0d00e29841244741188183dd1db))
+* **daemon:** Phase D.1 — daemon lifecycle control foundation ([7e560de](https://github.com/blicksten/mcp-gateway/commit/7e560de99503479c471c667cb2728a8e2e287465))
+* **extension:** audit-dashboard Phase 0 — contract-drift fixes (v1.10.0) ([e6b621d](https://github.com/blicksten/mcp-gateway/commit/e6b621d0f0d0ee45c06dc6154c5c66a6fbc59e25))
+* **extension:** audit-dashboard Phase 1 — ClaudeCodePanel detection (v1.11.0) ([6d646f4](https://github.com/blicksten/mcp-gateway/commit/6d646f49651e6a50b9b34db5d22f5ac5410ad187))
+* **extension:** audit-dashboard Phase 2 — shared Logger + silent-catch cleanup (v1.12.0) ([fd03241](https://github.com/blicksten/mcp-gateway/commit/fd03241785556b9e2f396c2ba27559de60714c06))
+* **extension:** audit-dashboard Phase 3 — backend-aware daemon commands (v1.13.0) ([5430cfb](https://github.com/blicksten/mcp-gateway/commit/5430cfb597fd4a47809c53b7b8e3f5ea685bb306))
+* **extension:** audit-dashboard Phase 4 — gatewayVersion + probe cleanup + version-skew (v1.15.0) ([7255fb7](https://github.com/blicksten/mcp-gateway/commit/7255fb76787c07aa2d4f29a5952bcc4faa5ec6bc))
+* **extension:** audit-dashboard Phase 5 — Activate-button CWD independence (v1.16.0) ([f43ca22](https://github.com/blicksten/mcp-gateway/commit/f43ca2268764f86513ee2b50de98248dc1830c67))
+* **extension:** audit-dashboard Phase 6 — zombie-DOM CI + smoke checklist (v1.18.0) ([24d8c4c](https://github.com/blicksten/mcp-gateway/commit/24d8c4c62550f4bce98c6c7b588941cbb408b791))
+* **extension:** audit-dashboard Phase 8 + CI fix — detail-panel reconcile + settings watcher (v1.19.0) ([e223dd4](https://github.com/blicksten/mcp-gateway/commit/e223dd4dd2e60aa694bde2a0a807b8fa4926e3af))
+* **extension:** audit-dashboard Phase 9 — Windows daemon-kill safety + REST-first stop (v1.20.0) ([3b7c0c2](https://github.com/blicksten/mcp-gateway/commit/3b7c0c2b8b4cf19e684c36df90fc9ff69680b735))
+* **extension:** mcpGateway.sapSystemsEnabled — hide SAP Systems view by default (v1.9.0) ([0c4e6f6](https://github.com/blicksten/mcp-gateway/commit/0c4e6f639c69c3b859b1acab36ad9a433ff72e4d))
+* **extension:** phase 11.E slash command auto-generation ([991121f](https://github.com/blicksten/mcp-gateway/commit/991121f82f946e103e007630395d5b5997bc8581))
+* **extension:** Phase 17 dashboard UX polish — v1.7.0 ([dffb4b3](https://github.com/blicksten/mcp-gateway/commit/dffb4b325ea40986160167c42cbbdd78f29257a2))
+* **mcp-ctl:** doctor subcommand + dashboard ARCHITECTURE.md (audit-dashboard Phase 7) ([127cd51](https://github.com/blicksten/mcp-gateway/commit/127cd512d207fa6d4078c25bc8121d1cb1b12756))
+* **mcp-ctl:** Phase D.2 — daemon lifecycle subcommands ([4aa3e0e](https://github.com/blicksten/mcp-gateway/commit/4aa3e0e77091f21a6f365c4b3f6fa1cb14a6a64f))
+* mcp-gateway v1.0.0 ([5df38c3](https://github.com/blicksten/mcp-gateway/commit/5df38c348de01f29196afc868b53fa54d3e3bf43))
+* **phase-12.A:** Bearer auth - VS Code extension (T12A.8-T12A.12) ([4e075bf](https://github.com/blicksten/mcp-gateway/commit/4e075bfb63d7c71e867b8927e5d0182a4b0bbf57))
+* **phase-12.A:** Bearer token auth - daemon + mcp-ctl (Go side) ([6686cd2](https://github.com/blicksten/mcp-gateway/commit/6686cd2ba4d0c28fba606a66d8def6ea3af8c55b))
+* **phase-12.B:** KeePass credential push (T12B.1-T12B.6) ([7b1e52f](https://github.com/blicksten/mcp-gateway/commit/7b1e52f51669b674b398dfea79cd8cda03bf5ea7))
+* **phase-13:** security hardening - process groups + watcher race + TLS + log redaction ([a845a78](https://github.com/blicksten/mcp-gateway/commit/a845a7830ab0208ed60fab509203750ea493a7ec))
+* **phase-14:** community/CI — SECURITY.md + gitleaks + README auth/TLS/redaction ([29e6fc2](https://github.com/blicksten/mcp-gateway/commit/29e6fc22eb40d225752d69352f9e1a910cc7daa8))
+* **phase-15.A:** LOW findings closure — ConstantTimeCompare hygiene + scanner 1MB cap ([5c949ca](https://github.com/blicksten/mcp-gateway/commit/5c949caa5a2e26a0c5d24b7928ac59aecf75465c))
+* **phase-15.B:** TLS integration tier — half-configured refusal + ServeTLS coverage ([be9bbe9](https://github.com/blicksten/mcp-gateway/commit/be9bbe98d12b96d2c585c0f03658f6bbb90fc34f))
+* **phase-15.C:** Windows DACL enforcement tier — integration test + manual-protocol branch ([22f94c3](https://github.com/blicksten/mcp-gateway/commit/22f94c36682c6066e7c4b244ec6191991df060a2))
+* **phase-16.1:** Gateway dual-mode — aggregate + per-backend MCP proxy ([41ddb7f](https://github.com/blicksten/mcp-gateway/commit/41ddb7f80996eb2b101c325f4c69f52f2e32b75b))
+* **phase-16.2:** Claude Code plugin packaging + .mcp.json regen pipeline ([a397696](https://github.com/blicksten/mcp-gateway/commit/a3976961b0d7419ca070da4d9665ee6b15d0a8fd))
+* **phase-16.3:** Claude Code REST endpoints + patchstate package ([a7521fa](https://github.com/blicksten/mcp-gateway/commit/a7521fa4413294695db49dca34b602e0a24e5363))
+* **phase-16.4:** Claude Code webview patch — Alt-E native reconnect ([e8de700](https://github.com/blicksten/mcp-gateway/commit/e8de7006aa9daa91b63204a9a3fb4326bf91c5cf))
+* **phase-16.5:** Dashboard Claude Code Integration panel ([4c7b54e](https://github.com/blicksten/mcp-gateway/commit/4c7b54e96aabe565eca78ba9b62126dc18941076))
+* **phase-16.6:** gateway.invoke fallback + meta-tools + cache-bust version ([aa49242](https://github.com/blicksten/mcp-gateway/commit/aa49242b325b9edb7d7091a702cf0ae266d7034e))
+* **phase-16.7:** integration tests — E2E patch chain + CORS ([11e1a6c](https://github.com/blicksten/mcp-gateway/commit/11e1a6c1b1d7e4e025d98bb00a787983264b3d49))
+* **phase-16.8:** mcp-ctl install-claude-code bootstrap CLI ([46d72ac](https://github.com/blicksten/mcp-gateway/commit/46d72ac7af24b609522a4c0db4ffc31eadb1f2cc))
+* **phase-16.9:** docs + ADR-0005 + CHANGELOG v1.6.0 + dogfood-smoke CI ([4e39e84](https://github.com/blicksten/mcp-gateway/commit/4e39e84368bafa9c9da65b67edc836f1b8a5fcf8))
+
+
+### Bug Fixes
+
+* **ci:** dogfood-smoke — use --env-file to provide absolute npx path ([2b6ef12](https://github.com/blicksten/mcp-gateway/commit/2b6ef12d8d03afc6d5200278c7c611145fcc6676))
+* **ci:** repair dogfood-smoke — pass --config + use portable reference MCP servers ([180ce0c](https://github.com/blicksten/mcp-gateway/commit/180ce0c6b737d3f2bdac2d813a1d6d17e862042c))
+* **daemon:** audit Scope A + B — runtime/debug build info + //go:embed compat-matrix ([1b98785](https://github.com/blicksten/mcp-gateway/commit/1b987851905b758949d4b61a2aed7d14b2447465))
+* **extension:** audit-e7618c9c — CRITICAL detection.ts schema bug + HIGH cache wipe (v1.29.0) ([3c0f59c](https://github.com/blicksten/mcp-gateway/commit/3c0f59c714a77a0de42ab5fb6866c40a420c202b))
+* **extension:** debug-flicker phase 1 — preserve ServerDataCache on refresh error ([8f405f4](https://github.com/blicksten/mcp-gateway/commit/8f405f40e439b163689ac6dd60f5d892328b178d))
+* **extension:** debug-flicker phase 2 — cold-start placeholder ([f6fc6d1](https://github.com/blicksten/mcp-gateway/commit/f6fc6d1f334cbfcdaba36e2a956dfa25c37ae779))
+* **lifecycle:** suppress child console windows on Windows ([e156d42](https://github.com/blicksten/mcp-gateway/commit/e156d42dc54b573024a7585a479d9a4d735febf5))
+* **mcp-ctl validate:** hide spawned server console on Windows ([81334ba](https://github.com/blicksten/mcp-gateway/commit/81334bac4a612430f522094fa0cc7366b45129b4))
+* **mcp-ctl,plugin,catalog,extension:** MCP-lifecycle test campaign — Phase 10 + earlier fixes ([47fc179](https://github.com/blicksten/mcp-gateway/commit/47fc1791ac2f423eee284de265dfd04f33f59f13))
+* **mcp-ctl:** activate-for-claude-code now actually works end-to-end ([846f34d](https://github.com/blicksten/mcp-gateway/commit/846f34d98c8f75928bfdf74dba60f6f699ac7cbc))
+* **phase-12.A gate:** PAL codereview findings — CRITICAL X-Forwarded-For bypass + 6 others ([a168647](https://github.com/blicksten/mcp-gateway/commit/a168647f09e8501a58b0b51571f1d2b519770b9f))
+* **phase-12.B gate:** PAL codereview findings — 1 CRITICAL + 3 HIGH + 5 MEDIUM ([b05f30e](https://github.com/blicksten/mcp-gateway/commit/b05f30e720bf9f17b14512d84708dc4375931592))
+* **phase-13 gate:** PAL codereview findings — 6 HIGH + 2 MEDIUM ([c242b35](https://github.com/blicksten/mcp-gateway/commit/c242b351c561afd1dfbd6f20778754fc85e103e8))
+* **phase-16:** architect-review findings A-FIN-01..05 — all in-cycle ([983a0da](https://github.com/blicksten/mcp-gateway/commit/983a0dae4e370aa0235112de6c1a454a30e9cd06))
+* security hardening — env blocklist bypass, CRLF injection, URL validation ([b38447d](https://github.com/blicksten/mcp-gateway/commit/b38447debfdfacbad803936a1583be2849dc786c))
+* **windows:** suppress console windows on every child spawn path ([63c3f20](https://github.com/blicksten/mcp-gateway/commit/63c3f2072a706812584467521e25e516c93b6cb0))
+
 ## [1.9.1] - 2026-04-24
 
 ### Added — VSCode extension
