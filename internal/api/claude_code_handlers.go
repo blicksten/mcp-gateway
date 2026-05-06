@@ -2,8 +2,8 @@ package api
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -14,6 +14,16 @@ import (
 
 	"github.com/go-chi/chi/v5"
 )
+
+// embeddedCompatMatrix is the compat-matrix JSON baked into the daemon
+// binary at compile time. Eliminates the CWD-relative path resolution
+// that broke installer/`go install` deployments (audit Scope B SB-1
+// HIGH, 2026-05-06). The matrix locks to the binary version, which is
+// the right invariant: a new Claude Code spike pass requires both a
+// matrix update AND a daemon rebuild anyway (per ADR-0005:139).
+//
+//go:embed compat_matrix.json
+var embeddedCompatMatrix []byte
 
 // vscodeWebviewOriginPrefix is the schema-prefix we accept for CORS
 // preflight and Access-Control-Allow-Origin responses on the Claude Code
@@ -426,37 +436,37 @@ func (s *Server) liveBackendCount() int {
 	return n
 }
 
-// handleClaudeCodeCompatMatrix returns the contents of
-// configs/supported_claude_code_versions.json (T16.4.7, T16.6.5).
-// The compat matrix is the single source of truth consumed by the
-// dashboard for "is this Claude Code version Alt-E verified".
+// handleClaudeCodeCompatMatrix returns the compat matrix JSON embedded
+// into the daemon binary at build time (T16.4.7, T16.6.5). The compat
+// matrix is the single source of truth consumed by the dashboard for
+// "is this Claude Code version Alt-E verified".
 //
-// When the file has not yet been seeded (Phase 16.4.7 / 16.6.5 pending),
-// the endpoint returns 503 with a descriptive error rather than 404 — the
-// dashboard can distinguish "gateway doesn't ship matrix yet" from "bad
-// URL". The path is intentionally relative so deployments that ship the
-// daemon with a packaged `configs/` directory alongside the binary see
-// the same layout as development checkouts.
+// As of audit Scope B SB-1 (2026-05-06) the matrix is //go:embed-ed
+// from configs/supported_claude_code_versions.json. The previous
+// implementation read the file CWD-relative, which silently 503-ed for
+// any daemon not launched from the repo root (every operator-installed
+// daemon, every `go install` deployment, the install.ps1 Scheduled Task
+// because its WorkingDirectory is ~/.mcp-gateway not the binary dir).
+// Embedding eliminates the path-resolution defect entirely.
 func (s *Server) handleClaudeCodeCompatMatrix(w http.ResponseWriter, _ *http.Request) {
-	data, err := os.ReadFile("configs/supported_claude_code_versions.json")
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeError(w, http.StatusServiceUnavailable, "compat matrix not yet configured (configs/supported_claude_code_versions.json missing)")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "read compat matrix: "+err.Error())
+	if len(embeddedCompatMatrix) == 0 {
+		// Should never happen — //go:embed enforces presence at build time.
+		// Surfaced as 503 (not 500) so downstream UI can distinguish
+		// "matrix unavailable" from a transient daemon failure.
+		writeError(w, http.StatusServiceUnavailable, "compat matrix is empty (build asset missing)")
 		return
 	}
-	// Sanity-check JSON validity before returning so a corrupt file can't
-	// crash the dashboard's JSON parser with a confusing error.
+	// Sanity-check JSON validity once at first request — guards against a
+	// corrupt build asset (e.g. zero-byte truncation under race) so the
+	// dashboard's JSON parser can't be fed garbage with a confusing error.
 	var probe map[string]any
-	if err := json.Unmarshal(data, &probe); err != nil {
-		writeError(w, http.StatusInternalServerError, "compat matrix file is not valid JSON: "+err.Error())
+	if err := json.Unmarshal(embeddedCompatMatrix, &probe); err != nil {
+		writeError(w, http.StatusInternalServerError, "embedded compat matrix is not valid JSON: "+err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	_, _ = w.Write(embeddedCompatMatrix)
 }
 
 // handleClaudeCodeProbeResult records a patch-reported probe outcome.

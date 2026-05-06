@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,14 +35,86 @@ import (
 // §no-auth-escape-hatch.
 const envNoAuthUnderstood = "MCP_GATEWAY_I_UNDERSTAND_NO_AUTH"
 
-// Overridden by ldflags at link time; source values are dev-build fallbacks.
+// version / commit / date can be set in three ways, resolved in this order:
+//
+//  1. Linker (`go build -ldflags "-X main.version=v1.29.0 -X main.commit=... -X main.date=..."`)
+//     — used by .goreleaser.yml. Highest precedence; values arrive here as
+//     non-default strings and resolveBuildInfo() leaves them alone.
+//
+//  2. Module build info (`go install ./cmd/mcp-gateway` from a tagged release —
+//     Go ≥1.18). resolveBuildInfo() populates these from
+//     runtime/debug.ReadBuildInfo() when the linker did not, so a tagged
+//     `go install` yields a real "v1.29.0+abc1234" string.
+//
+//  3. Dev fallback ("dev", "none", "unknown") when neither is available
+//     (e.g., bare `go run` or pre-1.18 builds).
+//
+// Audit Scope A F-A1 (HIGH, 2026-05-06): the operator's `go install` produced
+// version="dev" because only path 1 was wired; this is fixed by enabling path 2.
 var (
 	version = "dev"
 	commit  = "none"
 	date    = "unknown"
 )
 
+// resolveBuildInfo upgrades version/commit/date from runtime/debug build info
+// when ldflags didn't inject them. Called from main() before any logging.
+//
+// Behaviour:
+//   - When `-ldflags "-X main.version=..."` was used, version != "dev" already
+//     and we do nothing (linker wins).
+//   - Otherwise: ReadBuildInfo() exposes Go module version (v0.0.0-... for an
+//     untagged commit, vX.Y.Z for an installed tagged release) and the VCS
+//     stamps Go automatically embeds (vcs.revision, vcs.time, vcs.modified).
+func resolveBuildInfo() {
+	if version != "dev" {
+		// Linker injected ldflags; leave alone.
+		return
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return
+	}
+	// Module version: empty/("(devel)") for `go run`/untagged; vX.Y.Z for
+	// `go install github.com/.../mcp-gateway@vX.Y.Z`.
+	if info.Main.Version != "" && info.Main.Version != "(devel)" {
+		version = info.Main.Version
+	}
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			if s.Value != "" {
+				if len(s.Value) > 12 {
+					commit = s.Value[:12]
+				} else {
+					commit = s.Value
+				}
+			}
+		case "vcs.time":
+			if s.Value != "" {
+				date = s.Value
+			}
+		case "vcs.modified":
+			if s.Value == "true" && version != "dev" && !strings.Contains(version, "+dirty") {
+				version = version + "+dirty"
+			}
+		}
+	}
+	// If the module version is still empty but we got a commit, surface it as
+	// the version so the UI shows something meaningful instead of "dev".
+	if version == "dev" && commit != "none" {
+		version = "0.0.0-" + commit
+		if strings.Contains(date, "T") {
+			version += "-" + strings.SplitN(date, "T", 2)[0]
+		}
+	}
+}
+
 func main() {
+	// Resolve module / VCS build info before anyone reads the version vars.
+	// No-op when ldflags already injected non-default values.
+	resolveBuildInfo()
+
 	var (
 		configPath string
 		envFile    string
