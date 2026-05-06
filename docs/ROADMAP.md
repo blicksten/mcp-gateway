@@ -26,6 +26,23 @@ Phases 1–16 implemented. Full history preserved locally in `full-history-backu
 
 ---
 
+## Server Rename Feature Track (Drafted)
+
+Plan: `docs/PLAN-docs-spikes-2026.md` (2026-05-06, sourced from `docs/spikes/2026-05-05-server-rename.md` v4). Audit history: 9 architect findings (F-ARCH-1..9) + 5 lead-audit findings (F-AUD-1..5) + 3 specialist-audit findings (F-SPEC-1..3) — **all 17 findings status=Fixed in-cycle** during planning pipeline `planning-19b7b15b`.
+
+**Status: Drafted — awaits operator approval before `/run docs-spikes-2026`**
+
+| # | Phase | Description | Tests | LOC | Est. Duration |
+|---|-------|-------------|-------|-----|---|
+| 1 | Go API | Implement `PATCH /api/v1/servers/{name}` rename branch (Plan A ordering: lm.AddServer → lm.RemoveServer → cfg-mutation), `isSAPName` detector, SAP-name refusal, 21 tests | 21 Go | ~540 | ~7.5 h |
+| 2 | TS Extension Client | Gateway-client `patchServer` signature update, credential-store `renameServerCredentials` (index-first ordering), `listServerCredentials`, 6 tests | 6 TS | ~75 | ~1.3 h |
+| 3 | TS Extension UI | Package.json command + menu, extension.ts handler (input + modal + credential UX), VSIX deploy, 7 tests | 7 TS | ~125 | ~2.2 h |
+| 4 | Documentation + manual E2E | README + CHANGELOG + ROADMAP, 9-item manual E2E checklist (Plan A rollback UX + credential-failure UX + ~/.claude.json propagation), final security CV pass | 9 manual | — | ~2.0 h |
+
+**Total plan:** ~34 tests (21 Go + 13 TS), ~990 LOC, ~16 hours, 4 phases, all 4 phases with rollback subsection + GATE checkpoint.
+
+---
+
 ## Phase 17 — Dashboard UX Polish Round 2 (COMPLETE, v1.7.2 in local `main`)
 
 Detailed plan: `docs/PLAN.md` (2026-04-22, CV via PAL thinkdeep + Sonnet code-reviewer fallback).
