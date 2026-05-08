@@ -1,7 +1,14 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { GatewayClient, GatewayError } from './gateway-client';
-import { buildAuthHeader, buildAuthHeaderAsync, resolveTokenPath, AuthTokenError } from './auth-header';
+import {
+	buildAuthHeader,
+	buildAuthHeaderAsync,
+	buildAdminAuthHeaderAsync,
+	resolveTokenPath,
+	resolveAdminTokenPath,
+	AuthTokenError,
+} from './auth-header';
 import { runKeepassImport, applyImportedCredentials, KeepassImportError } from './keepass-importer';
 import { BackendTreeProvider } from './backend-tree-provider';
 import { BackendItem } from './backend-item';
@@ -99,7 +106,33 @@ export function activate(
 		}
 	};
 
-	const client: IGatewayClient = injectedClient ?? new GatewayClient(apiUrl, 5000, authHeader);
+	// MCPR.3: admin-scope auth provider for daemon-control endpoints
+	// (currently /api/v1/shutdown). Reads ~/.mcp-gateway/admin.token (or
+	// the path configured via mcpGateway.adminTokenPath). Surfaces a
+	// distinct warning if the admin token is missing — operators see a
+	// clear message that the regular auth.token is NOT a substitute.
+	const adminTokenPath = resolveAdminTokenPath(config);
+	let adminAuthErrorNotified = false;
+	const adminAuthHeader = async (): Promise<string | undefined> => {
+		try {
+			return await buildAdminAuthHeaderAsync(adminTokenPath);
+		} catch (err) {
+			if (err instanceof AuthTokenError && !adminAuthErrorNotified) {
+				adminAuthErrorNotified = true;
+				void vscode.window.showWarningMessage(
+					'MCP Gateway: admin token not found. Daemon-control commands (shutdown) will fail until the daemon generates ~/.mcp-gateway/admin.token (start the daemon once) or MCP_GATEWAY_ADMIN_TOKEN is set. Other dashboard functions are unaffected.',
+					'Reload admin token',
+				).then((pick) => {
+					if (pick === 'Reload admin token') {
+						adminAuthErrorNotified = false;
+					}
+				});
+			}
+			throw err;
+		}
+	};
+
+	const client: IGatewayClient = injectedClient ?? new GatewayClient(apiUrl, 5000, authHeader, adminAuthHeader);
 
 	// Phase 8.2: credential store — OS keychain via SecretStorage.
 	// Constructed before the cache so the Phase 17.5 keepass-imported provider

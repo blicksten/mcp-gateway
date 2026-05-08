@@ -313,4 +313,106 @@ describe('GatewayClient', () => {
 			}
 		});
 	});
+
+	// MCPR.3: admin-scope auth provider must be used for /shutdown.
+	// The regular Bearer must NOT leak into daemon-control endpoints —
+	// otherwise VSCode 1.119's McpGatewayService (which only knows the
+	// regular Bearer via plugin .mcp.json) could still trigger /shutdown.
+	describe('admin auth (MCPR.3)', () => {
+		it('shutdown uses admin Bearer when adminAuthHeader provider is wired', async () => {
+			let capturedAuth: string | undefined;
+			addRoute('POST', '/api/v1/shutdown', (req) => {
+				capturedAuth = req.headers.authorization;
+				return { status: 202, body: { status: 'shutting_down' } };
+			});
+
+			const regularProvider = async (): Promise<string> => 'Bearer regular-token-XYZ';
+			const adminProvider = async (): Promise<string> => 'Bearer admin-token-ABC';
+			const dualClient = new GatewayClient(
+				`http://127.0.0.1:${port}`,
+				2000,
+				regularProvider,
+				adminProvider,
+			);
+
+			const resp = await dualClient.shutdown();
+			assert.strictEqual(resp.status, 'shutting_down');
+			assert.strictEqual(capturedAuth, 'Bearer admin-token-ABC',
+				'shutdown must carry the admin Bearer, not the regular one');
+		});
+
+		it('regular endpoint still uses regular Bearer when both providers wired', async () => {
+			let capturedAuth: string | undefined;
+			addRoute('GET', '/api/v1/servers', (req) => {
+				capturedAuth = req.headers.authorization;
+				return { status: 200, body: [] };
+			});
+
+			const regularProvider = async (): Promise<string> => 'Bearer regular-token-XYZ';
+			const adminProvider = async (): Promise<string> => 'Bearer admin-token-ABC';
+			const dualClient = new GatewayClient(
+				`http://127.0.0.1:${port}`,
+				2000,
+				regularProvider,
+				adminProvider,
+			);
+
+			await dualClient.listServers();
+			assert.strictEqual(capturedAuth, 'Bearer regular-token-XYZ',
+				'regular endpoints must continue to carry the regular Bearer');
+		});
+
+		it('shutdown falls back to regular provider when admin provider is unwired', async () => {
+			// Legacy single-tier deployments (or pre-MCPR.3 daemons) — admin
+			// provider absent means client falls back to regular for shutdown.
+			// Such a call WILL fail with 401 against an MCPR.3-aware daemon,
+			// but the client itself does not crash and surfaces the daemon's
+			// 401 as kind:auth.
+			let capturedAuth: string | undefined;
+			addRoute('POST', '/api/v1/shutdown', (req) => {
+				capturedAuth = req.headers.authorization;
+				return { status: 202, body: { status: 'shutting_down' } };
+			});
+
+			const regularProvider = async (): Promise<string> => 'Bearer regular-only';
+			const legacyClient = new GatewayClient(
+				`http://127.0.0.1:${port}`,
+				2000,
+				regularProvider,
+				// adminProvider intentionally omitted
+			);
+
+			await legacyClient.shutdown();
+			assert.strictEqual(capturedAuth, 'Bearer regular-only',
+				'fallback must use regular provider when admin is unwired');
+		});
+
+		it('admin provider error surfaces as kind:auth', async () => {
+			// Mirrors the regular-path behavior — admin provider failures
+			// must classify as 'auth' so UI can distinguish from network
+			// failures.
+			const regularProvider = async (): Promise<string> => 'Bearer regular';
+			const adminProvider = async (): Promise<string> => {
+				const err = new Error('admin token missing') as Error & { name: string };
+				err.name = 'AuthTokenError';
+				// Use a real AuthTokenError instance to match the runtime check.
+				const { AuthTokenError } = await import('../auth-header');
+				throw new AuthTokenError('admin token missing', '/fake/admin.token');
+			};
+			const failClient = new GatewayClient(
+				`http://127.0.0.1:${port}`,
+				2000,
+				regularProvider,
+				adminProvider,
+			);
+			await assert.rejects(
+				() => failClient.shutdown(),
+				(err: GatewayError) => {
+					assert.strictEqual(err.kind, 'auth');
+					assert.ok(err.message.includes('admin token missing'));
+					return true;
+				},
+			);
+		});
+	});
 });

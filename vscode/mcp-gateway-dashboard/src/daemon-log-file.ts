@@ -86,7 +86,11 @@ export class DaemonLogFile implements vscode.Disposable {
 		if (!this.enabled || this.retentionDays === 0) { return; }
 		try {
 			const entries = this.fs.readdirSync(this.storageDir);
-			const cutoff = Date.now() - this.retentionDays * 24 * 60 * 60 * 1000;
+			// Use injected clock so tests can control "now" deterministically.
+			// Previously this used Date.now() directly which caused B6 to fail
+			// when real wall-clock time drifted past the boundary case
+			// (e.g. file dated exactly retentionDays ago).
+			const cutoff = this.clock().getTime() - this.retentionDays * 24 * 60 * 60 * 1000;
 			for (const entry of entries) {
 				if (!isDaemonLogFilename(entry)) { continue; }
 				const filePath = path.join(this.storageDir, entry);

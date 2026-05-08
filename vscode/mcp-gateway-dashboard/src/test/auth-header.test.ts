@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	ENV_VAR_NAME,
+	ENV_VAR_NAME_ADMIN,
 	MIN_TOKEN_LEN,
 	AuthTokenError,
 	looksLikeToken,
@@ -13,6 +14,11 @@ import {
 	buildAuthHeaderAsync,
 	resolveTokenPath,
 	defaultTokenPath,
+	resolveAdminToken,
+	resolveAdminTokenAsync,
+	buildAdminAuthHeaderAsync,
+	resolveAdminTokenPath,
+	defaultAdminTokenPath,
 	_clearTokenCacheForTests,
 } from '../auth-header';
 
@@ -242,6 +248,151 @@ describe('auth-header', () => {
 			const got = resolveTokenPath(cfg);
 			assert.ok(got.startsWith(os.homedir()), `expected ${got} to start with home`);
 			assert.ok(got.endsWith(path.join('custom', 'token')));
+		});
+	});
+
+	// MCPR.3: admin-token resolution mirrors the regular path.
+	describe('admin token (MCPR.3)', () => {
+		let prevAdminEnv: string | undefined;
+		beforeEach(() => {
+			prevAdminEnv = process.env[ENV_VAR_NAME_ADMIN];
+			delete process.env[ENV_VAR_NAME_ADMIN];
+			_clearTokenCacheForTests();
+		});
+		afterEach(() => {
+			if (prevAdminEnv === undefined) {
+				delete process.env[ENV_VAR_NAME_ADMIN];
+			} else {
+				process.env[ENV_VAR_NAME_ADMIN] = prevAdminEnv;
+			}
+		});
+
+		describe('defaultAdminTokenPath', () => {
+			it('returns ~/.mcp-gateway/admin.token', () => {
+				const got = defaultAdminTokenPath();
+				assert.equal(got, path.join(os.homedir(), '.mcp-gateway', 'admin.token'));
+			});
+			it('is path-distinct from defaultTokenPath', () => {
+				assert.notEqual(defaultAdminTokenPath(), defaultTokenPath(),
+					'admin and regular tokens must live in distinct files');
+			});
+		});
+
+		describe('resolveAdminToken (sync)', () => {
+			it('uses MCP_GATEWAY_ADMIN_TOKEN env var', () => {
+				process.env[ENV_VAR_NAME_ADMIN] = 'A'.repeat(MIN_TOKEN_LEN);
+				const tok = resolveAdminToken('/nonexistent/admin.token');
+				assert.equal(tok, 'A'.repeat(MIN_TOKEN_LEN));
+			});
+
+			it('does NOT use MCP_GATEWAY_AUTH_TOKEN env var', () => {
+				const p = freshTokenPath();
+				try {
+					process.env[ENV_VAR_NAME] = 'R'.repeat(MIN_TOKEN_LEN); // regular env
+					assert.throws(() => resolveAdminToken(p), (err: Error) => {
+						return err instanceof AuthTokenError;
+					});
+				} finally {
+					delete process.env[ENV_VAR_NAME];
+					cleanupTokenPath(p);
+				}
+			});
+
+			it('falls back to file when admin env absent', () => {
+				const p = freshTokenPath();
+				try {
+					fs.writeFileSync(p, BASE64URL);
+					const tok = resolveAdminToken(p);
+					assert.equal(tok, BASE64URL);
+				} finally { cleanupTokenPath(p); }
+			});
+
+			it('throws AuthTokenError mentioning admin env var when missing', () => {
+				const p = freshTokenPath();
+				try {
+					assert.throws(() => resolveAdminToken(p), (err: Error) => {
+						return err instanceof AuthTokenError
+							&& err.message.includes(ENV_VAR_NAME_ADMIN)
+							&& !err.message.includes(ENV_VAR_NAME); // must NOT mention regular
+					});
+				} finally { cleanupTokenPath(p); }
+			});
+
+			it('throws on malformed env var', () => {
+				process.env[ENV_VAR_NAME_ADMIN] = 'too-short';
+				assert.throws(() => resolveAdminToken('/nonexistent'), (err: Error) => {
+					return err instanceof AuthTokenError
+						&& err.message.includes(ENV_VAR_NAME_ADMIN);
+				});
+			});
+		});
+
+		describe('resolveAdminTokenAsync', () => {
+			it('caches admin token separately from regular cache', async () => {
+				const adminPath = freshTokenPath();
+				const regularPath = freshTokenPath();
+				try {
+					fs.writeFileSync(adminPath, 'A'.repeat(MIN_TOKEN_LEN));
+					fs.writeFileSync(regularPath, 'R'.repeat(MIN_TOKEN_LEN));
+
+					const admin = await resolveAdminTokenAsync(adminPath);
+					assert.equal(admin, 'A'.repeat(MIN_TOKEN_LEN));
+
+					// Regular path still works (separate cache slot).
+					const regular = await resolveTokenAsync(regularPath);
+					assert.equal(regular, 'R'.repeat(MIN_TOKEN_LEN));
+
+					// Re-reading admin should hit cache (no thrash from regular call).
+					const adminAgain = await resolveAdminTokenAsync(adminPath);
+					assert.equal(adminAgain, 'A'.repeat(MIN_TOKEN_LEN));
+				} finally {
+					cleanupTokenPath(adminPath);
+					cleanupTokenPath(regularPath);
+				}
+			});
+
+			it('throws AuthTokenError when neither source available', async () => {
+				const p = freshTokenPath();
+				try {
+					await assert.rejects(() => resolveAdminTokenAsync(p), AuthTokenError);
+				} finally { cleanupTokenPath(p); }
+			});
+		});
+
+		describe('buildAdminAuthHeaderAsync', () => {
+			it('returns Bearer prefix with admin token', async () => {
+				const p = freshTokenPath();
+				try {
+					fs.writeFileSync(p, BASE64URL);
+					const hdr = await buildAdminAuthHeaderAsync(p);
+					assert.equal(hdr, `Bearer ${BASE64URL}`);
+				} finally { cleanupTokenPath(p); }
+			});
+		});
+
+		describe('resolveAdminTokenPath', () => {
+			it('returns defaultAdminTokenPath when no setting', () => {
+				assert.equal(resolveAdminTokenPath(undefined), defaultAdminTokenPath());
+			});
+
+			it('uses configured adminTokenPath setting', () => {
+				const cfg = { get: (s: string) => s === 'adminTokenPath' ? '/custom/admin.token' : undefined };
+				assert.equal(resolveAdminTokenPath(cfg), '/custom/admin.token');
+			});
+
+			it('expands leading ~/ in admin path', () => {
+				const cfg = { get: (s: string) => s === 'adminTokenPath' ? '~/custom/admin.tok' : undefined };
+				const got = resolveAdminTokenPath(cfg);
+				assert.ok(got.startsWith(os.homedir()));
+				assert.ok(got.endsWith(path.join('custom', 'admin.tok')));
+			});
+
+			it('does NOT pick up the regular authTokenPath setting', () => {
+				// Critical: an extension that misconfigures authTokenPath must
+				// not accidentally redirect admin lookups to the same file.
+				const cfg = { get: (s: string) => s === 'authTokenPath' ? '/regular' : undefined };
+				assert.equal(resolveAdminTokenPath(cfg), defaultAdminTokenPath());
+			});
 		});
 	});
 });

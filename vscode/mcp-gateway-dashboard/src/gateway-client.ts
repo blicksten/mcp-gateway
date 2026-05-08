@@ -40,15 +40,23 @@ export class GatewayClient {
 	private readonly baseUrl: URL;
 	private readonly timeoutMs: number;
 	private readonly authHeader?: AuthHeaderProvider;
+	// MCPR.3: separate provider for admin-scope endpoints (currently
+	// /api/v1/shutdown). When undefined, admin-scope calls fall back to
+	// the regular authHeader — that path will 401 against an MCPR.3-aware
+	// daemon and surface as GatewayError('auth', ...). Recommended:
+	// always wire both providers in extension.ts so daemon-control works.
+	private readonly adminAuthHeader?: AuthHeaderProvider;
 
 	constructor(
 		baseUrl = 'http://localhost:8765',
 		timeoutMs = 5000,
 		authHeader?: AuthHeaderProvider,
+		adminAuthHeader?: AuthHeaderProvider,
 	) {
 		this.baseUrl = new URL(baseUrl);
 		this.timeoutMs = timeoutMs;
 		this.authHeader = authHeader;
+		this.adminAuthHeader = adminAuthHeader;
 	}
 
 	// --- Health ---
@@ -57,11 +65,18 @@ export class GatewayClient {
 		return this.request<HealthResponse>('GET', '/api/v1/health');
 	}
 
-	// Phase D.3: graceful daemon shutdown via REST (auth-required).
+	// Phase D.3 + MCPR.3: graceful daemon control via REST (admin scope).
+	// Uses the admin-scope auth provider — falls back to the regular
+	// provider only when none is wired (legacy single-tier deployments).
 	// Returns on 202 Accepted; translates connection-refused into a
 	// GatewayError('connection', ...) the caller can inspect.
 	async shutdown(): Promise<StatusResponse> {
-		return this.request<StatusResponse>('POST', '/api/v1/shutdown');
+		return this.request<StatusResponse>(
+			'POST',
+			'/api/v1/shutdown',
+			undefined,
+			{ useAdminAuth: true },
+		);
 	}
 
 	// --- Servers ---
@@ -129,7 +144,17 @@ export class GatewayClient {
 	// inside a new Promise() constructor, which meant fs.readFileSync blocked
 	// the event loop on every REST call. The async provider uses the mtime-
 	// cached resolveTokenAsync path instead.
-	private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+	//
+	// MCPR.3: opts.useAdminAuth selects the admin-scope provider for
+	// daemon-control endpoints (currently /api/v1/shutdown). Falls back to
+	// the regular provider when the admin one is unwired so legacy
+	// single-tier deployments keep working.
+	private async request<T>(
+		method: string,
+		path: string,
+		body?: unknown,
+		opts?: { useAdminAuth?: boolean },
+	): Promise<T> {
 		const url = new URL(path, this.baseUrl);
 
 		const headers: Record<string, string> = {};
@@ -140,9 +165,12 @@ export class GatewayClient {
 		// Attach Authorization header if the caller supplied a provider.
 		// Provider errors surface as GatewayError('auth', ...) so UI code
 		// can distinguish "no token" from network failures.
-		if (this.authHeader) {
+		const provider = opts?.useAdminAuth
+			? (this.adminAuthHeader ?? this.authHeader)
+			: this.authHeader;
+		if (provider) {
 			try {
-				const hdr = await this.authHeader();
+				const hdr = await provider();
 				if (hdr) { headers['Authorization'] = hdr; }
 			} catch (err) {
 				if (err instanceof AuthTokenError) {

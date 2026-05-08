@@ -24,16 +24,34 @@ interface TokenFileCache {
 
 let _tokenCache: TokenFileCache | null = null;
 
+// MCPR.3: separate cache slot for the admin-token path. Two reasons:
+//   (1) admin and regular tokens live at different paths
+//       (~/.mcp-gateway/admin.token vs auth.token), so a single cache keyed
+//       on tokenPath would invalidate on every alternation between calls.
+//   (2) admin lookups are rare (only daemon-control endpoints), so an
+//       independent slot keeps the regular-path cache hot for the
+//       per-poll REST traffic that drives the dashboard.
+let _adminTokenCache: TokenFileCache | null = null;
+
 /**
- * Reset the module-level token cache. Exported for tests only — not part of
+ * Reset the module-level token caches. Exported for tests only — not part of
  * the public API. Allows deterministic test isolation without module reload.
  */
 export function _clearTokenCacheForTests(): void {
 	_tokenCache = null;
+	_adminTokenCache = null;
 }
 
 /** Env var name matching Go-side `auth.EnvVarName`. */
 export const ENV_VAR_NAME = 'MCP_GATEWAY_AUTH_TOKEN';
+
+/**
+ * MCPR.3: Env var name matching Go-side `auth.EnvVarNameAdmin`. Holds the
+ * admin Bearer that gates daemon-control endpoints (currently
+ * /api/v1/shutdown). Distinct from ENV_VAR_NAME so the regular Bearer
+ * cannot accidentally satisfy admin scope.
+ */
+export const ENV_VAR_NAME_ADMIN = 'MCP_GATEWAY_ADMIN_TOKEN';
 
 /**
  * Minimum base64url character count for a valid persisted token.
@@ -199,4 +217,130 @@ export function resolveTokenPath(cfg: AuthConfig | undefined): string {
 		return configured;
 	}
 	return defaultTokenPath();
+}
+
+// ---------------------------------------------------------------------------
+// MCPR.3 — admin token resolution (parallel to the regular path above)
+// ---------------------------------------------------------------------------
+
+/**
+ * Default platform-resolved admin-token path (`~/.mcp-gateway/admin.token`).
+ * Path-distinct from `auth.token` so the daemon and the extension never
+ * confuse the two scopes. Plugin manifest invariant (ADR-0007 §two-tier-auth):
+ * this path is NEVER substituted into the .mcp.json template, so VSCode
+ * 1.119's built-in McpGatewayService cannot acquire it.
+ */
+export function defaultAdminTokenPath(): string {
+	return path.join(os.homedir(), '.mcp-gateway', 'admin.token');
+}
+
+/**
+ * MCPR.3: resolve the admin token path from VS Code configuration with a
+ * sensible default. Mirror of `resolveTokenPath` for the admin scope.
+ */
+export function resolveAdminTokenPath(cfg: AuthConfig | undefined): string {
+	const configured = cfg?.get('adminTokenPath');
+	if (configured && configured.trim().length > 0) {
+		if (configured.startsWith('~/') || configured.startsWith('~\\')) {
+			return path.join(os.homedir(), configured.slice(2));
+		}
+		return configured;
+	}
+	return defaultAdminTokenPath();
+}
+
+/**
+ * MCPR.3: synchronous resolution of the admin Bearer using the env >
+ * file ladder. Mirror of `resolveToken` for the admin scope. Uses
+ * ENV_VAR_NAME_ADMIN so the regular Bearer never satisfies admin scope.
+ */
+export function resolveAdminToken(tokenPath: string): string {
+	const env = process.env[ENV_VAR_NAME_ADMIN];
+	if (env && env.length > 0) {
+		if (!looksLikeToken(env)) {
+			throw new AuthTokenError(
+				`${ENV_VAR_NAME_ADMIN} env var is set but malformed (expected >=${MIN_TOKEN_LEN} base64url chars)`,
+				tokenPath,
+			);
+		}
+		return env;
+	}
+	try {
+		const raw = fs.readFileSync(tokenPath, 'utf8').trim();
+		if (looksLikeToken(raw)) { return raw; }
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code !== 'ENOENT' && code !== 'EACCES') {
+			throw err;
+		}
+	}
+	throw new AuthTokenError(
+		`no admin token found: set ${ENV_VAR_NAME_ADMIN} env var or create ${tokenPath}`,
+		tokenPath,
+	);
+}
+
+/**
+ * MCPR.3: async admin-token resolution with a dedicated mtime cache so
+ * regular-path caching is not invalidated by admin lookups. Mirror of
+ * `resolveTokenAsync` for the admin scope.
+ */
+export async function resolveAdminTokenAsync(tokenPath: string): Promise<string> {
+	const env = process.env[ENV_VAR_NAME_ADMIN];
+	if (env && env.length > 0) {
+		if (!looksLikeToken(env)) {
+			throw new AuthTokenError(
+				`${ENV_VAR_NAME_ADMIN} env var is set but malformed (expected >=${MIN_TOKEN_LEN} base64url chars)`,
+				tokenPath,
+			);
+		}
+		return env;
+	}
+
+	if (_adminTokenCache && _adminTokenCache.tokenPath === tokenPath) {
+		try {
+			const st = await fs.promises.stat(tokenPath);
+			if (st.mtimeMs === _adminTokenCache.mtimeMs) {
+				return _adminTokenCache.content;
+			}
+		} catch {
+			_adminTokenCache = null;
+		}
+	}
+
+	try {
+		const st = await fs.promises.stat(tokenPath);
+		const raw = await fs.promises.readFile(tokenPath, 'utf8');
+		const trimmed = raw.trim();
+		if (looksLikeToken(trimmed)) {
+			_adminTokenCache = { tokenPath, content: trimmed, mtimeMs: st.mtimeMs };
+			return trimmed;
+		}
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code !== 'ENOENT' && code !== 'EACCES') {
+			throw err;
+		}
+	}
+
+	throw new AuthTokenError(
+		`no admin token found: set ${ENV_VAR_NAME_ADMIN} env var or create ${tokenPath}`,
+		tokenPath,
+	);
+}
+
+/**
+ * MCPR.3: returns the full `Authorization: Bearer <admin-token>` header.
+ * Mirror of `buildAuthHeader` for the admin scope.
+ */
+export function buildAdminAuthHeader(tokenPath: string): string {
+	return `Bearer ${resolveAdminToken(tokenPath)}`;
+}
+
+/**
+ * MCPR.3: async admin Bearer header builder using the cached resolver.
+ * Mirror of `buildAuthHeaderAsync` for the admin scope.
+ */
+export async function buildAdminAuthHeaderAsync(tokenPath: string): Promise<string> {
+	return `Bearer ${await resolveAdminTokenAsync(tokenPath)}`;
 }
