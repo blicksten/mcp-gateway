@@ -19,9 +19,9 @@
 package sapcreds_test
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -222,6 +222,17 @@ func TestKeePassPoC_CompositeKeyFile(t *testing.T) {
 	_, err = keepass.OpenDatabase(path, []byte("master-pw"), filepath.Join(t.TempDir(), "missing.keyx"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "key file", "missing keyfile error must mention 'key file'")
+
+	// Workaround for upstream gokeepasslib v3.6.2 bug: ParseKeyFile in
+	// credentials.go opens the key file with os.Open and never calls
+	// Close() — relies on the *os.File finalizer for cleanup. On Windows
+	// this leaves a file handle alive across t.TempDir cleanup, which
+	// then races with the OS lock and reports
+	// "The process cannot access the file because it is being used by
+	// another process" on RemoveAll. Forcing GC + finalizer drains the
+	// leaked handle. Should be removed once the upstream fix lands; tracked
+	// in T-A.4 as a follow-up to file an upstream PR.
+	runtime.GC()
 }
 
 // ---------------------------------------------------------------------------
@@ -295,11 +306,68 @@ func TestKeePassPoC_WrongPasswordTypedError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Acceptance test 3b — recycle-bin filter respects the RecycleBinEnabled flag.
+//
+// Pinning the F4 guard: when an admin disabled the recycle bin (via
+// "Database Settings → Recycle bin → Use a recycle bin = false"), the
+// vault retains a legacy RecycleBinUUID but the flag goes false. A naive
+// UUID-only filter would still strip whatever group happens to match that
+// UUID, dropping real entries. The guard short-circuits to "no filter" when
+// RecycleBinEnabled is false OR RecycleBinUUID is zero.
+// ---------------------------------------------------------------------------
+
+func TestKeePassPoC_RecycleBinDisabledReturnsAllEntries(t *testing.T) {
+	// Build a vault with a "recycle bin" group AND RecycleBinUUID set in
+	// Meta — but with RecycleBinEnabled=false. Mirrors a vault where the
+	// admin turned recycle-bin off but legacy UUID metadata persisted.
+	path := filepath.Join(t.TempDir(), "vault.kdbx")
+
+	regular := gokeepasslib.NewGroup()
+	regular.Name = "Regular"
+	regular.Entries = []gokeepasslib.Entry{simpleEntry("vsp-PRD-100", "alice", "regular-secret")}
+
+	legacyBin := gokeepasslib.NewGroup()
+	legacyBin.Name = "Legacy Bin"
+	legacyBin.Entries = []gokeepasslib.Entry{simpleEntry("vsp-LEGACY-200", "bob", "legacy-secret")}
+
+	root := gokeepasslib.NewGroup()
+	root.Name = "Root"
+	root.Groups = []gokeepasslib.Group{regular, legacyBin}
+
+	meta := gokeepasslib.NewMetaData()
+	// Critical: legacy UUID still set, but explicit false.
+	meta.RecycleBinEnabled = w.NewBoolWrapper(false)
+	meta.RecycleBinUUID = legacyBin.UUID
+
+	db := gokeepasslib.NewDatabase(gokeepasslib.WithDatabaseKDBXVersion4())
+	db.Credentials = gokeepasslib.NewPasswordCredentials("master-pw")
+	db.Content.Meta = meta
+	db.Content.Root = &gokeepasslib.RootData{Groups: []gokeepasslib.Group{root}}
+	db.LockProtectedEntries()
+
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	require.NoError(t, gokeepasslib.NewEncoder(f).Encode(db))
+	require.NoError(t, f.Close())
+
+	openedDB, err := keepass.OpenDatabase(path, []byte("master-pw"), "")
+	require.NoError(t, err)
+
+	filtered := extractEntriesExcludingRecycleBin(openedDB)
+	titles := titleSet(filtered)
+	assert.Contains(t, titles, "vsp-PRD-100", "regular entry must be present")
+	assert.Contains(t, titles, "vsp-LEGACY-200",
+		"entry under legacy-UUID group MUST be returned when RecycleBinEnabled=false")
+}
+
+// ---------------------------------------------------------------------------
 // Acceptance test 5 — locked-vault (missing credentials) returns a typed error.
 //
 // Locked vault here means: no master password and no key-file supplied. The
-// production wrapper's buildCredentials returns a sentinel error before any
-// I/O happens. This is the canonical "vault is sealed" signal.
+// production wrapper's buildCredentials returns the keepass.ErrNoCredentials
+// sentinel before any I/O happens. This is the canonical "vault is sealed"
+// signal — distinguishable from wrong-password (decode error) and from
+// fs-level errors (open error). Caller code uses errors.Is to branch.
 // ---------------------------------------------------------------------------
 
 func TestKeePassPoC_LockedVaultTypedError(t *testing.T) {
@@ -310,18 +378,9 @@ func TestKeePassPoC_LockedVaultTypedError(t *testing.T) {
 
 	_, err := keepass.OpenDatabase(path, nil, "")
 	require.Error(t, err, "missing credentials must error out")
-	assert.Contains(t, err.Error(), "no credentials provided",
-		"locked-vault error must be the typed 'no credentials provided' sentinel")
-
-	// Must NOT panic — internal/keepass.decodeWithRecover normalises panics,
-	// but in the locked-vault case we should not even reach the decoder.
-	assert.False(t, errors.Is(err, errSentinel),
-		"sanity: errors.Is helper resolves to false for unrelated sentinels")
+	require.ErrorIs(t, err, keepass.ErrNoCredentials,
+		"locked-vault error must wrap keepass.ErrNoCredentials so callers can errors.Is it")
 }
-
-// errSentinel is used only to exercise errors.Is plumbing in
-// TestKeePassPoC_LockedVaultTypedError; not part of the PoC contract.
-var errSentinel = errors.New("sentinel")
 
 // ---------------------------------------------------------------------------
 // Helpers private to this PoC (lifted into internal/sapcreds proper in T-A.4)
@@ -331,20 +390,37 @@ var errSentinel = errors.New("sentinel")
 // whose owning group's UUID is NOT the recycle-bin UUID recorded in Meta.
 // Returns the same shape as keepass.ExtractEntries. Hand-rolled here as the
 // production version (lifecycle + envwriter integration) lands in T-A.4.
+//
+// Guard semantics (PAL F4 fix): the recycle-bin filter only fires when BOTH
+// (a) Meta.RecycleBinEnabled is explicitly true AND (b) RecycleBinUUID is
+// non-zero. Either guard failing means "no recycle-bin filter applies", and
+// the walker returns every group's entries unchanged. This protects against:
+//   - Vaults that have RecycleBinEnabled=false but RecycleBinUUID still set
+//     to a legacy UUID — naive UUID-only comparison would clobber whatever
+//     real group happens to share that UUID.
+//   - Partially-migrated vaults where RecycleBinEnabled is true but
+//     RecycleBinUUID is the zero value — naive comparison would clobber the
+//     first group whose UUID happens to be zero (gokeepasslib.NewGroup()
+//     never produces zero, but defensive against hand-built fixtures and
+//     other library producers).
 func extractEntriesExcludingRecycleBin(db *gokeepasslib.Database) []keepass.KeePassEntry {
 	if db == nil || db.Content == nil || db.Content.Meta == nil || db.Content.Root == nil {
 		return nil
 	}
-	recycleUUID := db.Content.Meta.RecycleBinUUID
+	meta := db.Content.Meta
+	recycleEnabled := meta.RecycleBinEnabled.Bool
+	recycleUUID := meta.RecycleBinUUID
+	filterApplies := recycleEnabled && !isZeroUUID(recycleUUID)
+
 	var out []keepass.KeePassEntry
 	for _, g := range db.Content.Root.Groups {
-		out = append(out, walkGroupExcludingRecycle(g, recycleUUID, g.Name)...)
+		out = append(out, walkGroupExcludingRecycle(g, recycleUUID, filterApplies, g.Name)...)
 	}
 	return out
 }
 
-func walkGroupExcludingRecycle(g gokeepasslib.Group, recycleUUID gokeepasslib.UUID, path string) []keepass.KeePassEntry {
-	if g.UUID.Compare(recycleUUID) {
+func walkGroupExcludingRecycle(g gokeepasslib.Group, recycleUUID gokeepasslib.UUID, filterApplies bool, path string) []keepass.KeePassEntry {
+	if filterApplies && g.UUID.Compare(recycleUUID) {
 		// Skip the recycle-bin group entirely (and all its sub-groups).
 		return nil
 	}
@@ -362,9 +438,17 @@ func walkGroupExcludingRecycle(g gokeepasslib.Group, recycleUUID gokeepasslib.UU
 		})
 	}
 	for _, sg := range g.Groups {
-		out = append(out, walkGroupExcludingRecycle(sg, recycleUUID, path+"/"+sg.Name)...)
+		out = append(out, walkGroupExcludingRecycle(sg, recycleUUID, filterApplies, path+"/"+sg.Name)...)
 	}
 	return out
+}
+
+// isZeroUUID reports whether u is the all-zeros UUID. gokeepasslib.UUID is a
+// fixed-size [16]byte, so a direct == comparison against a zero-valued UUID
+// is exhaustive.
+func isZeroUUID(u gokeepasslib.UUID) bool {
+	var zero gokeepasslib.UUID
+	return u == zero
 }
 
 // titleSet collects entry titles into a map for set-membership assertions.

@@ -2,12 +2,20 @@
 package keepass
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/tobischo/gokeepasslib/v3"
 )
+
+// ErrNoCredentials is returned by OpenDatabase / buildCredentials when the
+// caller supplied neither a master password nor a key file. Exported so that
+// downstream callers (mcp-ctl credential import; SAP Picker T-A.4) can use
+// `errors.Is(err, keepass.ErrNoCredentials)` instead of brittle substring
+// matches on err.Error().
+var ErrNoCredentials = errors.New("no credentials provided: use --password-file or --key-file")
 
 // KeePassEntry holds extracted credential data from a KDBX entry.
 type KeePassEntry struct {
@@ -78,7 +86,7 @@ func buildCredentials(password []byte, keyFile string) (*gokeepasslib.DBCredenti
 	case hasPassword:
 		return gokeepasslib.NewPasswordCredentials(pw), nil
 	default:
-		return nil, fmt.Errorf("no credentials provided: use --password-file or --key-file")
+		return nil, ErrNoCredentials
 	}
 }
 
