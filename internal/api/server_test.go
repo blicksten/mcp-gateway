@@ -722,9 +722,14 @@ func TestMetrics_TokenEstimation_Multibyte(t *testing.T) {
 
 // --- Phase D.1: handleShutdown tests ---
 
-// newAuthedServerWithShutdown builds a test server with Bearer auth enabled
-// and a real shutdownFn wired in. Returns the handler, the token, and a
-// channel that receives a value when shutdownFn is invoked.
+// newAuthedServerWithShutdown builds a test server with Bearer auth + admin
+// auth enabled and a real shutdownFn wired in. Returns the handler, the
+// ADMIN token (not the regular Bearer — /shutdown is admin-scope-only
+// post-MCPR.3), and a channel that receives a value when shutdownFn is
+// invoked.
+//
+// Tests that need to assert "regular Bearer fails on /shutdown" build
+// their own AuthConfig inline (see TestShutdown_RegularBearer_Returns401).
 func newAuthedServerWithShutdown(t *testing.T) (http.Handler, string, <-chan struct{}) {
 	t.Helper()
 	cfg := &models.Config{Servers: make(map[string]*models.ServerConfig)}
@@ -734,14 +739,22 @@ func newAuthedServerWithShutdown(t *testing.T) (http.Handler, string, <-chan str
 	gw := proxy.New(cfg, lm, "test", testLogger())
 	mon := health.NewMonitor(lm, 1*time.Second, testLogger())
 
-	token := "test-shutdown-token"
-	authCfg := AuthConfig{Enabled: true, Token: token}
+	regularToken := "test-regular-token"
+	adminToken := "test-admin-token"
+	authCfg := AuthConfig{
+		Enabled:      true,
+		Token:        regularToken,
+		AdminEnabled: true,
+		AdminToken:   adminToken,
+	}
 	srv := NewServer(lm, gw, mon, cfg, "", testLogger(), authCfg, "test")
 
 	called := make(chan struct{}, 1)
 	srv.SetShutdownFn(func() { called <- struct{}{} })
 
-	return srv.Handler(), token, called
+	// Return adminToken — /shutdown is admin-scope under MCPR.3 so this
+	// is the token that yields 202 from the existing happy-path tests.
+	return srv.Handler(), adminToken, called
 }
 
 // doShutdownRequest sends POST /api/v1/shutdown with optional bearer token.
@@ -788,14 +801,86 @@ func TestShutdown_NilShutdownFn_IsNoOp(t *testing.T) {
 	gw := proxy.New(cfg, lm, "test", testLogger())
 	mon := health.NewMonitor(lm, 1*time.Second, testLogger())
 
-	token := "tok"
-	srv := NewServer(lm, gw, mon, cfg, "", testLogger(), AuthConfig{Enabled: true, Token: token}, "test")
+	regularToken := "tok"
+	adminToken := "admin-tok"
+	srv := NewServer(lm, gw, mon, cfg, "", testLogger(),
+		AuthConfig{
+			Enabled:      true,
+			Token:        regularToken,
+			AdminEnabled: true,
+			AdminToken:   adminToken,
+		}, "test")
 	// SetShutdownFn(nil) — must not panic.
 	srv.SetShutdownFn(nil)
 	h := srv.Handler()
 
-	rr := doShutdownRequest(t, h, token)
+	rr := doShutdownRequest(t, h, adminToken)
 	assert.Equal(t, http.StatusAccepted, rr.Code)
+}
+
+// TestShutdown_RegularBearer_Returns401 — MCPR.3 scope-isolation guard.
+// /api/v1/shutdown is admin-scope-only post-MCPR.3; presenting the
+// regular Bearer must yield 401, NOT 202. Without this guard, the
+// exclusive-scope design regresses silently. This is the single test
+// that proves Bug A's daemon-shutdown cascade is closed at source —
+// VSCode 1.119's McpGatewayService only knows the regular Bearer
+// (via plugin .mcp.json) and therefore can no longer trigger /shutdown.
+func TestShutdown_RegularBearer_Returns401(t *testing.T) {
+	cfg := &models.Config{Servers: make(map[string]*models.ServerConfig)}
+	cfg.ApplyDefaults()
+	lm := lifecycle.NewManager(cfg, "test", testLogger())
+	gw := proxy.New(cfg, lm, "test", testLogger())
+	mon := health.NewMonitor(lm, 1*time.Second, testLogger())
+
+	regularToken := "test-regular-bearer"
+	adminToken := "test-admin-bearer"
+	srv := NewServer(lm, gw, mon, cfg, "", testLogger(),
+		AuthConfig{
+			Enabled:      true,
+			Token:        regularToken,
+			AdminEnabled: true,
+			AdminToken:   adminToken,
+		}, "test")
+
+	shutdownFnCalled := false
+	srv.SetShutdownFn(func() { shutdownFnCalled = true })
+
+	rr := doShutdownRequest(t, srv.Handler(), regularToken)
+	assert.Equal(t, http.StatusUnauthorized, rr.Code,
+		"regular Bearer must NOT satisfy admin-scope /shutdown (MCPR.3 exclusive scope)")
+	assert.False(t, shutdownFnCalled,
+		"shutdownFn must NOT have been invoked when admin auth fails")
+	assert.Equal(t, "Bearer", rr.Header().Get("WWW-Authenticate"))
+}
+
+// TestShutdown_AdminBearer_OnRegularRoute_Returns401 — companion to the
+// above. Admin scope is EXCLUSIVE: the admin token does NOT also satisfy
+// regular routes. Without this guard, an operator who somehow leaked the
+// admin token would gain unintended access to all regular routes.
+func TestShutdown_AdminBearer_OnRegularRoute_Returns401(t *testing.T) {
+	cfg := &models.Config{Servers: make(map[string]*models.ServerConfig)}
+	cfg.ApplyDefaults()
+	lm := lifecycle.NewManager(cfg, "test", testLogger())
+	gw := proxy.New(cfg, lm, "test", testLogger())
+	mon := health.NewMonitor(lm, 1*time.Second, testLogger())
+
+	regularToken := "test-regular-bearer-2"
+	adminToken := "test-admin-bearer-2"
+	srv := NewServer(lm, gw, mon, cfg, "", testLogger(),
+		AuthConfig{
+			Enabled:      true,
+			Token:        regularToken,
+			AdminEnabled: true,
+			AdminToken:   adminToken,
+		}, "test")
+
+	// Admin token on a regular route (/api/v1/servers) — must 401.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/servers", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusUnauthorized, rr.Code,
+		"admin Bearer must NOT satisfy regular routes (MCPR.3 exclusive scope)")
 }
 
 func TestShutdown_Concurrent_InvokesShutdownFnExactlyOnce(t *testing.T) {

@@ -53,7 +53,8 @@ func setupAuth(cfg *models.Config, configPath string, noAuth bool, logger *slog.
 	// --- Token load/generate -----------------------------------------------
 	// Resolve token path: ~/<configDir>/auth.token by default. Operators
 	// may override via env var for CI / ephemeral containers.
-	tokenPath := auth.DefaultTokenPath(filepath.Dir(configPath))
+	configDir := filepath.Dir(configPath)
+	tokenPath := auth.DefaultTokenPath(configDir)
 	envToken := os.Getenv(auth.EnvVarName)
 
 	token, err := auth.LoadOrCreate(tokenPath, envToken)
@@ -67,6 +68,26 @@ func setupAuth(cfg *models.Config, configPath string, noAuth bool, logger *slog.
 		logger.Info("auth token ready", "path", tokenPath)
 	}
 
+	// --- Admin token load/generate (MCPR.3) --------------------------------
+	// Admin token gates daemon-control endpoints (currently /shutdown).
+	// Path-distinct from auth.token so the two scopes never share a file.
+	// Plugin manifest invariant: this token is NEVER substituted into
+	// ~/.claude/plugins/cache/mcp-gateway-local/.mcp.json — VSCode 1.119's
+	// built-in McpGatewayService cannot acquire it. See ADR-0007.
+	adminTokenPath := auth.DefaultAdminTokenPath(configDir)
+	envAdminToken := os.Getenv(auth.EnvVarNameAdmin)
+
+	adminToken, err := auth.LoadOrCreate(adminTokenPath, envAdminToken)
+	if err != nil {
+		return api.AuthConfig{}, fmt.Errorf("admin token setup: %w", err)
+	}
+	if envAdminToken != "" {
+		logger.Info("admin token loaded from env var", "var", auth.EnvVarNameAdmin)
+	} else {
+		// Log only the path, NEVER the token value.
+		logger.Info("admin token ready", "path", adminTokenPath)
+	}
+
 	// --- Guard 3: Bearer-without-TLS WARN (L-1) ----------------------------
 	// Auth is enabled but traffic is cleartext on a non-loopback bind.
 	// Phase 13.B adds TLS; until then, notify the operator once.
@@ -74,5 +95,10 @@ func setupAuth(cfg *models.Config, configPath string, noAuth bool, logger *slog.
 		logger.Warn("Bearer auth is active but TLS is not configured — token is transmitted in cleartext on public networks (Phase 13 adds TLS support)")
 	}
 
-	return api.AuthConfig{Enabled: true, Token: token}, nil
+	return api.AuthConfig{
+		Enabled:      true,
+		Token:        token,
+		AdminEnabled: true,
+		AdminToken:   adminToken,
+	}, nil
 }

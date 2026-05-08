@@ -49,7 +49,12 @@ type Server struct {
 	// Auth wiring — set by NewServer, consumed by Handler. See ADR-0003.
 	authToken   string // empty ⇔ authEnabled=false
 	authEnabled bool   // false only when --no-auth is set on the daemon CLI
-	version     string // populated for /api/v1/version (public endpoint)
+	// MCPR.3: admin scope wiring. adminEnabled mirrors authEnabled — false
+	// only when --no-auth is set. adminToken gates /api/v1/shutdown via
+	// auth.AdminMiddleware. See ADR-0007 §two-tier-auth.
+	adminToken   string // empty ⇔ adminEnabled=false
+	adminEnabled bool   // false only when --no-auth is set
+	version      string // populated for /api/v1/version (public endpoint)
 
 	// Claude Code plugin regen (Phase 16.2). pluginRegen and pluginDir are
 	// set via SetPluginRegen; when either is zero-valued, regen is a no-op
@@ -97,9 +102,17 @@ func (s *Server) Addr() net.Addr {
 
 // AuthConfig bundles Bearer auth parameters for the HTTP server.
 // token is empty when enabled=false (--no-auth path).
+//
+// MCPR.3: AdminEnabled+AdminToken gate the admin scope (currently
+// /api/v1/shutdown). When AdminEnabled=false (--no-auth path), admin
+// routes fall through with no middleware — consistent with the regular
+// scope's --no-auth behavior. Admin scope is EXCLUSIVE: the regular
+// Bearer is NOT a valid admin token. See ADR-0007.
 type AuthConfig struct {
-	Enabled bool
-	Token   string
+	Enabled      bool
+	Token        string
+	AdminEnabled bool
+	AdminToken   string
 }
 
 // NewServer creates a new API server.
@@ -121,11 +134,13 @@ func NewServer(
 		gw:          gw,
 		monitor:     monitor,
 		cfg:         cfg,
-		configPath:  configPath,
-		logger:      logger,
-		authToken:   authCfg.Token,
-		authEnabled: authCfg.Enabled,
-		version:     version,
+		configPath:   configPath,
+		logger:       logger,
+		authToken:    authCfg.Token,
+		authEnabled:  authCfg.Enabled,
+		adminToken:   authCfg.AdminToken,
+		adminEnabled: authCfg.AdminEnabled,
+		version:      version,
 	}
 }
 
@@ -163,7 +178,15 @@ func (s *Server) SetShutdownFn(fn context.CancelFunc) {
 // Idempotent — concurrent requests all receive 202; shutdownFn is called
 // exactly once (AUDIT M-3). The response is flushed before the cancel is
 // triggered so the caller receives its 202 before the listener closes.
-func (s *Server) handleShutdown(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	// [DEBUG-INSTR] Log shutdown caller identity for root-cause analysis of
+	// "dashboard open kills daemon" symptom. Records who reached the auth-passed
+	// path; the entry-level access log captures auth-rejected attempts separately.
+	s.logger.Info("shutdown invoked",
+		"remote", r.RemoteAddr,
+		"user_agent", r.UserAgent(),
+	)
+	_ = os.Stderr.Sync()
 	s.shutdownMu.Lock()
 	already := s.shutdownCalled
 	s.shutdownCalled = true
@@ -273,6 +296,22 @@ func (s *Server) TriggerPluginRegen() {
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
+	// [DEBUG-INSTR] Catch all POST /shutdown attempts BEFORE auth middleware.
+	// Logs auth-rejected attempts (handleShutdown never sees them) and provides
+	// a single source-of-truth timestamp for shutdown REST traffic.
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/shutdown") {
+				s.logger.Info("shutdown REST request received",
+					"remote", req.RemoteAddr,
+					"user_agent", req.UserAgent(),
+					"path", req.URL.Path,
+				)
+				_ = os.Stderr.Sync()
+			}
+			next.ServeHTTP(w, req)
+		})
+	})
 	// middleware.RealIP is deliberately NOT applied at the router root.
 	// It trusts X-Forwarded-For / X-Real-IP unconditionally — without a
 	// trusted-proxy allowlist, a remote client can spoof
@@ -287,6 +326,15 @@ func (s *Server) Handler() http.Handler {
 	authMW := func(next http.Handler) http.Handler { return next }
 	if s.authEnabled {
 		authMW = auth.Middleware(s.authToken, s.logger)
+	}
+	// MCPR.3: admin-scope middleware. Identity for --no-auth path,
+	// AdminMiddleware otherwise. Mounted ONLY on daemon-control routes
+	// (currently /api/v1/shutdown) so VSCode 1.119's McpGatewayService —
+	// which only knows the regular Bearer via plugin .mcp.json — cannot
+	// invoke them. See ADR-0007 §two-tier-auth.
+	adminMW := func(next http.Handler) http.Handler { return next }
+	if s.adminEnabled {
+		adminMW = auth.AdminMiddleware(s.adminToken, s.logger)
 	}
 
 	// REST API v1 — throttled and body-size-limited routes (T5.1).
@@ -323,7 +371,20 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/servers/{name}/call", s.handleCallTool)
 			r.Get("/tools", s.handleListTools)
 			r.Get("/metrics", s.handleMetrics)
-			// Phase D.1: graceful daemon shutdown (AUDIT M-3 / L-1 — auth-required).
+		})
+
+		// Admin-only group — daemon-control endpoints (MCPR.3).
+		// Uses AdminMiddleware (admin scope) instead of authMW so the
+		// regular Bearer is rejected. The plugin manifest never exposes
+		// the admin token, so VSCode 1.119's built-in McpGatewayService
+		// — which only knows ${user_config.auth_token} — cannot invoke
+		// these. Closes Bug A's daemon-shutdown cascade at source.
+		// See ADR-0007 §two-tier-auth.
+		r.Group(func(r chi.Router) {
+			r.Use(adminMW)
+			r.Use(csrfProtect)
+
+			// Phase D.1 + MCPR.3: graceful daemon shutdown (admin-required).
 			r.Post("/shutdown", s.handleShutdown)
 		})
 
