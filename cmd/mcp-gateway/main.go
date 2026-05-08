@@ -284,7 +284,15 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 		// config.json (never POSTed through REST) leaves the plugin with
 		// the empty checked-in stub until the first REST mutation — which
 		// may never happen.
-		apiServer.TriggerPluginRegen()
+		//
+		// Phase MCPR.4 (2026-05-08): use TriggerPluginReannounce instead of
+		// TriggerPluginRegen so the .mcp.json mtime is bumped even on a
+		// steady-state respawn where the regenerated content is byte-
+		// identical to the existing file. This fires Claude Code's plugin-
+		// manager fs-watcher and pairs with the existing patch-flow signal
+		// (EnqueueReconnectAction) to provide two-layer recovery —
+		// docs/PLAN-mcp-resilience.md Phase MCPR.4.
+		apiServer.TriggerPluginReannounce()
 		return nil
 	})
 

@@ -415,3 +415,41 @@ manifest's name, the `plugin-sync` regen target, and the reconnect-action
 
 The two-stage debounce (500 ms server + 10 s webview) coalesces bursts of
 backend mutations into a single user-visible Claude Code reload.
+
+## Daemon-startup two-layer recovery (Phase MCPR.4, 2026-05-08)
+
+The startup goroutine at `cmd/mcp-gateway/main.go:287` invokes
+`apiServer.TriggerPluginReannounce()` which fires both signals
+unconditionally — covering the steady-state respawn case where
+`Regenerate` takes the idempotent no-op branch (regen.go:131-133)
+and would otherwise leave mtime untouched:
+
+```
+daemon startup (cold or post-respawn after MCPR.3)
+  → TriggerPluginReannounce
+      ├── L1 patch flow: TriggerPluginRegen
+      │     → Regenerate (may be idempotent no-op)
+      │     → patchstate.EnqueueReconnectAction(AggregatePluginServerName)
+      │     → patch polls /pending-actions
+      │     → patch.session.reconnectMcpServer("mcp-gateway")
+      │
+      └── L2 fs-watcher: pluginRegen.TouchMtime
+            → os.Chtimes(.mcp.json, now, now)
+            → Claude Code plugin-manager fs-watcher fires
+            → plugin re-evaluated; .orphaned_at cleared if validation passes
+```
+
+Both layers are necessary. L1 alone is insufficient when Claude Code has
+already marked the plugin orphaned — its in-memory MCP client is unloaded
+and `reconnectMcpServer` cannot resurrect it. L2 alone is insufficient
+when the patch holds a stale session reference — fs-watcher fires
+re-evaluation but the patch's webview-side session object may not refresh.
+
+Mutation paths (config-watcher reload, REST add/remove/disable) keep
+calling plain `TriggerPluginRegen` because content deltas already bump
+mtime via the rewrite branch.
+
+See `claude-team-control:docs/PLAN-mcp-resilience.md` Phase MCPR.4 for
+the full design rationale and `claude-team-control:hooks/mcp-rehydrate.sh`
+(Phase MCPR.0) for the operator-side counterpart that handles
+mid-session recovery between daemon-startup events.

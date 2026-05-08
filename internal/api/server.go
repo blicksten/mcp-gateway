@@ -283,6 +283,39 @@ func (s *Server) TriggerPluginRegen() {
 	}
 }
 
+// TriggerPluginReannounce is the daemon-startup variant of
+// TriggerPluginRegen (Phase MCPR.4, 2026-05-08). It runs the same
+// plugin-regen + reconnect-action enqueue path AND additionally bumps
+// the plugin .mcp.json mtime so Claude Code's plugin-manager fs-watcher
+// fires even when Regenerate took the idempotent no-op branch
+// (regen.go:131-133 — same content → no rewrite → preserved mtime).
+//
+// Two-layer recovery (see docs/PLAN-mcp-resilience.md Phase MCPR.4):
+//   - L1 (patch flow, via TriggerPluginRegen → EnqueueReconnectAction):
+//     webview patch polls /pending-actions and calls
+//     mcpSession.reconnectMcpServer("mcp-gateway") (Alt-E, ADR-0005).
+//   - L2 (fs-watcher, via TouchMtime here): Claude Code's plugin manager
+//     re-evaluates the plugin on the mtime change, clearing
+//     `.orphaned_at` if validation passes.
+//
+// Used at daemon startup (cmd/mcp-gateway/main.go) where steady-state
+// respawn produces byte-identical .mcp.json content. Mutation paths
+// (config-watcher, REST handlers) keep using TriggerPluginRegen
+// directly because those changes either bump mtime via Regenerate's
+// rewrite branch or do not need an unconditional touch.
+//
+// Best-effort like TriggerPluginRegen: TouchMtime errors are logged but
+// not propagated.
+func (s *Server) TriggerPluginReannounce() {
+	if s.pluginRegen == nil || s.pluginDir == "" {
+		return
+	}
+	s.TriggerPluginRegen()
+	if err := s.pluginRegen.TouchMtime(s.pluginDir); err != nil {
+		s.logger.Warn("plugin mtime touch failed", "error", err, "plugin_dir", s.pluginDir)
+	}
+}
+
 // Handler returns the chi router with all routes mounted.
 //
 // Middleware policy (ADR-0003 §policy-matrix):

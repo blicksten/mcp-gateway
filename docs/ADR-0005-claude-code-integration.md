@@ -140,6 +140,30 @@ update. The matrix is versioned in-repo (`configs/supported_claude_code_versions
 and served via `GET /api/v1/claude-code/compat-matrix` so the dashboard
 can flag drift in real time.
 
+## Addendum — MCPR.4 two-layer respawn recovery (2026-05-08)
+
+Phase 16 Layers 2-3 leave one residual gap: when the daemon respawns
+and regenerates a `.mcp.json` whose bytes are identical to the existing
+file (steady-state), `Regenerator.Regenerate` takes the idempotent no-op
+branch (`regen.go:131-133`) and preserves mtime. Claude Code's
+plugin-manager fs-watcher therefore does not fire on respawn. If
+Claude Code has marked the plugin orphaned (`.orphaned_at` written
+elsewhere in the cache tree), Layer 3's `reconnectMcpServer` call cannot
+resurrect the unloaded MCP client.
+
+MCPR.4 (`claude-team-control:docs/PLAN-mcp-resilience.md`) closes this
+by adding `Server.TriggerPluginReannounce` — called from the daemon
+startup goroutine — which runs the existing `TriggerPluginRegen`
+(L1 patch flow) AND additionally calls `Regenerator.TouchMtime` to
+unconditionally bump mtime (L2 fs-watcher signal). The operator-side
+counterpart (`claude-team-control:hooks/mcp-rehydrate.sh`, Phase MCPR.0)
+handles mid-session recovery between daemon startups.
+
+Mutation paths (config-watcher, REST handlers) continue to call plain
+`TriggerPluginRegen` — content deltas already bump mtime via Regenerate's
+rewrite branch, and an unconditional touch on every config reload would
+be noisy.
+
 ## References
 
 - Issue #13646 — `tools/list` caching.
@@ -149,6 +173,11 @@ can flag drift in real time.
   documenting the rejection of the `executeCommand("reload-plugins")`
   design and the discovery of Alt-E.
 - `docs/api/claude-code-endpoints.md` — FROZEN v1.6.0 contract for the
-  `/api/v1/claude-code/*` REST surface.
+  `/api/v1/claude-code/*` REST surface, plus the MCPR.4 two-layer
+  startup-flow diagram.
+- `claude-team-control:docs/PLAN-mcp-resilience.md` — Phase MCPR.4
+  design + Invariant-5 evidence, Phase MCPR.0 mid-session counterpart.
 - PAL consultation: 3 rounds (gpt-5.1-codex, external expert) during
   Phase 16 plan audit + Phase 16.3 implementation review.
+- PAL thinkdeep verification 2026-05-08 (gpt-5.1-codex internal,
+  gate_verdict: PASS) for the MCPR.4 design pivot.
