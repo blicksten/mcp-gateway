@@ -35,8 +35,27 @@ type ErrorBody struct {
 // side-channels. The received token is never logged; a single redacted
 // debug line identifying the request path is emitted on 401.
 //
-// See ADR-0003 §policy-matrix, §401-hint.
+// MCPR.3: thin wrapper around bearerMiddleware with scope="regular" and
+// the regular-token hint. AdminMiddleware (admin.go) uses the same
+// helper with scope="admin" and the admin-token hint so 401-log lines
+// distinguish which scope rejected the request.
+//
+// See ADR-0003 §policy-matrix, §401-hint and ADR-0007 §two-tier-auth.
 func Middleware(expected string, logger *slog.Logger) func(http.Handler) http.Handler {
+	return bearerMiddleware("regular", expected, logger, hintMessage)
+}
+
+// bearerMiddleware is the shared Bearer validator used by both Middleware
+// (regular scope) and AdminMiddleware (admin scope). scope is the
+// label written to the structured-log "scope" field on 401 so operators
+// can distinguish which middleware rejected the request. hint is the
+// `hint` field of the 401 body — different per scope so callers know
+// which token shape (env var + file path) to provide.
+func bearerMiddleware(
+	scope, expected string,
+	logger *slog.Logger,
+	hint string,
+) func(http.Handler) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -48,12 +67,12 @@ func Middleware(expected string, logger *slog.Logger) func(http.Handler) http.Ha
 			// Lowercase "bearer" is not accepted. An empty header is not
 			// accepted.
 			if !strings.HasPrefix(header, bearerPrefix) {
-				writeUnauthorized(w, r, logger, "missing_or_malformed_scheme")
+				writeUnauthorized(w, r, logger, scope, hint, "missing_or_malformed_scheme")
 				return
 			}
 			received := header[len(bearerPrefix):]
 			if received == "" {
-				writeUnauthorized(w, r, logger, "empty_token")
+				writeUnauthorized(w, r, logger, scope, hint, "empty_token")
 				return
 			}
 			// Pad-to-expected buffer so ConstantTimeCompare always runs on
@@ -68,7 +87,7 @@ func Middleware(expected string, logger *slog.Logger) func(http.Handler) http.Ha
 			compareEq := subtle.ConstantTimeCompare(padded, expectedBytes)
 			lengthEq := subtle.ConstantTimeEq(int32(len(receivedBytes)), int32(len(expectedBytes)))
 			if compareEq&lengthEq != 1 {
-				writeUnauthorized(w, r, logger, "mismatch")
+				writeUnauthorized(w, r, logger, scope, hint, "mismatch")
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -78,9 +97,18 @@ func Middleware(expected string, logger *slog.Logger) func(http.Handler) http.Ha
 
 // writeUnauthorized writes a 401 response with the `hint` guidance body
 // and logs a single redacted line. The received token is NEVER included
-// in the log — only the path and the reason class.
-func writeUnauthorized(w http.ResponseWriter, r *http.Request, logger *slog.Logger, reason string) {
-	logger.Debug("auth: rejected request", "path", r.URL.Path, "reason", reason)
+// in the log — only the path, scope label, and the reason class.
+func writeUnauthorized(
+	w http.ResponseWriter,
+	r *http.Request,
+	logger *slog.Logger,
+	scope, hint, reason string,
+) {
+	logger.Debug("auth: rejected request",
+		"path", r.URL.Path,
+		"scope", scope,
+		"reason", reason,
+	)
 	w.Header().Set("WWW-Authenticate", "Bearer")
 	w.Header().Set("Content-Type", "application/json")
 	// RFC 6749 §5.1 advises no-store on auth-sensitive responses so
@@ -90,7 +118,7 @@ func writeUnauthorized(w http.ResponseWriter, r *http.Request, logger *slog.Logg
 	w.WriteHeader(http.StatusUnauthorized)
 	body := ErrorBody{
 		Error: "authentication required",
-		Hint:  hintMessage,
+		Hint:  hint,
 	}
 	_ = json.NewEncoder(w).Encode(body)
 }
