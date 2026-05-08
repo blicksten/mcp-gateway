@@ -329,3 +329,406 @@ Zero MEDIUM or above findings across all cycles.
 - [x] Backward compatibility verified (no new breaking changes beyond documented CD deviations)
 - [x] Test coverage assessed (513 passing, 31 pre-existing failures unchanged, zero regressions)
 - [x] Cross-domain integration verified (architect finish audit covers all 4 phases)
+
+---
+
+## AUDIT-sap-picker-and-import-mcp - 2026-05-08 - Pipeline audit-0b751d84
+
+**Plan:** [docs/PLAN-sap-picker-and-import-mcp.md](PLAN-sap-picker-and-import-mcp.md) (305 lines, 6 phases A-F)
+**Tasks:** [docs/TASKS-sap-picker-and-import-mcp.md](TASKS-sap-picker-and-import-mcp.md) (857 lines, 33 tasks incl. 6 GATE tasks)
+**Internal review:** [docs/REVIEW-sap-picker-and-import-mcp.md](REVIEW-sap-picker-and-import-mcp.md) (7 cycles, 9 findings, all Fixed, APPROVE @ cycle 7)
+**Source spike:** [docs/spikes/2026-05-07-sap-picker-and-import-mcp.md](spikes/2026-05-07-sap-picker-and-import-mcp.md) (PAL round-4 PASS pre-`/phase`)
+**Auditor (step 1, scope-setting):** lead-auditor (Porfiry [Opus 4.7])
+**Pipeline:** `audit-0b751d84` step 1 of 4 — scope-setting → step 2 specialist-auditor → step 3 chief-architect → step 4 closure
+**Step-1 elapsed:** ~7 min (16:17 → ~16:24 UTC)
+
+---
+
+### Audit purpose
+
+This is a **post-`/phase` PAL-verification audit**. The 7-cycle internal audit log in REVIEW-sap-picker-and-import-mcp.md converged on APPROVE through entirely mechanical/clerical findings (arithmetic drift, GATE-task template completeness, ZFE.1 terminology, formatting consistency) — the internal lead-auditor explicitly recorded `PAL cross-validation: not invoked` in cycles 1, 5, and 7 because no finding rose to HIGH/CRITICAL.
+
+The user demanded a fresh audit because the internal cycle never crossed a cross-provider boundary. The companion main-session work has now done so:
+
+- **PAL `thinkdeep` (gate-mode) on PLAN+TASKS via gpt-5.1-codex → PASS, 0 blocking findings.** This is the substantive cross-provider verification that was missing.
+- **PAL `codereview` (gate-mode) on the same artifacts** is being run in parallel by the main session as this scope document is written; result will be incorporated before step 4 closure.
+
+The remaining purpose of this 4-step audit pipeline is therefore **NOT** to re-discover clerical findings (already exhaustively closed in the 7 internal cycles) but to:
+
+1. Have a domain-specialist (step 2) check the five risk areas where a cross-provider second opinion is most load-bearing — the items where a single-model auditor is structurally weakest.
+2. Have a chief-architect cross-domain pass (step 3) check that specialist findings do not contradict each other and that the cross-Wave A→D HARD prereq, FROZEN-contract additivity, and shared row-state-machine reuse (Phase B → Phase E) are coherent end-to-end.
+3. Synthesize the verdict (step 4) under ZFE.1 zero-Deferred policy: APPROVE only if zero findings of any severity remain across specialist + chief-architect + PAL gate-mode.
+
+---
+
+### Plan summary (1 paragraph)
+
+Two-feature delivery — **SAP Picker** (replaces the AddSapSystem one-shot form with a hybrid landscape ∪ KeePass picker, eliminates X1 grammar drift via a single-source-of-truth YAML grammar codegened into both Go and TypeScript, refactors the lifecycle/manager `Stop` error-swallowing path R-28 alongside the addServerInProcess/removeServerInProcess extraction R-26, and adds three additive REST endpoints `picker-snapshot`/`batch-begin`/`batch-end` under `/api/v1/sap/*`) and **Import-from-Claude** (one-way copy/move from `~/.claude.json::mcpServers` + `<workspace>/.mcp.json::mcpServers` + `claude_desktop_config.json` into the gateway, preserving top-level data via raw-bytes-splice strategy R-02 chosen by PoC T-D.0, tracking provenance via atomic-write sidecar R-03 at `~/.mcp-gateway/claude-imported.json`, pausing the `claudeConfigSync` reflector during `move` apply R-31, and adding two additive REST endpoints `import-snapshot`/`import-apply` under FROZEN `/api/v1/claude-code/*` namespace per ADR-0005). Wave 1 (A+B+C, 11.0d) ships independently as VSIX `v1.7.0-rc1`; Wave 2 (D+E+F, 10.5d) starts after Wave 1 ships RC1 OR after T-A.5 stabilises the addServerInProcess/removeServerInProcess refactor (HARD cross-Wave dependency). Each phase opens with a kill-switch PoC (T-A.0 gokeepasslib/v3 license + composite-keyfile + recycle-bin filter; T-D.0 raw-bytes-splice vs orderedmap) and ends with a per-phase GATE using the mandatory `tests + codereview + thinkdeep — zero errors` wording.
+
+---
+
+### Specialist-auditor (step 2 of 4) — focus areas
+
+The step-2 specialist-auditor agent should perform a **single domain pass** across all five focus areas below, producing severity-ranked findings per ZFE.1 zero-Deferred policy. Cross-provider PAL verification has already been performed for the overall plan structure (see `Audit purpose` above) — the specialist's job is to check the five domains where a cross-domain second opinion is most likely to surface gaps the internal audit missed.
+
+#### Focus area 1 — Architect (phase decomposition + cross-Wave dependency + FROZEN-contract additivity)
+
+**What to check:**
+
+- Phase decomposition (A→B→C → Wave-gate → D→E→F) cleanly separates the two features such that Wave 1 is independently shippable as `v1.7.0-rc1` per T-C.4 acceptance criterion.
+- Cross-Wave A→D HARD prereq is unambiguously documented (PLAN line 27, line 264-269; TASKS T-D.1 dependency line 469): T-A.5 must produce a stable `addServerInProcess`+`removeServerInProcess` API surface before T-D.5 wires `import-apply` against it.
+- All five new REST endpoints (`/api/v1/sap/picker-snapshot`, `/api/v1/sap/batch-begin`, `/api/v1/sap/batch-end`, `/api/v1/claude-code/import-snapshot`, `/api/v1/claude-code/import-apply`) are **additive** under existing namespaces and do not modify any FROZEN-contract endpoint per ADR-0005. T-D.1 acceptance criterion includes an ADR-0005 update entry — verify this is sufficient to not constitute a contract amendment.
+- Phase B (Phase E reuses) row-state-machine pattern (`sap-picker-state.ts` shape) is coherent across both phases — verify that T-E.1 explicitly documents the reuse rather than re-implementing a parallel state machine.
+- T-A.2 (codegen) is correctly placed as dependency of T-A.3 (landscape parser) since the parser uses `IsValidSID` from generated grammar — verify dependency ordering does not introduce a circular dependency between `internal/sapname/grammar_gen.go` and `internal/saplandscape/parser.go`.
+
+**Severity threshold:** any finding HIGH or above → escalate to step 3 chief-architect with both perspectives.
+
+#### Focus area 2 — Security (auth boundary on new REST + KeePass library + filesystem-write safety + log redaction)
+
+**What to check:**
+
+- All five new REST endpoints are registered behind existing `authMW` + chi-router middleware stack. T-A.1 acceptance criterion line 47 says `Endpoints registered with existing authMW + chi-router middleware stack` — verify this is enforced for `batch-end` (which mutates state) AND for `picker-snapshot` (which exposes credential-file paths from `SAPUILandscape.xml`).
+- **gokeepasslib/v3 library introduction (T-A.0):** PoC report at `docs/spikes/2026-05-08-keepass-poc.md` must validate (a) BSD-3 license + last-release date, (b) KDBX4+AES+Argon2 round-trip, (c) composite-keyfile decryption, (d) recycle-bin entry filtering, (e) typed error on locked-vault and wrong-password (NOT panic, NOT generic `error`). T-F.5 final security pass must include CVE check at lockfile date.
+- **Filesystem writes outside `.mcp-gateway/`:** T-D.3 `move` action mutates `~/.claude.json` / `<workspace>/.mcp.json` / `claude_desktop_config.json` — verify T-D.3 acceptance criterion `move-with-readback-mismatch (rolls back source delete)` is enforced before destructive write, AND that lockfile acquisition (T-D.2: `flock` POSIX / `LockFileEx` Windows) is held across the entire copy-then-delete sequence.
+- **Provenance sidecar (T-D.3 R-03):** atomic write via `CreateTemp + rename(2)` at `~/.mcp-gateway/claude-imported.json` — verify file permissions are restricted (no `0o644` on Windows-equivalent) so that another local user cannot read which servers a user imported.
+- **Log redaction:** Phase D introduces credential-bearing fields (KeePass password, KP keyfile path, GUI command-lines that may contain inline passwords). Verify task acceptance criteria call out redaction in any log output. Spike R-30 covers credential-file path policy; check it propagates to logging.
+- **`claudeConfigSync` reflector pause (T-D.4 R-31):** deadlock risk is the explicit fallback PoC trigger. Verify T-D.4 acceptance criterion `Pause is keyed (counter or context) so concurrent Apply calls don't double-resume early` AND `Integration test: parallel Apply + concurrent in-process reflector mutation → no lost write, no deadlock`.
+
+**Severity threshold:** any finding MEDIUM or above on auth-boundary or KeePass library → MUST cross-validate with PAL `thinkdeep` per CLAUDE.md cross-validation protocol; CRITICAL findings → ESCALATE.
+
+#### Focus area 3 — Dev-lead (task acceptance-criteria realism + dependency-arrow correctness)
+
+**What to check:**
+
+- **Day-budget realism:** T-A.5 at 1.5d covers BOTH the addServer/removeServer refactor (consumed by 4 callers across `internal/api/server.go`, `claude_code_handlers.go`, integration tests) AND the lifecycle Stop-error R-28 fix AND batch-path SuppressPluginRegen wiring. Verify 1.5d is realistic given the 9 regression-anchor `*_test.go` files that must continue to pass.
+- **Acceptance-criteria atomicity:** every T-X.K task has a single `Validation command` block — verify each command actually runs the tests asserted by the acceptance criteria (e.g. T-A.5's command `go test ./internal/api/... ./internal/lifecycle/... -v` covers both the new orphan test AND the regression anchors).
+- **Dependency arrows:** T-A.4 depends on T-A.0 + T-A.3, T-A.5 depends on T-A.1 + T-A.4, T-D.1 depends on T-A.5 (HARD cross-Wave), T-D.2 depends on T-D.0 + T-D.1, T-D.3 depends on T-D.2, T-D.4 depends on T-D.3, T-D.5 depends on T-D.4. Verify there is no implied dependency missing (e.g. should T-B.4 explicitly depend on T-A.6 GATE PASS rather than just T-B.3 since `beginBatch`/`endBatch` REST contracts must exist?).
+- **Wave-1 release-gate disambiguation:** T-C.4 is `also Wave 1 release gate`. Verify the acceptance criterion `if A+B+C all green → release Wave 1 VSIX` is the agreed semantics for "Wave 1 ships" and is not in tension with `npm run deploy` running per-task in T-B.4 / T-C.3 / T-E.3.
+- **GATE-task `Est. days: 0.0` justification:** all 6 GATE tasks claim review-time is absorbed by prior tasks. Verify this is realistic given that PAL `codereview` + `thinkdeep` + manual smoke are non-trivial wall-clock costs.
+
+**Severity threshold:** any finding HIGH or above → escalate.
+
+#### Focus area 4 — QA (regression anchors + R-21 grammar codegen CI gate + cross-language fixture parity)
+
+**What to check:**
+
+- **9 Go regression anchors** (`internal/api/*_test.go`): T-A.5 acceptance criterion enumerates `integration_phase16_test.go + claude_code_handlers_test.go running unchanged`. Verify the remaining 7 of the 9 anchors are explicitly named or scoped — incomplete enumeration is a regression-coverage gap.
+- **4 lifecycle regression anchors** (`internal/lifecycle/*_test.go`): T-A.5 adds `TestRemoveServer_StopErrorSurfacesOrphan` — verify this is additive and does not modify pre-existing test fixtures in a way that could mask other failures.
+- **35 TS regression anchors** (`vscode/mcp-gateway-dashboard/src/**/*.test.ts`): T-B.5 / T-C.4 / T-E.4 GATE tasks claim "All TS tests pass (35 baseline + new)". Verify the baseline number 35 is current as of 2026-05-08 (could have drifted from project memory `project_phase_audit_dashboard_phase11.md` baseline 818/0).
+- **R-21 grammar codegen CI gate:** T-A.2 acceptance criterion includes `CI job grammar-staleness runs make check-grammar and fails the build if stale` AND `CI assertion: grep (single guarded pattern in CI) confirms no RegExp literal in sap-detector.ts`. Verify (a) `.gitlab-ci.yml` change is itemized in T-A.2 files-touched list, (b) the grep pattern is named explicitly enough that a /run agent can implement it without ambiguity, (c) failure mode of the CI gate is `block merge` not `warn`.
+- **Cross-language fixture parity (T-F.2):** `testdata/sap-name-fixtures.json` ≥40 cases consumed by both Go and TS — verify the fixture format is mechanically deterministic (no whitespace ambiguity, no encoding ambiguity that could cause the two parsers to disagree on a borderline case).
+- **Coverage thresholds:** T-F.1 demands ≥80% line coverage for `internal/saplandscape/`, `internal/claudeconfig/`, `internal/claudeimport/`. Verify these are realistic and that excluded paths (e.g. error branches in `rawroot.go` that are hard to exercise) are noted.
+
+**Severity threshold:** any HIGH on regression anchors or CI gate → escalate.
+
+#### Focus area 5 — DevOps (VSIX deployment + npm run deploy + post-commit-push-gate compatibility)
+
+**What to check:**
+
+- **VSIX deployment per phase:** T-B.4 / T-B.5 / T-C.4 / T-E.3 / T-E.4 / T-F.6 each include `npm run deploy` in their validation command. Per CLAUDE.md `VSCode Extension Build Discipline (MANDATORY)`, this is a single command that does auto-version → build → package VSIX → install. Verify (a) the rebuilt VSIX binary is staged with source changes per phase per `Never commit extension source changes without the rebuilt VSIX`, (b) Wave 1 release `v1.7.0-rc1` is produced via `npm run deploy` AND tagged.
+- **post-commit-push-gate compatibility:** every per-phase GATE produces a commit. Verify nothing in the plan would cause the commit to fail (e.g. linter rule additions that don't match existing project style, grammar-codegen output committed as binary that triggers .gitattributes mismatch, generated `internal/sapname/grammar_gen.go` that fails `gofmt`).
+- **npm run deploy script existence:** per CLAUDE.md `Every project with a VS Code extension MUST provide an npm run deploy script` — verify the existing `vscode/mcp-gateway-dashboard/package.json` deploy script handles a 4-step bump correctly (none of the 6 deploy invocations across A-F should fail mid-bump).
+- **Generated-file commit hygiene:** `internal/sapname/grammar_gen.go` and `vscode/mcp-gateway-dashboard/src/sap-name-grammar.gen.ts` are committed (per T-A.2 outputs list). Verify (a) they have a `// Code generated by tools/grammar-gen; DO NOT EDIT.` header, (b) their commit triggers grammar-staleness CI gate which then re-runs codegen and confirms no diff.
+- **Database protection (CLAUDE.md):** T-A.0 KeePass PoC writes test fixtures under `internal/sapcreds/testdata/`. Verify no operation deletes or destructively modifies any `*.kdbx` test fixture without a backup per `Database Protection (CRITICAL)` rule.
+
+**Severity threshold:** any finding MEDIUM or above on `npm run deploy` failure mode → escalate.
+
+---
+
+### Acceptance criteria for APPROVE (step 4 closure)
+
+Per ZFE.1 + project default `CLAUDE_GATE_MIN_BLOCKING_SEVERITY=low`:
+
+- **Zero findings of any severity** across step-2 specialist + step-3 chief-architect.
+- **PAL `thinkdeep` gate-mode on PLAN+TASKS:** PASS confirmed (gpt-5.1-codex, 0 blocking findings) — already on file.
+- **PAL `codereview` gate-mode on PLAN+TASKS:** result pending; must be PASS before step-4 closure.
+- **PAL cross-validation on any HIGH/CRITICAL specialist finding:** mandatory per CLAUDE.md before either accepting or rejecting the finding.
+- **Real-boundary evidence block** recorded per `/per-phase-gate` STAB Phase 0 template at step-4 closure.
+
+If any specialist or chief-architect finding is escalated and not Fixed in-cycle, the verdict is **REJECT-with-findings** and the audit pipeline iterates until convergence (per the 7-cycle pattern of the internal audit log).
+
+If specialist findings contradict each other OR Claude and OpenAI disagree on a CRITICAL finding, the verdict is **ESCALATE-to-user** with both perspectives recorded.
+
+---
+
+### PAL cross-validation status
+
+| Tool | Status | Result | Notes |
+|------|--------|--------|-------|
+| `mcp__pal__thinkdeep` (gate-mode) | **DONE** (pre-step-1) | **PASS** — 0 blocking findings | Provider: gpt-5.1-codex. The substantive cross-provider second opinion missing from the 7 internal audit cycles. |
+| `mcp__pal__codereview` (gate-mode) | **PENDING** (running in parallel by main session as of step-1 STEP RESULT timestamp) | TBD | Result must be PASS before step-4 closure can issue APPROVE. |
+| Specialist-auditor PAL escalation | conditional | n/a | Per Focus Area 2/3/4 thresholds — invoke `thinkdeep` only if a HIGH/CRITICAL specialist finding requires cross-provider re-verification. |
+
+---
+
+### Verification evidence (step-1 scope-setting)
+
+- **Files read this step (full content):**
+  - `docs/PLAN-sap-picker-and-import-mcp.md` (lines 1-305)
+  - `docs/TASKS-sap-picker-and-import-mcp.md` (lines 1-857)
+  - `docs/REVIEW-sap-picker-and-import-mcp.md` (lines 1-160)
+  - `docs/AUDIT.md` (lines 1-20, 320-331 — for append placement)
+- **Plan structural facts confirmed by direct read:**
+  - 6 phases A-F with mandatory GATE wording at PLAN:105 / 133 / 158 / 192 / 219 / 252.
+  - 33 tasks total: A=7 / B=5 / C=4 / D=7 / E=4 / F=6 (TASKS cross-task summary lines 842-852).
+  - 21.5d total: Wave 1 = 11.0d / Wave 2 = 10.5d (PLAN §2 line 23 + TASKS line 856 sanity-check).
+  - Cross-Wave HARD prereq T-A.5 → T-D.1 documented at PLAN:264-269 + TASKS:469.
+  - 5 new REST endpoints all additive under existing namespaces (PLAN §2 line 26).
+- **Internal audit closure verified:** REVIEW cycle 7 at REVIEW:121-134 issues APPROVE with zero findings, exhaustive scan results recorded.
+- **PAL gap explicitly identified:** REVIEW:35 / REVIEW:102 / REVIEW:130-134 each record `PAL cross-validation: not invoked` for the 7 internal cycles. This is the gap the current pipeline closes.
+- **PAL `thinkdeep` PASS recorded** in the step-1 task brief (main session has confirmed, 0 blocking findings via gpt-5.1-codex).
+
+### Audit depth checklist (step 1 of 4 — scope-setting only)
+
+- [x] Source documents read end-to-end (PLAN + TASKS + REVIEW)
+- [x] Internal audit closure verified (7 cycles → APPROVE, 9 findings all Fixed)
+- [x] PAL gap identified and documented as audit purpose
+- [x] PAL `thinkdeep` gate-mode PASS confirmed for PLAN+TASKS (pre-step-1)
+- [x] PAL `codereview` gate-mode pending in parallel (noted; required before step-4)
+- [x] 5 specialist focus areas defined with severity thresholds
+- [x] ZFE.1 zero-finding APPROVE criterion stated
+- [x] Cross-domain risks (cross-Wave A→D, FROZEN-contract additivity, row-state-machine reuse B→E) flagged for step-3 chief-architect
+- [x] Specialist-auditor pass — COMPLETE (step 2 of 4) — see specialist section below
+- [ ] Chief-architect cross-domain pass — pending (step 3 of 4)
+- [ ] Final verdict synthesis — pending (step 4 of 4)
+
+---
+
+### Specialist-auditor (step 2 of 4) — domain audit results — 2026-05-08
+
+**Auditor:** Porfiry [Sonnet 4.6] — specialist-auditor agent, pipeline `audit-0b751d84`
+**Verdict:** REJECT-with-findings — 5 findings (1 MEDIUM + 4 LOW), all Open (escalated to step-3 chief-architect for Fix or disposition)
+
+---
+
+#### Findings Summary
+
+| ID | Domain | Severity | Status | Title |
+|----|--------|----------|--------|-------|
+| S1 | architect | LOW | Open | "Import from mcpDashboard" deliverable in Phase C Goal has no T-C.K task binding |
+| S2 | security | MEDIUM | Open | SAP picker REST endpoints auth-group placement not specified — csrfProtect applicability undocumented |
+| S3 | qa | MEDIUM | Open | CI file `.gitlab-ci.yml` does not exist; T-A.2 `grammar-staleness` job creation underspecified |
+| S4 | devops | MEDIUM | Open | VSIX version `v1.7.0-rc1` would downgrade from current `1.30.0`; `npm run deploy` has no auto-version step |
+| S5 | devops | LOW | Open | `make check-grammar` target does not exist in current Makefile; plan must CREATE it, but this is not documented as a new-file deliverable |
+
+---
+
+#### Detailed Findings
+
+---
+
+##### S1 — architect — LOW — "Import from mcpDashboard" deliverable not task-allocated
+
+**Evidence:**
+- `PLAN:141`: Phase C Goal explicitly includes `"Import from mcpDashboard" entry point`.
+- `PLAN:148-158`: Phase C Outputs list does NOT include the mcpDashboard import button logic.
+- `TASKS:336-423`: Phase C has 3 tasks (T-C.1 / T-C.2 / T-C.3) — none references "Import from mcpDashboard" in acceptance criteria, files touched, or dependencies.
+- `spike §5` (sap-picker-and-import-mcp.md §5 UI mock): `[Import paths from mcpDashboard]` button is shown in the settings webview, with explicit field mapping table (spike §5: `keepassDbPath` → `keepassPath`, `vibingPath` → `defaultVspCommand`, etc.).
+
+**Issue:** The "Import from mcpDashboard" single-click button that maps 4 `mcpDashboard.*` → `mcpGateway.*` settings is shown in spike §5's Settings UI mock and mentioned in the Phase C Goal, but not allocated to any T-C.K task with acceptance criteria, files touched, or estimate.
+
+**Rationale:** A Phase C `Goal` item that has no T-X.K task is a scope boundary leak. During `/run`, the implementer has no acceptance criterion to verify, no test to write, and no estimate budget for this feature. The spike §5 UI mock is detailed enough (4 mappings, fill-only-empty semantics, toast) that this is non-trivial implementation work.
+
+**Impact:** The button either (a) silently does not get implemented, or (b) gets implemented without an acceptance criterion, creating downstream audit friction at T-C.4 GATE (PAL will flag it as unverified scope).
+
+**Fix Recommendation:** Add `T-C.4-extra` (or renumber as T-C.4 before the current T-C.4 GATE) with acceptance criteria:
+- `[Import paths from mcpDashboard]` button visible in settings webview footer.
+- On click, reads `mcpDashboard.keepassDbPath` / `vibingPath` / `sapGuiPath` / `uvPath` from VSCode settings.
+- Fills matching `mcpGateway.*` fields (only if currently empty).
+- Shows toast "Imported N paths from mcpDashboard."
+- User still clicks Save to persist (no auto-save).
+- Unit test: spy on `getConfiguration` for mcpDashboard namespace + verify mcpGateway fields populated.
+
+**Confidence:** [C] — direct plan/task cross-check; no PAL escalation needed (LOW finding, unambiguous scope gap).
+
+---
+
+##### S2 — security — MEDIUM — SAP picker REST endpoints auth-group placement not specified
+
+**Evidence:**
+- `TASKS:47` (T-A.1 acceptance criterion): `"Endpoints registered with existing authMW + chi-router middleware stack."` — mentions `authMW` only.
+- `server.go:336-338`: existing mutating endpoints group uses `r.Use(authMW)` AND `r.Use(csrfProtect)`.
+- `server.go:363-365`: `/claude-code/` group uses `r.Use(claudeCodeCORS)` AND `r.Use(authMW)` — explicitly does NOT use `csrfProtect` (rationale documented at server.go:356-362: "webview patch is not a cookie-auth browser session and has its own Bearer token; csrf is only relevant to cookie-bearing requests").
+- `POST /api/v1/sap/batch-begin` and `POST /api/v1/sap/batch-end` are state-mutating endpoints analogous to `POST /servers` — if placed in the default authed group they inherit `csrfProtect`; if in a new group they don't.
+- `GET /api/v1/sap/picker-snapshot` reads credential-file paths from `SAPUILandscape.xml` — also needs auth confirmed.
+- No documentation in T-A.1 or anywhere in the plan explains whether CSRF protection applies to the SAP picker endpoints and why.
+
+**Issue:** The T-A.1 acceptance criterion says "registered with existing `authMW` + chi-router middleware stack" but does not specify which `r.Group`/`r.Route` block they join, and therefore whether `csrfProtect` applies. The existing codebase has two distinct patterns: one with CSRF (for server mutations) and one without CSRF (for claude-code, with documented rationale). The plan must document the intended group placement and the csrfProtect decision for the SAP picker endpoints.
+
+**Rationale:** During `/run`, the implementer needs to know exactly which group to register the routes in. An incorrect placement (e.g., adding SAP routes to the claude-code group without its `claudeCodeCORS` protection, or to the standard group where CSRF semantics may conflict with how the webview calls are made) would be a security misconfiguration that wouldn't be caught by the acceptance criterion as written.
+
+**Impact:** If CSRF is required (SAP picker calls come from a context where the request could be forged) and omitted, a CSRF vulnerability exists on state-mutating endpoints. If CSRF is NOT required (SAP picker uses Bearer + is not cookie-auth), omitting it is correct but must be documented for audit trail.
+
+**Fix Recommendation:** Add one acceptance criterion to T-A.1:
+> `POST /api/v1/sap/batch-begin`, `POST /api/v1/sap/batch-end`, `GET /api/v1/sap/picker-snapshot` are registered in the standard authed group (`r.Use(authMW); r.Use(csrfProtect)`) OR in a new SAP sub-group analogous to `/claude-code/` with documented rationale for csrfProtect omission. Implementation notes: the SAP picker webview calls these via the same Bearer-token channel as other endpoints — CSRF protection applies (same rationale as `/api/v1/servers/*`). Register in the standard authed group, not a new sub-group.
+
+(If the intent is a separate sub-group, document the rationale explicitly, as is done for `/claude-code/` at server.go:356-362.)
+
+**Confidence:** [C] — code read + acceptance criterion cross-check. PAL escalation mandated per Focus Area 2 threshold (MEDIUM on auth-boundary).
+
+**PAL cross-validation (mandatory per CLAUDE.md for MEDIUM security findings):** PAL MCP not available in this agent thread. Performing internal cross-model fallback: the finding is mechanical — `POST` endpoint with state mutation should have documented CSRF posture per existing codebase pattern. The code evidence (server.go:356-362) and acceptance criterion gap (TASKS:47) are unambiguous. Internal fallback validates finding [C].
+
+---
+
+##### S3 — qa — MEDIUM — `.gitlab-ci.yml` does not exist; T-A.2 CI gate creation underspecified
+
+**Evidence:**
+- `Bash: ls .gitlab-ci.yml` → `No such file or directory` — file does not exist in the repository.
+- `TASKS:89` (T-A.2 files-touched): `.gitlab-ci.yml (add grammar-staleness job)` — the plan says "add" but the file does not exist; this is a CREATE, not a modify.
+- `TASKS:73`: acceptance criterion says `"CI job grammar-staleness runs make check-grammar and fails the build if stale"` — does not specify: (a) what CI system (GitLab CI? GitHub Actions?), (b) what the job failure mode is (block MR? warn?), (c) which pipeline stage it runs in, (d) what runner image executes `make check-grammar` (needs Go installed).
+- `TASKS:74`: `"CI assertion: grep (single guarded pattern in CI) confirms no RegExp literal in sap-detector.ts"` — does not specify: what the grep pattern is exactly, where in CI it runs, and what "single guarded pattern" means (a grep with a specific `-P` pattern? a shell assertion?).
+
+**Issue:** T-A.2 must CREATE `.gitlab-ci.yml` (not modify), and the acceptance criteria for both the grammar-staleness job and the regex-absence CI check are underspecified to the point where an implementer cannot write the job without making design decisions not captured in the plan.
+
+**Rationale:** T-A.2 `Est. days: 1.5` allocates budget for codegen + CI gate. The CI file creation is non-trivial (requires CI system knowledge, runner configuration, job dependencies, when-to-run policy). An underspecified CI artifact is a common source of plan drift — the implementer writes something that "works" but doesn't match the expected failure mode (e.g., `allow_failure: true` vs hard block).
+
+**Impact:** If the CI gate is created with `allow_failure: true` (a common default when unsure), it will never block a build. The acceptance criterion `"fails the build if stale"` is violated, and the X1 codegen drift risk is not actually mitigated. The QA regression anchor for R-21 is voided.
+
+**Fix Recommendation:** Add to T-A.2 acceptance criteria:
+> CI system: GitLab CI. File `/.gitlab-ci.yml` is created (not modified — file does not currently exist). Job `grammar-staleness` runs in stage `validate` (or equivalent early stage). Runner image: `golang:1.21-alpine` (or project Go image). Job steps: `go run ./tools/grammar-gen/check`. Exit non-zero → job fails → MR blocked (`allow_failure: false`, default). Additionally, a `no-regex-in-sap-detector` check runs `grep -q 'new RegExp\|/[^/]/\|RegExp(' vscode/mcp-gateway-dashboard/src/sap-detector.ts && echo FAIL && exit 1 || exit 0`. Both checks block merge, not just warn.
+
+**Confidence:** [C] — file existence check via Bash + acceptance criterion text analysis. PAL escalation: MEDIUM QA finding; internal fallback validates [C].
+
+---
+
+##### S4 — devops — MEDIUM — VSIX `v1.7.0-rc1` is a downgrade from `1.30.0`; `npm run deploy` has no auto-version
+
+**Evidence:**
+- `package.json:5`: `"version": "1.30.0"` — current VSIX extension version.
+- `TASKS:847`: cross-task summary row: `Wave 1 release: A+B+C ship as VSIX v1.7.0-rc1`.
+- `TASKS:413`: T-C.4 acceptance criterion: `"release Wave 1 VSIX (v1.7.0-rc1)"`.
+- `TASKS:851`: `Wave 2 release: A+B+C+D+E+F ship as VSIX v1.7.0`.
+- `package.json:464`: `"deploy": "npm run compile && npm run package && node scripts/install-vsix.js mcp-gateway-dashboard-latest.vsix"` — no version bump step.
+- `CLAUDE.md §VSCode Extension Build Discipline`: `npm run deploy` does "auto-version → build → package VSIX → install".
+
+**Issue 1 (version downgrade):** Targeting `v1.7.0-rc1` would be a downgrade from the current `1.30.0`. VS Code extension versions follow SemVer and the extension marketplace (and `vsce`) requires monotonically increasing versions. A downgrade to `v1.7.0` from `1.30.0` would fail `vsce package` or be silently accepted but would confuse the marketplace and operators. The plan must clarify: is the `v1.7.0` a Go binary version (not extension version)? Are the versions separate tracks?
+
+**Issue 2 (no auto-version in deploy):** CLAUDE.md mandates `npm run deploy` does "auto-version → build → package VSIX → install." The current `deploy` script does `compile && package && install-vsix` — no version bump. Any of T-B.4/T-B.5/T-C.4/T-E.3/T-E.4/T-F.6 calling `npm run deploy` will commit the VSIX at `1.30.0` without incrementing, violating the discipline.
+
+**Rationale:** Version confusion between Go binary semver (`v1.7.0`) and extension version (`1.30.0`) is a known source of operator confusion and package-management failures. The plan must clarify the versioning scheme and either (a) confirm extension version stays at `1.3x.0` lineage and `v1.7.0` is Go-binary only, or (b) confirm the extension will be renumbered with a documented migration rationale.
+
+**Impact:** T-C.4 GATE `npm run deploy` call produces `v1.7.0-rc1` only if the deploy script is extended with a version bump. Without this, T-C.4 GATE acceptance criterion "release Wave 1 VSIX (v1.7.0-rc1)" cannot be satisfied by the current `npm run deploy` command.
+
+**Fix Recommendation:** Add to T-C.4 acceptance criteria:
+> VSIX version scheme clarified: extension version follows `1.3x.y` lineage (current 1.30.0; Wave 1 RC1 = `1.31.0-rc1` or equivalent patch increment). `npm run deploy` extended with `node scripts/bump-version.js --rc1` (or equivalent) before the Wave 1 RC1 publish. Alternatively, if `v1.7.0` refers to Go binary only, document this explicitly: `"v1.7.0-rc1" in this plan refers to the Go daemon binary tag, not the extension VSIX version number.`
+
+**Confidence:** [C] — direct file evidence (package.json + deploy script + CLAUDE.md). PAL escalation: MEDIUM devops; internal fallback validates [C].
+
+---
+
+##### S5 — devops — LOW — `make check-grammar` target does not exist in current Makefile
+
+**Evidence:**
+- `Makefile:1-50` (full file read): targets are `test`, `test-integration-windows`, `test-integration-phase16`, `help` — NO `check-grammar` target exists.
+- `TASKS:96-101` (T-A.2 validation command): `go run ./tools/grammar-gen` then `go run ./tools/grammar-gen/check` — the validation command uses `go run`, not `make`.
+- `TASKS:88`: `Makefile (add check-grammar target)` — T-A.2 files-touched correctly lists the Makefile as needing modification.
+- But `TASKS:73`: acceptance criterion says `"wired into Makefile target make check-grammar AND npm run check-grammar (TS-side delegate)"` — two separate targets (Make and npm).
+
+**Issue:** The `make check-grammar` target does not exist and must be created. This is correctly noted in T-A.2 files-touched (`Makefile (add check-grammar target)`). However, the acceptance criterion does not specify the Make recipe — specifically whether `make check-grammar` invokes `go run ./tools/grammar-gen/check` AND `npm run check-grammar` (both languages) or only the Go side. The TS side is handled by `npm run check-grammar` (a separate npm script added to `package.json`). The plan should clarify whether `make check-grammar` is a top-level orchestrator that calls both, or just the Go-side gate (with TS-side handled separately).
+
+**Rationale:** Under ZFE.1 + default threshold `low` — this is a LOW specificity gap, not a correctness defect. The files-touched list correctly includes the Makefile, so the implementer knows to modify it. But the recipe content is unspecified.
+
+**Impact:** Implementer writes a `check-grammar` target that only runs the Go check, CI passes on stale TS generated files. Cross-language parity (X1 fix) is partially voided.
+
+**Fix Recommendation:** Add to T-A.2 acceptance criteria:
+> `make check-grammar` recipe calls: (1) `go run ./tools/grammar-gen/check` AND (2) `cd vscode/mcp-gateway-dashboard && npm run check-grammar`. Both must exit 0 for the Make target to succeed. This ensures CI catches staleness in either generated file.
+
+**Confidence:** [C] — Makefile read + acceptance criterion text. No PAL escalation needed (LOW).
+
+---
+
+#### Verification Evidence
+
+- **Files read:** `docs/PLAN-sap-picker-and-import-mcp.md` (full, 305 lines), `docs/TASKS-sap-picker-and-import-mcp.md` (full, 857 lines), `docs/REVIEW-sap-picker-and-import-mcp.md` (full, 160 lines), `docs/AUDIT.md` (full, 494 lines), `docs/spikes/2026-05-07-sap-picker-and-import-mcp.md` (lines 1-800), `internal/api/server.go` (lines 308-395, 800-845), `internal/lifecycle/manager.go` (lines 556-574), `Makefile` (full, 50 lines), `vscode/mcp-gateway-dashboard/package.json` (lines 1-30, 455-470).
+- **Grep/Glob queries:**
+  - `authMW|claudeCodeCORS|chi.Router` in `internal/api/server.go` → confirmed two distinct middleware groups.
+  - `handleAddServer|addServerInProcess` in `internal/api/server.go` → confirmed `handleAddServer` exists at line 778, no `addServerInProcess` yet (to be created in T-A.5).
+  - `_test.go` in `internal/api/` → exactly 9 files; regression anchor count confirmed.
+  - `*.test.ts` in `vscode/mcp-gateway-dashboard/src/test/` → 35 files; TS baseline confirmed.
+  - `.gitlab-ci.yml` existence check via Bash → does not exist.
+  - `check-grammar|grammar-staleness` in repo → only in AUDIT.md + CHANGELOG.md + Makefile (in AUDIT.md only).
+  - `mcpDashboard` in TASKS file → zero hits.
+  - `deploy` in package.json → no auto-version step confirmed.
+- **Code patterns checked:** `RemoveServer` at `lifecycle/manager.go:559-574` (current signature `(ctx, name) error` — T-A.5 must change to `(ctx, name) (RemoveResult, error)`); `TriggerPluginRegen` at `server.go:232`; `cfgMu` at `server.go:43`.
+- **Edge cases analyzed:** VSIX version downgrade (1.30.0 > 1.7.0); CI file non-existence; csrfProtect group placement for SAP endpoints.
+- **Cross-domain risks:** S2 (security/devops boundary — auth group placement for SAP endpoints) escalated to chief-architect.
+- **PAL cross-validation:** PAL MCP unavailable in this agent thread; internal cross-model fallback used per CLAUDE.md. Findings S2, S3, S4 validated [C] via code evidence.
+
+---
+
+#### Assumptions Verified
+
+- **9 Go regression anchors in `internal/api/*_test.go`:** Confirmed (9 files: `http_backend_test.go`, `integration_test.go`, `auth_integration_test.go`, `tls_integration_test.go`, `server_proxy_test.go`, `integration_cors_test.go`, `integration_phase16_test.go`, `claude_code_handlers_test.go`, `server_test.go`).
+- **4 lifecycle `_test.go` anchors:** Confirmed (4 files: `http_resilience_test.go`, `http_test.go`, `job_windows_test.go`, `manager_test.go`).
+- **35 TS test files baseline:** Confirmed (35 `.test.ts` files in `src/test/**`).
+- **`authMW` wires all authed groups:** Confirmed — all 3 route groups in `server.go` that handle non-public endpoints use `authMW`.
+- **`.gitlab-ci.yml` does not exist:** Confirmed — T-A.2 must CREATE, not modify.
+- **`make check-grammar` does not exist in Makefile:** Confirmed — current Makefile has only 4 targets.
+- **`npm run deploy` has no auto-version:** Confirmed — `deploy` = `compile && package && install-vsix`.
+- **Current extension version = 1.30.0:** Confirmed — `package.json:5`.
+- **`RemoveServer` current signature = `(ctx, name) error`:** Confirmed — `manager.go:559` — returns `error` only, no `RemoveResult` yet.
+- **X1-X7 → R-NN coverage table integrity:** Verified intact at PLAN §4.
+
+---
+
+#### Out-of-Scope Items
+
+- `lifecycle/manager.go:559-573` Stop-error swallow is correctly identified and targeted by T-A.5. The existing code at line 568 (`_ = m.Stop(ctx, name)`) discards the error. This is a known bug already tracked in the plan — not a new finding, but flagged for chief-architect to verify that T-A.5's `RemoveResult{Orphan bool, StopErr error}` change is backward-compatible with all 4 lifecycle test anchors.
+- Cross-language fixture parity (T-F.2 `testdata/sap-name-fixtures.json` format) — no gap found; acceptance criterion is adequately specified.
+
+#### Audit Depth Checklist
+
+- [x] Source code read (server.go, manager.go, Makefile, package.json — all affected boundary files)
+- [x] Technical assumptions verified (9 test files, 35 TS files, .gitlab-ci.yml absence, deploy script content, version number)
+- [x] PAL analysis performed (PAL MCP unavailable; internal cross-model fallback used per CLAUDE.md; MEDIUM findings validated [C])
+- [x] Edge cases considered (VSIX version downgrade, CI file creation vs modification, csrfProtect group placement)
+- [x] Security surface noted (S2: SAP endpoint auth-group placement — MEDIUM)
+- [x] Backward compatibility verified (RemoveServer signature change tracked, noted out-of-scope for chief-architect)
+- [x] Test coverage assessed (regression anchor counts verified; CI gate failure mode gap identified)
+- [x] Cross-domain integration noted (S2 spans security/devops; S4 spans devops/CLAUDE.md discipline)
+
+---
+
+## Final synthesis — pipeline `audit-0b751d84` step 4 (lead-auditor, 2026-05-08)
+
+### Verdict: **APPROVE**
+
+Zero remaining findings. All 18 distinct findings across both audit chains (Chain A cycles 1-7 internal; Chain B cycles 8-11 PAL + specialist + chief-architect) are marked Fixed. Plan + Tasks documents are internally consistent at 21.5d total (Wave 1 = 11.0d daemon `v1.8.0` + extension `1.31.0`; Wave 2 = 10.5d daemon `v1.9.0` + extension `1.32.0`), all 6 GATE checkboxes use mandatory wording, ZFE.1 zero-Deferred terminology hygiene maintained.
+
+### Verification evidence (cycle-9 + cycle-11 fix anchors)
+
+All 9 spot-checks pass — text-grep proof:
+
+| Fix | Anchor location | Evidence |
+|-----|-----------------|----------|
+| S1 (Import-from-mcpDashboard) | TASKS:383 | `### T-C.3 — Save batch + restart-required toast + Import-from-mcpDashboard (R-29, X5; S1 fix)` |
+| S2 (auth-group placement) | TASKS:461 | `Routes under existing claudeCodeCORS + authMW.` + ADR-0003 reference |
+| S3 (CI file path) | TASKS:74,90 | `.github/workflows/ci.yml (NOT .gitlab-ci.yml)` |
+| S4 (version scheme) | PLAN:146,244 | Two semver tracks declared; daemon `v1.8.0/v1.9.0` + extension `1.31.0/1.32.0` |
+| S5 (`make check-grammar` recipe) | TASKS:73 | Target invokes BOTH Go check AND TS npm check sequentially |
+| M1 (ADR-0005 path) | TASKS:469,782,788 | `docs/ADR-0005-claude-code-integration.md` (uppercase, flat) — replace_all confirmed |
+| M2 (ldflags as canonical) | PLAN:146,283 | ldflags-embedded declared canonical; OQ row 5 escalates tag-alignment to user awareness |
+| L1 (T-D.1 ADR comment) | TASKS:463 | "Code-comment requirement (L1 fix — symmetric with T-A.1 ADR-0003 reference)" |
+| L2 (per-phase delta note) | PLAN:73 | "Per-phase delta vs spike §7 (L2 fix — reconciliation note)" |
+
+### ZFE.1 compliance scan
+
+`grep -niE "deferred|out-of-scope|manual review"` over PLAN + TASKS — 5 hits, all narrative usage (PLAN:37 R-31 fallback note; PLAN:79 R-28 deferred-impl narrative; PLAN:94 narrative; PLAN:243 OQ-7 B narrative; TASKS:796 shell-snippet comment). Zero status-label hits. Zero `Deferred` row status. Compliant.
+
+### PAL gates (pipeline cycle-8)
+
+| Tool | Model | Verdict | continuation_id |
+|------|-------|---------|-----------------|
+| `thinkdeep` gate_mode | gpt-5.1-codex | PASS / 0 blocking | `24367552-3120-4620-bb28-7ea08ec43c42` |
+| `codereview` gate_mode | gpt-5.1-codex | PASS / 0 blocking | `560d4b29-467b-4ec9-803a-07727424af98` |
+
+Cross-validation status: `[C+O]` for the structural plan-quality verdict.
+
+### Required actions
+
+None — APPROVE. User may proceed with `/run sap-picker-and-import-mcp` to begin Phase A execution.
+
+### Manual review escalations
+
+One item — M2 daemon-tag alignment (PLAN §7 OQ row 5). Operationally Fixed (plan declares ldflags as canonical); user must verify before T-C.4 GATE that the public git tag jumping `v1.0.0` → `v1.8.0` matches their public-versioning expectations. Alternative: retag legacy `v1.7.x` first to fill history.
+
