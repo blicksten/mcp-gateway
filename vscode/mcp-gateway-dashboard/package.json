@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.29.0",
+  "version": "1.30.0",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -431,6 +431,22 @@
           "type": "string",
           "default": "mcp-gateway",
           "description": "Name of the managed entry that points at the aggregate gateway endpoint (/mcp without a backend suffix). Exposes gateway meta-tools (gateway.list_servers, gateway.list_tools, gateway.invoke). Empty string disables the aggregate entry."
+        },
+        "mcpGateway.autoRestartOnCrash": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically respawn the mcp-gateway daemon when it exits unexpectedly (non-zero code or fatal signal). Uses exponential backoff (1s → 60s) with crash-loop detection (max 5 quick crashes per 10 min)."
+        },
+        "mcpGateway.daemonFileLogEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Persist daemon stdout/stderr to a daily log file in the extension's globalStorage directory (Help → About → Open Logs). Useful for post-mortem after VSCode reload."
+        },
+        "mcpGateway.daemonLogRetentionDays": {
+          "type": "number",
+          "default": 7,
+          "minimum": 0,
+          "description": "Number of days to keep daemon-YYYY-MM-DD.log files in the daemon-logs directory. Older files are deleted on extension activation. 0 = keep forever."
         }
       }
     }

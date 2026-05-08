@@ -1,14 +1,47 @@
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
-import type * as vscode from 'vscode';
+import * as vscode from 'vscode';
 import type { IGatewayClient } from './extension';
 import { logger } from './logger';
+import type { DaemonLogFile } from './daemon-log-file';
 
 /** Spawn function signature — matches child_process.spawn subset used here. */
 export type SpawnFn = (cmd: string, args: string[], opts: SpawnOptions) => ChildProcess;
 
+/** Configuration for the crash-recovery supervisor built into DaemonManager. */
+export interface CrashRestartConfig {
+	/** Initial backoff delay before first restart attempt. Default 1000ms. */
+	initialDelayMs?: number;
+	/** Maximum backoff delay. Default 60_000ms. */
+	maxDelayMs?: number;
+	/** Jitter ratio applied as ±fraction of baseDelay. Default 0.2 (±20%). */
+	jitterRatio?: number;
+	/** Maximum crash attempts counted in the rolling window before aborting. Default 5. */
+	maxAttemptsInWindow?: number;
+	/** Rolling window size for counting quick crashes. Default 600_000ms (10 min). */
+	windowMs?: number;
+	/** Minimum uptime (ms) for a run to be considered stable; resets crash counter. Default 60_000ms. */
+	stableThresholdMs?: number;
+}
+
+/** Options for DaemonManager constructor — all optional for backward compatibility. */
+export interface DaemonManagerOptions {
+	/** Auto-restart on unexpected child exit (default true). */
+	autoRestartOnCrash?: boolean;
+	/** Optional file-backed log sink for stdout/stderr/lifecycle events. */
+	fileLogger?: DaemonLogFile;
+	/** Override backoff schedule for tests. */
+	crashRestartConfig?: CrashRestartConfig;
+	/** Injectable timers for tests. */
+	setTimeout?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
+	clearTimeout?: (h: ReturnType<typeof setTimeout>) => void;
+	/** Jitter source for backoff calculation; default Math.random. */
+	random?: () => number;
+}
+
 /**
  * Manages the mcp-gateway daemon process lifecycle.
  * Spawns the daemon if not already running, writes to the shared logger channel.
+ * Includes crash-recovery supervisor with exponential backoff and crash-loop detection.
  */
 export class DaemonManager {
 	private child: ChildProcess | undefined;
@@ -30,17 +63,58 @@ export class DaemonManager {
 	// next stopDaemon hits the no-op path, and UI reports inconsistent state.
 	private skipHealthFastPathOnce = false;
 
+	// Supervisor dependencies (injectable for tests)
+	private readonly fileLogger: DaemonLogFile | undefined;
+	private readonly autoRestartOnCrash: boolean;
+	private readonly cfg: Required<CrashRestartConfig>;
+	private readonly _setTimeout: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
+	private readonly _clearTimeout: (h: ReturnType<typeof setTimeout>) => void;
+	private readonly _random: () => number;
+
+	// Supervisor runtime state
+	private spawnedAt: number | undefined;
+	private restartTimer: ReturnType<typeof setTimeout> | undefined;
+	private crashTimestamps: number[] = [];
+	private supervisorAborted = false;
+	private expectedExit = false;
+
 	constructor(
 		private readonly client: IGatewayClient,
 		private readonly daemonPath: string,
-		// outputChannel is no longer used — all output goes through the shared
-		// logger module. Kept in the signature only for backward-compat with
-		// existing tests; ignored at runtime.
+		/**
+		 * @deprecated Pre-Phase-N legacy parameter, ignored at runtime.
+		 * Removed in next major when test call sites migrate.
+		 */
 		_outputChannel?: vscode.OutputChannel,
 		spawnFn?: SpawnFn,
+		options?: DaemonManagerOptions,
 	) {
 		this.spawnFn = spawnFn ?? nodeSpawn;
+		this.fileLogger = options?.fileLogger;
+		this.autoRestartOnCrash = options?.autoRestartOnCrash ?? true;
+		this.cfg = {
+			initialDelayMs: options?.crashRestartConfig?.initialDelayMs ?? 1000,
+			maxDelayMs: options?.crashRestartConfig?.maxDelayMs ?? 60_000,
+			jitterRatio: options?.crashRestartConfig?.jitterRatio ?? 0.2,
+			maxAttemptsInWindow: options?.crashRestartConfig?.maxAttemptsInWindow ?? 5,
+			windowMs: options?.crashRestartConfig?.windowMs ?? 600_000,
+			stableThresholdMs: options?.crashRestartConfig?.stableThresholdMs ?? 60_000,
+		};
+		this._setTimeout = options?.setTimeout ?? ((cb, ms) => setTimeout(cb, ms));
+		this._clearTimeout = options?.clearTimeout ?? ((h) => clearTimeout(h));
+		this._random = options?.random ?? Math.random;
 	}
+
+	/** Number of quick crashes tracked in the current rolling window. */
+	get crashCount(): number { return this.crashTimestamps.length; }
+
+	/** True when the supervisor is armed and not aborted due to crash-loop. */
+	get supervisorActive(): boolean {
+		return this.autoRestartOnCrash && !this.supervisorAborted && !this.disposed;
+	}
+
+	/** True when a scheduled restart timer is pending. */
+	get pendingRestartScheduled(): boolean { return this.restartTimer !== undefined; }
 
 	/** Start the daemon if it is not already running. Returns true if spawned. */
 	async start(): Promise<boolean> {
@@ -81,12 +155,19 @@ export class DaemonManager {
 				return false;
 			}
 
+			this.spawnedAt = Date.now();
+			this.fileLogger?.writeEvent(`spawn: ${cmd}`);
+
 			this.child.stdout?.on('data', (chunk: Buffer) => {
-				if (!this.disposed) { logger.info('daemon', chunk.toString().trimEnd()); }
+				const text = chunk.toString();
+				if (!this.disposed) { logger.info('daemon', text.trimEnd()); }
+				this.fileLogger?.writeStdout(text);
 			});
 
 			this.child.stderr?.on('data', (chunk: Buffer) => {
-				if (!this.disposed) { logger.warn('daemon', `[stderr] ${chunk.toString().trimEnd()}`); }
+				const text = chunk.toString();
+				if (!this.disposed) { logger.warn('daemon', `[stderr] ${text.trimEnd()}`); }
+				this.fileLogger?.writeStderr(text);
 			});
 
 			this.child.on('error', (err) => {
@@ -98,8 +179,13 @@ export class DaemonManager {
 			this.child.on('exit', (code, signal) => {
 				const reason = signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`;
 				if (!this.disposed) { logger.info('daemon', `Exited (${reason})`); }
+				this.fileLogger?.writeEvent(`exit: ${reason}`);
+				const aliveMs = this.spawnedAt ? Date.now() - this.spawnedAt : 0;
 				this.child = undefined;
 				this.stopping = false;
+				this.spawnedAt = undefined;
+
+				this.handleExit(code, signal, aliveMs);
 			});
 
 			return true;
@@ -128,9 +214,13 @@ export class DaemonManager {
 	 * below) are already in async contexts and just need an `await`.
 	 */
 	async stop(timeoutMs = 5_000): Promise<void> {
+		this.cancelPendingRestart();
 		// AUDIT A-M1: reject during restart to avoid racing with the
 		// restart() kill+spawn sequence. Also re-entry guard for stop().
+		// REVIEW HIGH-2: expectedExit only set after re-entry guard passes —
+		// prevents orphan flag suppressing next legitimate crash restart.
 		if (this.stopping || this.restarting) { return; }
+		this.expectedExit = true;
 		// Nothing to stop and no daemon reachable to ask politely — bail out.
 		if (!this.child) {
 			const reachable = await this.client.getHealth().then(() => true, () => false);
@@ -145,6 +235,8 @@ export class DaemonManager {
 		// failure: fall through to SIGTERM if we own a child.
 		let restShutdownAccepted = false;
 		try {
+			// [DEBUG-INSTR] trace caller of client.shutdown for "dashboard kills daemon" investigation
+			logger.warn('daemon', 'shutdown.invocation@stop', new Error('shutdown caller trace'));
 			await this.client.shutdown();
 			restShutdownAccepted = true;
 		} catch (err) {
@@ -172,7 +264,7 @@ export class DaemonManager {
 					if (!this.child) { this.stopping = false; }
 					return;
 				}
-				await new Promise((resolve) => setTimeout(resolve, 200));
+				await new Promise<void>((resolve) => this._setTimeout(() => resolve(), 200));
 			}
 			// Deadline passed but daemon still reachable — fall through to SIGTERM
 			// for our child if we own it (last resort).
@@ -211,15 +303,21 @@ export class DaemonManager {
 	 * its own fast-path check.
 	 */
 	async restart(timeoutMs = 10_000): Promise<boolean> {
+		this.cancelPendingRestart();
 		// AUDIT A-H1/A-M1: hard mutex with start()/stop(). If a restart is
 		// already in flight OR the manager is disposed, refuse re-entry.
+		// REVIEW HIGH-2: expectedExit only set after re-entry guard passes —
+		// prevents orphan flag suppressing next legitimate crash restart.
 		if (this.disposed || this.restarting) { return false; }
+		this.expectedExit = true;
 		this.restarting = true;
 		try {
 			logger.info('daemon', 'Restarting...');
 
 			// 1. Graceful REST shutdown — works for external daemons.
 			try {
+				// [DEBUG-INSTR] trace caller of client.shutdown for "dashboard kills daemon" investigation
+				logger.warn('daemon', 'shutdown.invocation@restart', new Error('shutdown caller trace'));
 				await this.client.shutdown();
 			} catch (err) {
 				// Daemon may be unreachable, auth may have failed, or endpoint
@@ -240,7 +338,7 @@ export class DaemonManager {
 					daemonStillReachable = false;
 					break; // unreachable — daemon is down
 				}
-				await new Promise((resolve) => setTimeout(resolve, 200));
+				await new Promise<void>((resolve) => this._setTimeout(() => resolve(), 200));
 			}
 			// If the poll loop exited because we hit the deadline (not because
 			// /health became unreachable), abort without a final extra probe —
@@ -265,7 +363,13 @@ export class DaemonManager {
 			// fast-path is bypassed exactly once on this respawn.
 			this.skipHealthFastPathOnce = true;
 			this.restarting = false;
-			return await this.start();
+			const result = await this.start();
+			if (result) {
+				// Manual restart resets crash counter and re-arms supervisor.
+				this.crashTimestamps = [];
+				this.supervisorAborted = false;
+			}
+			return result;
 		} finally {
 			this.restarting = false;
 		}
@@ -274,6 +378,72 @@ export class DaemonManager {
 	/** Whether a child process is actively running (false while stopping). */
 	get running(): boolean {
 		return this.child !== undefined && !this.stopping;
+	}
+
+	/**
+	 * Called from the child 'exit' handler to decide whether the supervisor
+	 * should respawn. Implements crash-loop detection with exponential backoff.
+	 */
+	private handleExit(code: number | null, signal: string | null, aliveMs: number): void {
+		if (this.disposed || !this.autoRestartOnCrash || this.supervisorAborted) { return; }
+		if (this.expectedExit) { this.expectedExit = false; return; }
+		if (this.restarting) { return; } // restart() will spawn its own
+
+		// exit(0) with no signal — daemon decided to quit cleanly (e.g. external mcp-ctl shutdown)
+		const wasGracefulZero = code === 0 && signal === null;
+		if (wasGracefulZero) { return; }
+
+		// Reset crash counter if the previous run was stable long enough.
+		if (aliveMs >= this.cfg.stableThresholdMs) {
+			this.crashTimestamps = [];
+		}
+
+		const now = Date.now();
+		this.crashTimestamps.push(now);
+		this.crashTimestamps = this.crashTimestamps.filter(t => now - t < this.cfg.windowMs);
+
+		if (this.crashTimestamps.length > this.cfg.maxAttemptsInWindow) {
+			this.supervisorAborted = true;
+			logger.error('daemon', `Crash loop detected (${this.crashTimestamps.length} crashes in ${Math.round(this.cfg.windowMs / 60_000)}min). Auto-restart disabled.`);
+			this.fileLogger?.writeEvent('supervisor: aborted (crash loop)');
+			void vscode.window.showErrorMessage(
+				'MCP Gateway: daemon is crash-looping — auto-restart disabled. Inspect daemon logs and run `MCP Gateway: Restart Daemon` manually.',
+				'Show Output',
+			).then(pick => {
+				if (this.disposed) { return; }
+				if (pick === 'Show Output') { void vscode.commands.executeCommand('mcpGateway.showOutput'); }
+			});
+			return;
+		}
+
+		this.scheduleRestart();
+	}
+
+	/** Schedule the next restart attempt using exponential backoff with jitter. */
+	private scheduleRestart(): void {
+		// windowCrashIdx is the count of crashes within `windowMs` (not lifetime).
+		// Backoff "steps down" when older crashes age out — intentional.
+		// REVIEW MEDIUM-1: use window-relative count in log message (not lifetime) so
+		// "crashes in last Xmin" accurately reflects the rolling window, not total crashes.
+		const windowCrashIdx = this.crashTimestamps.length - 1; // 0-based
+		const baseDelay = Math.min(this.cfg.initialDelayMs * (2 ** windowCrashIdx), this.cfg.maxDelayMs);
+		const jitter = baseDelay * this.cfg.jitterRatio * (this._random() * 2 - 1);
+		const delay = Math.max(0, Math.round(baseDelay + jitter));
+		logger.info('daemon', `Auto-restart in ${delay}ms (crashes in last ${Math.round(this.cfg.windowMs / 60_000)}min: ${windowCrashIdx + 1}/${this.cfg.maxAttemptsInWindow})`);
+		this.fileLogger?.writeEvent(`supervisor: scheduling restart in ${delay}ms (window-crash ${windowCrashIdx + 1}/${this.cfg.maxAttemptsInWindow})`);
+		this.restartTimer = this._setTimeout(() => {
+			this.restartTimer = undefined;
+			if (this.disposed) { return; }
+			void this.start().catch(err => logger.error('daemon', 'Auto-restart spawn failed', err));
+		}, delay);
+	}
+
+	/** Cancel any pending supervisor restart timer. */
+	private cancelPendingRestart(): void {
+		if (this.restartTimer) {
+			this._clearTimeout(this.restartTimer);
+			this.restartTimer = undefined;
+		}
 	}
 
 	/**
@@ -293,7 +463,9 @@ export class DaemonManager {
 	 */
 	async dispose(): Promise<void> {
 		if (this.disposed) { return; }
+		this.cancelPendingRestart();
 		this.disposed = true;
+		this.expectedExit = true;
 		const ownedChild = this.child;
 		if (ownedChild) {
 			ownedChild.stdout?.removeAllListeners();
@@ -307,6 +479,10 @@ export class DaemonManager {
 				// dispose() must not throw. Log and move on.
 				logger.warn('daemon', 'dispose: graceful stop failed', err);
 			}
+			// REVIEW HIGH-1: stop() may fall back to SIGTERM with listeners stripped,
+			// leaving child set; clear unconditionally so this.running stays false post-dispose.
+			// dispose() is one-shot; disposed=true gates all further use.
+			this.child = undefined;
 		}
 	}
 }

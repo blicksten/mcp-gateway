@@ -6,6 +6,7 @@ node_modules/**
 package-lock.json
 *.vsix
 *.log
+*.txt
 out/**/*.js.map
 out/**/*.d.ts
 out/test/**

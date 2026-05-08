@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'node:path';
 import { GatewayClient, GatewayError } from './gateway-client';
 import { buildAuthHeader, buildAuthHeaderAsync, resolveTokenPath, AuthTokenError } from './auth-header';
 import { runKeepassImport, applyImportedCredentials, KeepassImportError } from './keepass-importer';
@@ -7,6 +8,7 @@ import { BackendItem } from './backend-item';
 import { GatewayTreeProvider } from './gateway-tree-provider';
 import { McpStatusBar } from './status-bar';
 import { DaemonManager } from './daemon';
+import { DaemonLogFile } from './daemon-log-file';
 import { LogViewer } from './log-viewer';
 import { logger } from './logger';
 import { CredentialStore } from './credential-store';
@@ -157,8 +159,43 @@ export function activate(
 		context.subscriptions.push({ dispose: () => provider.dispose() });
 	}
 
-	// Phase 2.4: command registration (daemon passed for start/stop wiring)
-	const daemon = injectedDaemon ?? new DaemonManager(client, daemonPath);
+	// Phase 2.4: command registration (daemon passed for start/stop wiring).
+	// File logger and supervisor options are only wired when we own the daemon
+	// (injectedDaemon === undefined). Test callers pass an injectedDaemon and
+	// a mock context without globalStorageUri, so we skip this block for them.
+	let daemon: DaemonManager;
+	if (injectedDaemon) {
+		daemon = injectedDaemon;
+	} else {
+		const autoRestartOnCrash = vscode.workspace.getConfiguration('mcpGateway')
+			.get<boolean>('autoRestartOnCrash', true);
+
+		// REVIEW MEDIUM-5: defensive null-guard on globalStorageUri.fsPath —
+		// VSCode 1.85+ always provides it, but guard protects test contexts and
+		// future extension host edge cases.
+		let fileLogger: DaemonLogFile | undefined;
+		const daemonLogStorage = context.globalStorageUri?.fsPath
+			? path.join(context.globalStorageUri.fsPath, 'daemon-logs')
+			: undefined;
+		if (daemonLogStorage) {
+			const daemonFileLogEnabled = vscode.workspace.getConfiguration('mcpGateway')
+				.get<boolean>('daemonFileLogEnabled', true);
+			const daemonLogRetentionDays = vscode.workspace.getConfiguration('mcpGateway')
+				.get<number>('daemonLogRetentionDays', 7);
+			fileLogger = new DaemonLogFile({
+				storageDir: daemonLogStorage,
+				retentionDays: daemonLogRetentionDays,
+				enabled: daemonFileLogEnabled,
+			});
+			fileLogger.rotate(); // best-effort; never throws
+			context.subscriptions.push({ dispose: () => fileLogger!.dispose() });
+		}
+
+		daemon = new DaemonManager(client, daemonPath, undefined, undefined, {
+			fileLogger,
+			autoRestartOnCrash,
+		});
+	}
 	context.subscriptions.push(daemon);
 
 	// Phase 2.7: log viewer — SSE-based live logs per backend.
@@ -661,6 +698,8 @@ function registerCommands(
 
 		// Step 2: REST shutdown — works regardless of ownership.
 		try {
+			// [DEBUG-INSTR] trace caller of client.shutdown for "dashboard kills daemon" investigation
+			logger.warn('extension', 'shutdown.invocation@stopDaemonCommand', new Error('shutdown caller trace'));
 			await client.shutdown();
 		} catch (err) {
 			if (err instanceof GatewayError && err.kind === 'auth') {
