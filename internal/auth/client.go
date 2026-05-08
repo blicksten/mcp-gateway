@@ -51,3 +51,41 @@ func ResolveToken(tokenPath string) (string, error) {
 	}
 	return "", fmt.Errorf("%w: checked %s", ErrNoToken, tokenPath)
 }
+
+// ErrNoAdminToken is the admin-scope counterpart of ErrNoToken. Consumers
+// (mcp-ctl Shutdown, extension shutdown command, integration tests)
+// distinguish admin-scope failures so the error surface mentions the
+// admin env var + admin file path instead of the regular ones.
+//
+// MCPR.3 — see ADR-0007 §two-tier-auth.
+var ErrNoAdminToken = errors.New("no admin token found: set " + EnvVarNameAdmin + " or create the admin token file")
+
+// BuildAdminHeader is the admin-scope counterpart of BuildHeader. Same
+// discovery ladder (env var > file) but for the admin token shape:
+// MCP_GATEWAY_ADMIN_TOKEN env var and ~/.mcp-gateway/admin.token by
+// default. Used by mcp-ctl Shutdown and any other daemon-control caller
+// that hits an admin-scoped endpoint.
+//
+// MCPR.3.
+func BuildAdminHeader(tokenPath string) (string, error) {
+	tok, err := ResolveAdminToken(tokenPath)
+	if err != nil {
+		return "", err
+	}
+	return "Bearer " + tok, nil
+}
+
+// ResolveAdminToken is the admin-scope counterpart of ResolveToken.
+// MCPR.3.
+func ResolveAdminToken(tokenPath string) (string, error) {
+	if env := os.Getenv(EnvVarNameAdmin); env != "" {
+		if !looksLikeToken(env) {
+			return "", fmt.Errorf("%s env var is set but malformed (expected >=%d base64url chars)", EnvVarNameAdmin, MinTokenLen)
+		}
+		return env, nil
+	}
+	if tok, ok := tryReadToken(tokenPath); ok {
+		return tok, nil
+	}
+	return "", fmt.Errorf("%w: checked %s", ErrNoAdminToken, tokenPath)
+}

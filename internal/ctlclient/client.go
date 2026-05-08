@@ -29,6 +29,12 @@ type Client struct {
 	httpClient   *http.Client
 	streamClient *http.Client // no timeout — for long-lived SSE connections
 	auth         authHeaderProvider
+	// MCPR.3: separate provider for admin-scope endpoints (currently
+	// /api/v1/shutdown). When nil, admin-scope calls fall back to the
+	// regular auth provider — that path will 401 against an MCPR.3
+	// daemon. Operators of mcp-ctl set this via WithAdminAuth so
+	// Shutdown carries the admin Bearer.
+	adminAuth authHeaderProvider
 }
 
 // New creates a Client for the given base URL (e.g. "http://127.0.0.1:8765").
@@ -53,6 +59,15 @@ func NewAuthed(baseURL string, authHeader func() (string, error)) *Client {
 	return c
 }
 
+// WithAdminAuth attaches an admin-scope auth provider used by daemon-control
+// endpoints (currently Shutdown). Returns the receiver for chaining.
+//
+// MCPR.3 — see ADR-0007 §two-tier-auth.
+func (c *Client) WithAdminAuth(adminAuthHeader func() (string, error)) *Client {
+	c.adminAuth = adminAuthHeader
+	return c
+}
+
 // attachAuthHeader injects the Authorization header using the provider,
 // if one is configured. A provider returning "" means auth is off and
 // the request is sent unchanged.
@@ -61,6 +76,31 @@ func (c *Client) attachAuthHeader(req *http.Request) error {
 		return nil
 	}
 	header, err := c.auth()
+	if err != nil {
+		return err
+	}
+	if header != "" {
+		req.Header.Set("Authorization", header)
+	}
+	return nil
+}
+
+// attachAdminAuthHeader injects the admin-scope Authorization header.
+// Falls back to the regular provider when adminAuth is unwired, which
+// preserves legacy behavior (will 401 against an MCPR.3 daemon, surfaced
+// as an APIError the caller can inspect — same UX as a missing/expired
+// regular Bearer).
+//
+// MCPR.3.
+func (c *Client) attachAdminAuthHeader(req *http.Request) error {
+	provider := c.adminAuth
+	if provider == nil {
+		provider = c.auth
+	}
+	if provider == nil {
+		return nil
+	}
+	header, err := provider()
 	if err != nil {
 		return err
 	}
@@ -240,14 +280,19 @@ func (c *Client) ResetCircuit(ctx context.Context, name string) error {
 }
 
 // Shutdown calls POST /api/v1/shutdown to request a graceful daemon exit.
-// A 202 Accepted response is treated as success. Auth is forwarded via the
-// same provider used by all other mutation endpoints.
+// A 202 Accepted response is treated as success.
+//
+// MCPR.3: this endpoint is admin-scope on an MCPR.3-aware daemon.
+// Auth is forwarded via the admin provider when configured (via
+// WithAdminAuth); otherwise falls back to the regular provider for
+// legacy-daemon compatibility — the fallback will 401 against an
+// MCPR.3 daemon, surfaced as an APIError.
 func (c *Client) Shutdown(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/v1/shutdown", nil)
 	if err != nil {
 		return err
 	}
-	if err := c.attachAuthHeader(req); err != nil {
+	if err := c.attachAdminAuthHeader(req); err != nil {
 		return err
 	}
 	resp, err := c.httpClient.Do(req)

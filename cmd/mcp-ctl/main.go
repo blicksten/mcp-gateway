@@ -75,7 +75,29 @@ func newRootCmd() *cobra.Command {
 				}
 				return header, nil
 			}
-			client := ctlclient.NewAuthed(apiURL, provider)
+
+			// MCPR.3: parallel provider for admin-scope endpoints (currently
+			// only Shutdown). Path-distinct: admin.token next to auth.token in
+			// the same config dir. Missing-token error mentions the admin env
+			// var so operators don't try to fix it with the regular Bearer.
+			adminTokenPath := tokenPath // fallback default — overwritten below.
+			if dir, err := config.DefaultConfigDir(); err == nil {
+				adminTokenPath = filepath.Join(dir, "admin.token")
+			}
+			adminProvider := func() (string, error) {
+				header, err := auth.BuildAdminHeader(adminTokenPath)
+				if err != nil {
+					return "", fmt.Errorf(
+						"%w\n  hint: the daemon writes this file on first start "+
+							"(MCPR.3+ daemons only); for older daemons, mcp-ctl "+
+							"shutdown can fall back to the regular Bearer if you "+
+							"clear the admin token entirely",
+						err)
+				}
+				return header, nil
+			}
+
+			client := ctlclient.NewAuthed(apiURL, provider).WithAdminAuth(adminProvider)
 			ctx := setClient(cmd.Context(), client)
 
 			// Load env file for ${VAR} expansion in CLI values.
