@@ -125,7 +125,18 @@ func TestDaemonStatusCommand_Offline(t *testing.T) {
 
 // --- daemon stop command tests ---
 
+// testAdminToken is a 43-char base64url string used to satisfy
+// auth.looksLikeToken when daemon-control tests hit /api/v1/shutdown.
+// MCPR.3 (commit 3b7cab5) made Shutdown an admin-scope endpoint; the
+// mcp-ctl client's attachAdminAuthHeader resolves the token via
+// MCP_GATEWAY_ADMIN_TOKEN (env) or ~/.mcp-gateway/admin.token (file).
+// Tests that don't set this fall through to the killViaPIDFile path
+// when the admin provider returns ErrNoAdminToken — irrelevant to
+// what these REST-path tests are actually validating.
+const testAdminToken = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG" //nolint:gosec — synthetic test token, not a real credential
+
 func TestDaemonStopCommand_Success(t *testing.T) {
+	t.Setenv("MCP_GATEWAY_ADMIN_TOKEN", testAdminToken)
 	callCount := 0
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -155,6 +166,7 @@ func TestDaemonStopCommand_Success(t *testing.T) {
 }
 
 func TestDaemonStopCommand_AlreadyDown(t *testing.T) {
+	t.Setenv("MCP_GATEWAY_ADMIN_TOKEN", testAdminToken)
 	// Daemon not reachable — /shutdown returns connection error but that means
 	// daemon is already down, so stop should succeed.
 	// We test via mocking at the client level by using a stopped server.
@@ -247,6 +259,7 @@ func TestDaemonStartCommand_SpawnHook(t *testing.T) {
 // --- daemon restart command tests ---
 
 func TestDaemonRestartCommand_StopsAndStarts(t *testing.T) {
+	t.Setenv("MCP_GATEWAY_ADMIN_TOKEN", testAdminToken)
 	shutdownCalled := false
 	callCount := 0
 
