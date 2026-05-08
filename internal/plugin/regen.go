@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"mcp-gateway/internal/models"
 )
@@ -183,6 +184,49 @@ func (r *Regenerator) Regenerate(pluginDir string, servers map[string]*models.Se
 		return fmt.Errorf("rename tmp file to %s: %w", MCPJSONFileName, err)
 	}
 	renamed = true
+	return nil
+}
+
+// TouchMtime advances the modification time of the plugin's `.mcp.json`
+// to "now" without rewriting its content. Used by the daemon's startup
+// path (Phase MCPR.4, 2026-05-08) to fire Claude Code's plugin-manager
+// fs-watcher even when Regenerate took the idempotent no-op branch
+// (regen.go:131-133) and therefore preserved mtime. Pairs with the
+// existing patch-flow signal (EnqueueReconnectAction via TriggerPluginRegen)
+// to provide two-layer recovery after a daemon respawn — see
+// docs/PLAN-mcp-resilience.md Phase MCPR.4.
+//
+// Concurrency: takes the same internal mutex as Regenerate so callers
+// that race startup-touch against an in-flight backend mutation observe
+// a serial order rather than the touch occurring mid-rename.
+//
+// Behavior:
+//   - pluginDir empty → returns an error (mirrors Regenerate's contract).
+//   - <pluginDir>/.mcp.json missing → returns nil. The file is owned by
+//     Regenerate; if it does not exist yet, there is nothing to signal
+//     the watcher about and TriggerPluginReannounce calls Regenerate
+//     first anyway. This is defensive only.
+//   - os.Chtimes failure → wrapped error.
+func (r *Regenerator) TouchMtime(pluginDir string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if pluginDir == "" {
+		return errors.New("plugin directory is empty")
+	}
+
+	targetPath := filepath.Join(pluginDir, MCPJSONFileName)
+	if _, err := os.Stat(targetPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("stat %s: %w", MCPJSONFileName, err)
+	}
+
+	now := time.Now()
+	if err := os.Chtimes(targetPath, now, now); err != nil {
+		return fmt.Errorf("chtimes %s: %w", MCPJSONFileName, err)
+	}
 	return nil
 }
 

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"mcp-gateway/internal/models"
 )
@@ -463,5 +464,134 @@ func setHomeDir(t *testing.T, dir string) {
 		t.Setenv("USERPROFILE", dir)
 	} else {
 		t.Setenv("HOME", dir)
+	}
+}
+
+// TestTouchMtime_BumpsMtimeAfterRegenerate asserts that TouchMtime
+// advances .mcp.json mtime past the value set by Regenerate. This is
+// the core MCPR.4 invariant: even on the idempotent regen no-op path
+// (Regenerate returns nil without writing), TouchMtime ensures the
+// file appears "freshly modified" to Claude Code's plugin-manager
+// fs-watcher.
+func TestTouchMtime_BumpsMtimeAfterRegenerate(t *testing.T) {
+	dir := t.TempDir()
+	regen := NewRegenerator()
+
+	servers := map[string]*models.ServerConfig{
+		"alpha": httpBackend("http://127.0.0.1:1/"),
+	}
+	if err := regen.Regenerate(dir, servers, "http://gw"); err != nil {
+		t.Fatalf("Regenerate: %v", err)
+	}
+
+	target := filepath.Join(dir, MCPJSONFileName)
+	infoBefore, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat target: %v", err)
+	}
+
+	// Sleep a tick so the touch advances mtime even on filesystems
+	// with second-granularity timestamps. 50ms is comfortably above
+	// the 1-second granularity boundary that Windows ReFS / FAT-class
+	// filesystems exhibit, and the test runs in a temp dir so this
+	// is best-effort across CI environments.
+	time.Sleep(50 * time.Millisecond)
+
+	if err := regen.TouchMtime(dir); err != nil {
+		t.Fatalf("TouchMtime: %v", err)
+	}
+
+	infoAfter, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat target after touch: %v", err)
+	}
+
+	if !infoAfter.ModTime().After(infoBefore.ModTime()) {
+		t.Fatalf("TouchMtime did not advance mtime: before=%v after=%v",
+			infoBefore.ModTime(), infoAfter.ModTime())
+	}
+}
+
+// TestTouchMtime_IdempotentRegenStillTouches asserts the MCPR.4
+// failure-mode coverage: Regenerate-Regenerate-TouchMtime sequence
+// (where the second Regenerate is the bytes.Equal idempotent no-op)
+// still produces a fresh mtime via the TouchMtime call. This is the
+// startup-respawn case the daemon now wires through
+// TriggerPluginReannounce.
+func TestTouchMtime_IdempotentRegenStillTouches(t *testing.T) {
+	dir := t.TempDir()
+	regen := NewRegenerator()
+
+	servers := map[string]*models.ServerConfig{
+		"alpha": httpBackend("http://127.0.0.1:1/"),
+		"beta":  httpBackend("http://127.0.0.1:2/"),
+	}
+
+	if err := regen.Regenerate(dir, servers, "http://gw"); err != nil {
+		t.Fatalf("first Regenerate: %v", err)
+	}
+
+	target := filepath.Join(dir, MCPJSONFileName)
+	infoFirst, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat target: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Second Regenerate — idempotent no-op, must preserve mtime
+	// (this is TestRegen_Idempotent's invariant — re-asserted here
+	// to make TouchMtime's contribution explicit).
+	if err := regen.Regenerate(dir, servers, "http://gw"); err != nil {
+		t.Fatalf("second Regenerate: %v", err)
+	}
+	infoSecond, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat target (post-idempotent): %v", err)
+	}
+	if !infoSecond.ModTime().Equal(infoFirst.ModTime()) {
+		t.Fatalf("idempotent Regenerate changed mtime (regression in TestRegen_Idempotent contract): %v -> %v",
+			infoFirst.ModTime(), infoSecond.ModTime())
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Now the explicit touch.
+	if err := regen.TouchMtime(dir); err != nil {
+		t.Fatalf("TouchMtime: %v", err)
+	}
+
+	infoTouched, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat target (post-touch): %v", err)
+	}
+	if !infoTouched.ModTime().After(infoSecond.ModTime()) {
+		t.Fatalf("TouchMtime did not advance mtime after idempotent regen: post-regen=%v post-touch=%v",
+			infoSecond.ModTime(), infoTouched.ModTime())
+	}
+}
+
+// TestTouchMtime_MissingFile asserts the defensive contract: calling
+// TouchMtime on a directory that does not yet have a .mcp.json
+// returns nil. This protects callers (e.g. TriggerPluginReannounce
+// invoked before Regenerate has had a chance to write the initial
+// file) from a hard error path.
+func TestTouchMtime_MissingFile(t *testing.T) {
+	dir := t.TempDir()
+	regen := NewRegenerator()
+
+	if err := regen.TouchMtime(dir); err != nil {
+		t.Fatalf("TouchMtime on dir without .mcp.json: expected nil, got %v", err)
+	}
+}
+
+// TestTouchMtime_EmptyPluginDir asserts the same input-validation
+// contract as Regenerate — empty pluginDir must surface as an error
+// rather than touching some unrelated path under cwd.
+func TestTouchMtime_EmptyPluginDir(t *testing.T) {
+	regen := NewRegenerator()
+	err := regen.TouchMtime("")
+	if err == nil {
+		t.Fatalf("expected error for empty pluginDir, got nil")
 	}
 }
