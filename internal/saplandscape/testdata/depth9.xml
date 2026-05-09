@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Workspace>
+  <Services>
+    <Service name="D9" systemid="D09" client="009" type="SAPGUI"/>
+  </Services>
+  <Includes/>
+</Workspace>

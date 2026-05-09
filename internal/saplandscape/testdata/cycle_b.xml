@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Workspace>
+  <Services>
+    <Service name="B System" systemid="BBB" client="200" type="SAPGUI"/>
+  </Services>
+  <Includes>
+    <Include url="cycle_a.xml"/>
+  </Includes>
+</Workspace>

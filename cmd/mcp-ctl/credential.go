@@ -11,6 +11,7 @@ func newCredentialCmd() *cobra.Command {
 
 	cmd.AddCommand(newCredentialImportCmd())
 	cmd.AddCommand(newCredentialListCmd())
+	cmd.AddCommand(newCredentialListStructuredCmd())
 
 	return cmd
 }

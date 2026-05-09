@@ -105,6 +105,13 @@ type Server struct {
 	sapBatchMu     sync.Mutex
 	sapBatchID     string
 	sapBatchExpiry time.Time
+
+	// testRegenFn is non-nil only in tests. When set, TriggerPluginRegen
+	// calls this function instead of the real plugin regeneration, allowing
+	// tests to count regen invocations (e.g. TestSapBatch_SingleRegen).
+	// Set only before ListenAndServe; no concurrent writes in production
+	// (F-05 — write-once-before-traffic invariant; no atomic.Pointer needed).
+	testRegenFn func()
 }
 
 // Addr returns the bound listener address, or nil if ListenAndServe has
@@ -260,6 +267,11 @@ func (s *Server) InitClaudeCodeLimiters() {
 // treats any unsynchronized concurrent read+write as a data race. Cloning
 // the value under RLock gives Regenerate a private, stable view.
 func (s *Server) TriggerPluginRegen() {
+	// testRegenFn is injected only in tests to spy on regen call count.
+	if s.testRegenFn != nil {
+		s.testRegenFn()
+		return
+	}
 	if s.pluginRegen == nil || s.pluginDir == "" {
 		return
 	}
@@ -875,6 +887,48 @@ func (s *Server) handleGetServer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toView(entry))
 }
 
+// AddOpts controls optional behaviour of addServerInProcess.
+type AddOpts struct {
+	// SuppressPluginRegen skips TriggerPluginRegen and RebuildTools when true.
+	// Used inside a SAP batch where a single end-of-batch regen fires instead.
+	SuppressPluginRegen bool
+	// SkipAutoStart prevents the lifecycle manager from starting the server
+	// immediately after adding. Useful when the caller will start it separately.
+	SkipAutoStart bool
+}
+
+// addServerInProcess adds the server to the lifecycle manager, persists the
+// config change, optionally auto-starts, and triggers plugin regen unless
+// suppressed. It is the extracted core of handleAddServer.
+func (s *Server) addServerInProcess(ctx context.Context, name string, sc *models.ServerConfig, opts AddOpts) error {
+	if err := s.lm.AddServer(name, sc); err != nil {
+		return err
+	}
+
+	// CR-4 fix: update in-memory config to reflect the new server.
+	s.cfgMu.Lock()
+	s.cfg.Servers[name] = sc
+	data := s.marshalConfig()
+	s.cfgMu.Unlock()
+	s.flushConfig(data)
+
+	// AR-5 fix: auto-start unless disabled or suppressed.
+	if !sc.Disabled && !opts.SkipAutoStart {
+		if err := s.lm.Start(ctx, name); err != nil {
+			s.logger.Warn("auto-start after add failed", "server", name, "error", err)
+		}
+	}
+
+	// Regen unless inside a SAP batch (which fires a single end-of-batch regen).
+	if !opts.SuppressPluginRegen && !s.sapBatchActive() {
+		if s.gw != nil && !sc.Disabled {
+			s.gw.RebuildTools()
+		}
+		s.TriggerPluginRegen()
+	}
+	return nil
+}
+
 func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name   string              `json:"name"`
@@ -893,56 +947,63 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.lm.AddServer(req.Name, &req.Config); err != nil {
+	if err := s.addServerInProcess(r.Context(), req.Name, &req.Config, AddOpts{}); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-
-	// CR-4 fix: update in-memory config to reflect the new server.
-	s.cfgMu.Lock()
-	s.cfg.Servers[req.Name] = &req.Config
-	data := s.marshalConfig()
-	s.cfgMu.Unlock()
-	s.flushConfig(data)
-
-	// AR-5 fix: auto-start unless disabled. A concurrent config watcher reload
-	// may also call lm.Start; lm's internal starting guard prevents double-start.
-	if !req.Config.Disabled {
-		if err := s.lm.Start(r.Context(), req.Name); err != nil {
-			s.logger.Warn("auto-start after add failed", "server", req.Name, "error", err)
-		}
-		if s.gw != nil {
-			s.gw.RebuildTools()
-		}
-	}
-	// T16.2.4: regen Claude Code plugin's .mcp.json (best-effort; any
-	// failure is logged but never surfaced to the REST client).
-	s.TriggerPluginRegen()
-
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "added"})
 }
 
-func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
-	if err := s.lm.RemoveServer(r.Context(), name); err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
-		return
+// RemoveOpts controls optional behaviour of removeServerInProcess.
+type RemoveOpts struct {
+	// SuppressPluginRegen skips TriggerPluginRegen and RebuildTools when true.
+	// Used inside a SAP batch where a single end-of-batch regen fires instead.
+	SuppressPluginRegen bool
+}
+
+// removeServerInProcess removes the server from the lifecycle manager, persists
+// the config change, and optionally triggers plugin regen. It is the extracted
+// core of handleRemoveServer — HTTP handlers call this then write their response.
+func (s *Server) removeServerInProcess(ctx context.Context, name string, opts RemoveOpts) (lifecycle.RemoveResult, error) {
+	result, err := s.lm.RemoveServer(ctx, name)
+	if err != nil {
+		return lifecycle.RemoveResult{}, err
 	}
-	// CR-4 fix: update in-memory config. There is a theoretical TOCTOU window
-	// between lm.RemoveServer and this persist, but the config watcher's 500ms
-	// debounce makes the race practically impossible for a localhost daemon.
+
+	// CR-4 fix: update in-memory config.
 	s.cfgMu.Lock()
 	delete(s.cfg.Servers, name)
 	data := s.marshalConfig()
 	s.cfgMu.Unlock()
 	s.flushConfig(data)
-	if s.gw != nil {
-		s.gw.RebuildTools()
-	}
-	// T16.2.4: regen Claude Code plugin's .mcp.json after removal.
-	s.TriggerPluginRegen()
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
+	if !opts.SuppressPluginRegen && !s.sapBatchActive() {
+		if s.gw != nil {
+			s.gw.RebuildTools()
+		}
+		s.TriggerPluginRegen()
+	}
+	return result, nil
+}
+
+func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	result, err := s.removeServerInProcess(r.Context(), name, RemoveOpts{})
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	// R-28 / X4 fix: surface Stop failure to the operator. Without this the
+	// REST client (e.g. mcp-ctl servers remove) sees a clean 200 even when the
+	// OS process leaked, defeating the lifecycle.RemoveResult signal.
+	resp := map[string]any{"status": "removed"}
+	if result.Orphan {
+		resp["orphan"] = true
+		if result.StopErr != nil {
+			resp["stop_error"] = result.StopErr.Error()
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
@@ -1051,7 +1112,11 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		// the plugin's .mcp.json. env/header-only patches are invisible
 		// to the plugin surface (they only affect the backend process),
 		// so regen is gated specifically on the Disabled toggle.
-		s.TriggerPluginRegen()
+		// F-03 fix: skip during SAP batch — single end-of-batch regen
+		// fires at batch-end (R-26 / X2 single-regen guarantee).
+		if !s.sapBatchActive() {
+			s.TriggerPluginRegen()
+		}
 	} else if needsRestart {
 		// Restart server to pick up env/header changes (outside mutexes).
 		if err := s.lm.Restart(r.Context(), name); err != nil {

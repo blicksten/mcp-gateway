@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Workspace>
+  <Services>
+    <Service name="D6" systemid="D06" client="006" type="SAPGUI"/>
+  </Services>
+  <Includes>
+    <Include url="depth7.xml"/>
+  </Includes>
+</Workspace>

@@ -138,30 +138,30 @@ func (s *Server) handleSAPBatchEnd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.sapBatchMu.Lock()
+	defer s.sapBatchMu.Unlock()
 	if s.sapBatchID == "" {
-		s.sapBatchMu.Unlock()
 		writeError(w, http.StatusConflict, "no batch is open")
 		return
 	}
 	if s.sapBatchID != req.BatchID {
-		s.sapBatchMu.Unlock()
 		writeError(w, http.StatusConflict, "batch_id mismatch")
 		return
 	}
-	s.sapBatchID = ""
-	s.sapBatchExpiry = time.Time{}
-	s.sapBatchMu.Unlock()
 
-	// End-of-batch single-shot regen + RebuildTools. T-A.5 will gate the
-	// in-process add/remove handlers on sapBatchActive so this is the only
-	// regen the client sees per batch — closing R-26 / X2 (N×plugin-regen
-	// storm). At T-A.1 we still fire it so the contract behaves correctly
-	// when batches wrap a single mutation; suppression is the optimisation,
-	// not a correctness requirement.
+	// End-of-batch single-shot regen + RebuildTools. The lock is held for the
+	// duration of regen so concurrent addServerInProcess / removeServerInProcess
+	// calls observe sapBatchActive()=true and skip their own regen — closing
+	// F-02 race between clearing sapBatchID and regen completion. T-A.5 wires
+	// add/remove suppression via sapBatchActive(); this is the single regen
+	// the client sees per batch (R-26 / X2 fix).
 	if s.gw != nil {
 		s.gw.RebuildTools()
 	}
 	s.TriggerPluginRegen()
+
+	// Clear AFTER regen completes — see comment above.
+	s.sapBatchID = ""
+	s.sapBatchExpiry = time.Time{}
 
 	writeJSON(w, http.StatusOK, SAPBatchEndResponse{OK: true})
 }

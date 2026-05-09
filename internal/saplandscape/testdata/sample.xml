@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Workspace>
+  <Services>
+    <Service name="PRD System" systemid="PRD" client="100" type="SAPGUI" server="sap-prd.example.com"/>
+    <Service name="QAS System" systemid="QAS" client="200" type="SAPGUI" server="sap-qas.example.com"/>
+  </Services>
+  <Includes/>
+</Workspace>

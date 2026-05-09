@@ -922,3 +922,40 @@ func TestShutdown_Concurrent_InvokesShutdownFnExactlyOnce(t *testing.T) {
 	assert.Equal(t, 1, shutting, "expected exactly one 'shutting_down' response")
 	assert.Equal(t, goroutines-1, already, "expected %d 'already_shutting_down' responses", goroutines-1)
 }
+
+// TestSapBatch_SingleRegen verifies that adding 5 servers inside an open SAP
+// batch does NOT trigger per-call TriggerPluginRegen, and that the single
+// end-of-batch regen fires exactly once when batch-end is called (R-26 / X2).
+func TestSapBatch_SingleRegen(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	handler := srv.Handler()
+
+	// Wire a spy on TriggerPluginRegen so we can count calls.
+	var regenCount int
+	srv.testRegenFn = func() { regenCount++ }
+
+	// Open a batch.
+	beginRR := doRequest(t, handler, http.MethodPost, "/api/v1/sap/batch-begin", nil)
+	require.Equal(t, http.StatusOK, beginRR.Code)
+	var beginResp SAPBatchBeginResponse
+	require.NoError(t, json.Unmarshal(beginRR.Body.Bytes(), &beginResp))
+
+	// Add 5 servers inside the batch — none must trigger regen.
+	for i := 0; i < 5; i++ {
+		name := fmt.Sprintf("sap-batch-srv-%d", i)
+		err := srv.addServerInProcess(
+			httptest.NewRequest(http.MethodPost, "/", nil).Context(),
+			name,
+			&models.ServerConfig{URL: "http://localhost:9000/mcp", Disabled: true},
+			AddOpts{SuppressPluginRegen: true},
+		)
+		require.NoError(t, err, "addServerInProcess for server %d must not error", i)
+	}
+	assert.Equal(t, 0, regenCount, "no regen must fire during batch")
+
+	// End the batch — exactly one regen must fire.
+	endRR := doRequest(t, handler, http.MethodPost, "/api/v1/sap/batch-end", SAPBatchEndRequest{BatchID: beginResp.BatchID})
+	require.Equal(t, http.StatusOK, endRR.Code)
+
+	assert.Equal(t, 1, regenCount, "exactly one TriggerPluginRegen must fire at batch-end")
+}

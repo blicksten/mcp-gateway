@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Workspace>
+  <Services>
+    <Service name="ROOT System" systemid="ROT" client="100" type="SAPGUI"/>
+  </Services>
+  <Includes>
+    <Include url="nonexistent_file.xml"/>
+  </Includes>
+</Workspace>

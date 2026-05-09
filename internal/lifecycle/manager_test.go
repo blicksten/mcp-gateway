@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -235,10 +236,42 @@ func TestAddServer_RemoveServer(t *testing.T) {
 	e, _ = m.Entry("new")
 	assert.Equal(t, models.StatusRunning, e.Status)
 
-	// Remove (stops automatically).
-	require.NoError(t, m.RemoveServer(ctx, "new"))
+	// Remove (stops automatically). The primary error is non-nil only when the
+	// server is not found; Stop errors surface via RemoveResult.Orphan.
+	result, err := m.RemoveServer(ctx, "new")
+	require.NoError(t, err)
+	assert.False(t, result.Orphan, "clean stop must not produce an orphan")
 	_, ok = m.Entry("new")
 	assert.False(t, ok)
+}
+
+// TestRemoveServer_StopErrorSurfacesOrphan verifies that when Stop returns a
+// non-nil error, RemoveServer surfaces Orphan=true in the result. The entry
+// is still deleted from the manager (caller's remove intent is honoured).
+func TestRemoveServer_StopErrorSurfacesOrphan(t *testing.T) {
+	cfg := &models.Config{
+		Servers: map[string]*models.ServerConfig{
+			"flaky": {URL: "http://localhost:9999/mcp"},
+		},
+	}
+	cfg.ApplyDefaults()
+	m := NewManager(cfg, "test", testLogger())
+
+	// Inject a failing Stop that simulates a process that didn't exit.
+	stopErr := fmt.Errorf("process did not exit in time")
+	m.testStopHook = func(name string) error {
+		return stopErr
+	}
+
+	ctx := context.Background()
+	result, err := m.RemoveServer(ctx, "flaky")
+	require.NoError(t, err, "primary error must be nil — server was found")
+	assert.True(t, result.Orphan, "Stop failure must set Orphan=true")
+	assert.ErrorIs(t, result.StopErr, stopErr, "StopErr must wrap the original Stop error")
+
+	// Entry must be deleted despite the Stop failure.
+	_, ok := m.Entry("flaky")
+	assert.False(t, ok, "entry must be removed even when Stop fails")
 }
 
 func TestAddServer_Duplicate(t *testing.T) {

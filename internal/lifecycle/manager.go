@@ -45,6 +45,14 @@ type Manager struct {
 	jobValid  bool        // true if newJobObject succeeded
 	jobClose  sync.Once   // guards closeJobObject against double-close
 	jobClosed atomic.Bool // set after closeJobObject; guards assignProcess race
+
+	// testStopHook is non-nil only in tests. When set, Stop calls this
+	// function instead of performing the real stop sequence. Allows tests
+	// to inject a failing Stop to verify RemoveResult.Orphan semantics.
+	// Set only before the manager begins servicing concurrent requests; no
+	// concurrent writes in production (F-05 — write-once-before-traffic
+	// invariant; no atomic.Pointer needed).
+	testStopHook func(name string) error
 }
 
 // NewManager creates a lifecycle manager from the given config.
@@ -385,6 +393,12 @@ func (m *Manager) fetchTools(ctx context.Context, name string, session *mcp.Clie
 
 // Stop disconnects from a backend server and kills its process if stdio.
 func (m *Manager) Stop(ctx context.Context, name string) error {
+	// testStopHook is set only in tests to simulate Stop failures without
+	// spinning up real processes.
+	if m.testStopHook != nil {
+		return m.testStopHook(name)
+	}
+
 	m.mu.Lock()
 	e, ok := m.entries[name]
 	if !ok {
@@ -555,22 +569,33 @@ func (m *Manager) AddServer(name string, cfg *models.ServerConfig) error {
 	return nil
 }
 
+// RemoveResult carries the outcome of a RemoveServer call.
+// Orphan is true when Stop returned a non-nil error — the OS process may still
+// be running. The entry is still deleted from the manager regardless.
+type RemoveResult struct {
+	Orphan  bool  // true if Stop returned a non-nil error (process may still be running)
+	StopErr error // the Stop error (nil = clean stop)
+}
+
 // RemoveServer stops and removes a server. Must be called without the lock held.
-func (m *Manager) RemoveServer(ctx context.Context, name string) error {
+// Returns (RemoveResult, error): the error is non-nil only when the server is
+// not found. A Stop failure is surfaced via RemoveResult.Orphan / RemoveResult.StopErr
+// rather than as the primary error, because the entry is deleted regardless.
+func (m *Manager) RemoveServer(ctx context.Context, name string) (RemoveResult, error) {
 	m.mu.RLock()
 	_, exists := m.entries[name]
 	m.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("server %q not found", name)
+		return RemoveResult{}, fmt.Errorf("server %q not found", name)
 	}
 
-	// Stop outside the lock.
-	_ = m.Stop(ctx, name)
+	// Stop outside the lock — surface the error rather than swallowing it (R-28).
+	stopErr := m.Stop(ctx, name)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.entries, name)
-	return nil
+	return RemoveResult{Orphan: stopErr != nil, StopErr: stopErr}, nil
 }
 
 // Reconcile applies a new config: stops removed servers, starts added ones,
@@ -601,8 +626,12 @@ func (m *Manager) Reconcile(ctx context.Context, newCfg *models.Config) error {
 
 	// Apply changes: remove, update+restart, add.
 	for _, name := range toRemove {
-		if err := m.RemoveServer(ctx, name); err != nil {
+		result, err := m.RemoveServer(ctx, name)
+		if err != nil {
 			m.logger.Warn("reconcile: remove failed", "server", name, "error", err)
+		} else if result.Orphan {
+			m.logger.Warn("reconcile: stop error during remove (process may be orphaned)",
+				"server", name, "stop_error", result.StopErr)
 		}
 	}
 	for _, name := range toRestart {
