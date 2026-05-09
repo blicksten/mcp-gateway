@@ -10,6 +10,31 @@ permissions:
   contents: read
 
 jobs:
+  # grammar-staleness — fails when the committed Go and TS SAP server-name
+  # parsers drift from docs/grammar/sap-server-name.yaml. Hand-fix is
+  # `make grammar` (or `go run ./tools/grammar-gen`) followed by committing
+  # the regenerated files. On failure, the diff against committed files is
+  # printed inline so the dev does not have to re-run the generator
+  # locally to see what changed.
+  # Plan reference: docs/PLAN-sap-picker-and-import-mcp.md task T-A.2.
+  grammar-staleness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify generated parsers match grammar YAML
+        run: go run ./tools/grammar-gen/check
+      - name: Show diff on failure
+        if: failure()
+        run: |
+          go run ./tools/grammar-gen
+          echo "::error::Generated parsers are stale — committed files differ from regeneration."
+          git --no-pager diff --stat -- internal/sapname/grammar_gen.go vscode/mcp-gateway-dashboard/src/sap-name-grammar.gen.ts || true
+          git --no-pager diff -- internal/sapname/grammar_gen.go vscode/mcp-gateway-dashboard/src/sap-name-grammar.gen.ts || true
+          exit 1
+
   test:
     strategy:
       matrix:

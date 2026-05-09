@@ -12,6 +12,10 @@ dist/
 # Output
 *.out
 *.output
+.test-output.txt
+.ts-test-output.txt
+.ts-lint.txt
+.diff-detector.txt
 
 # Logs
 logs/

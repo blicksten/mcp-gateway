@@ -1,0 +1,41 @@
+# SAP server-name grammar — single source of truth.
+#
+# Consumed by tools/grammar-gen to emit two parsers from one grammar:
+#   - internal/sapname/grammar_gen.go             (Go)
+#   - vscode/mcp-gateway-dashboard/src/sap-name-grammar.gen.ts  (TypeScript)
+#
+# Both generated files are committed to the repo; CI runs `make check-grammar`
+# to ensure they stay in sync with this file. Edit only here — never edit a
+# generated file directly. To refresh: `go run ./tools/grammar-gen`.
+#
+# Plan reference: docs/PLAN-sap-picker-and-import-mcp.md task T-A.2 (R-21
+# eliminates the Go-vs-TS regex drift documented as cross-domain risk X1).
+
+version: 1
+
+# Each kind is identified by a unique, mutually exclusive prefix.
+# Server name format: <prefix><sid>(-<client>)?
+# Order matters for parsing: longer prefixes must be checked before shorter
+# ones that could be a strict suffix-overlap. The generator orders kinds
+# longest-prefix-first to make this hazard-free.
+kinds:
+  - name: vsp
+    prefix: "vsp-"
+  - name: sap-gui
+    prefix: "sap-gui-"
+
+# SID = 3-char SAP system identifier (e.g. DEV, ABC, S4D).
+# Allowed: uppercase A-Z and digits 0-9.
+sid:
+  length: 3
+  charset:
+    - { from: "A", to: "Z" }
+    - { from: "0", to: "9" }
+
+# Client = optional 3-digit SAP client number (e.g. 100, 200, 800).
+# Appears after SID separated by a single "-".
+client:
+  length: 3
+  charset:
+    - { from: "0", to: "9" }
+  separator: "-"

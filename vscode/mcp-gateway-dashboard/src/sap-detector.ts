@@ -1,4 +1,5 @@
 import type { ServerView, ServerStatus } from './types';
+import { parseServerName as parseGenerated } from './sap-name-grammar.gen';
 
 /**
  * Shared locale-independent string comparator for stable cross-machine
@@ -34,19 +35,24 @@ export interface SapSystem {
 	imported?: boolean;
 }
 
-const SAP_VSP_RE = /^vsp-([A-Z0-9]{3})(?:-(\d{3}))?$/;
-const SAP_GUI_RE = /^sap-gui-([A-Z0-9]{3})(?:-(\d{3}))?$/;
-
+// Server-name grammar lives in sap-name-grammar.gen.ts (generated from
+// docs/grammar/sap-server-name.yaml by tools/grammar-gen). The previous
+// inline regex constants here drifted from the Go side's regex
+// (cross-domain risk X1, closed by R-21 / plan T-A.2). All future grammar
+// edits go through the YAML — never re-introduce a regex literal here.
 export function parseSapServerName(name: string): SapComponent | null {
-	let m = SAP_VSP_RE.exec(name);
-	if (m) {
-		return { sid: m[1], client: m[2] || undefined, component: 'vsp' };
+	const parsed = parseGenerated(name);
+	if (parsed === null) {
+		return null;
 	}
-	m = SAP_GUI_RE.exec(name);
-	if (m) {
-		return { sid: m[1], client: m[2] || undefined, component: 'gui' };
-	}
-	return null;
+	// Map the generated wire kind ("vsp" | "sap-gui") onto the local
+	// component vocabulary ("vsp" | "gui") that callers already use.
+	const component: 'vsp' | 'gui' = parsed.kind === 'vsp' ? 'vsp' : 'gui';
+	return {
+		sid: parsed.sid,
+		client: parsed.client === '' ? undefined : parsed.client,
+		component,
+	};
 }
 
 export function computeSapStatus(system: SapSystem): ServerStatus {

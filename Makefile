@@ -1,4 +1,4 @@
-.PHONY: test test-integration-windows test-integration-phase16 help
+.PHONY: test test-integration-windows test-integration-phase16 check-grammar grammar help
 
 # Default Go test path — unit + structural tiers. Covers the DACL
 # SHAPE on Windows (TestApplyTokenFilePerms_Windows_Structural) but
@@ -42,8 +42,27 @@ test-integration-windows:
 test-integration-phase16:
 	go test -tags integration -run 'TestIntegration_Phase16|TestIntegration_CORS' ./internal/api/... -v
 
+# Grammar codegen — single source of truth at docs/grammar/sap-server-name.yaml.
+# `grammar` regenerates both the Go (internal/sapname/grammar_gen.go) and TS
+# (vscode/mcp-gateway-dashboard/src/sap-name-grammar.gen.ts) parsers.
+# `check-grammar` is the staleness gate: non-zero exit when on-disk parsers
+# drift from the YAML. CI's grammar-staleness job uses this target.
+#
+# `check-grammar` runs the Go check first (fast, no node_modules required);
+# the TS-side delegate (`npm run check-grammar`) then re-runs the same Go
+# binary so a developer working purely inside vscode/mcp-gateway-dashboard/
+# gets the same staleness signal. First non-zero exit propagates via &&.
+# Plan reference: docs/PLAN-sap-picker-and-import-mcp.md task T-A.2.
+grammar:
+	go run ./tools/grammar-gen
+
+check-grammar:
+	go run ./tools/grammar-gen/check && cd vscode/mcp-gateway-dashboard && npm run check-grammar
+
 help:
 	@echo "Targets:"
 	@echo "  test                         - run unit + structural tests (all platforms)"
 	@echo "  test-integration-windows     - run Windows DACL enforcement test (requires MCPGW_TEST_USER/PASSWORD; see Makefile header)"
 	@echo "  test-integration-phase16     - run Phase 16 Claude Code E2E integration tests (Linux/macOS/Windows)"
+	@echo "  grammar                      - regenerate SAP server-name parsers (Go + TS) from docs/grammar/sap-server-name.yaml"
+	@echo "  check-grammar                - verify generated parsers are in sync with YAML (CI gate)"
