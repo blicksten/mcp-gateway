@@ -188,6 +188,18 @@ export const mockStatusBarItems: MockStatusBarItem[] = [];
 // specific settings (e.g. `mcpGateway.sapGroupBySid`).
 export const mockConfigValues: Record<string, unknown> = {};
 
+// Recorded `vscode.workspace.getConfiguration().update(...)` calls (Phase C
+// T-C.3). Each entry records the fully-qualified key, value, and
+// ConfigurationTarget arg so tests can assert order + content.
+export const mockConfigUpdateCalls: Array<{ key: string; value: unknown; target: unknown }> = [];
+
+// Result for `vscode.window.showOpenDialog` (Phase C T-C.2). `null` =
+// dialog dismissed (cancel branch). Array = paths returned (Browse OK).
+export let mockOpenDialogResult: string[] | null = null;
+export function setMockOpenDialogResult(result: string[] | null): void {
+	mockOpenDialogResult = result;
+}
+
 // Registered onDidChangeConfiguration handlers — tests use
 // `fireConfigChange(key)` to simulate a live setting change from the UI.
 const configChangeHandlers: Array<(e: { affectsConfiguration: (key: string) => boolean }) => void> = [];
@@ -287,6 +299,9 @@ export function resetMockState(): void {
 	dialogResponses.quickPickQueue = [];
 	mockCalls.clipboard = [];
 	mockCalls.errorMessages = [];
+	// Phase C: clear update-call recorder so tests start clean.
+	mockConfigUpdateCalls.length = 0;
+	mockOpenDialogResult = null;
 	mockCalls.infoMessages = [];
 	mockCalls.warningMessages = [];
 	mockStatusBarItems.length = 0;
@@ -321,6 +336,10 @@ export const mockVscode = {
 	ThemeIcon: MockThemeIcon,
 	ThemeColor: MockThemeColor,
 	MarkdownString: MockMarkdownString,
+	// Phase C addition (T-C.3): mirror VS Code's ConfigurationTarget enum
+	// (Global=1, Workspace=2, WorkspaceFolder=3) so production code that
+	// passes a target arg to update() doesn't crash on access.
+	ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
 	commands: {
 		registerCommand: (id: string, handler: (...args: unknown[]) => unknown) => {
 			registeredCommands.set(id, handler);
@@ -432,6 +451,14 @@ export const mockVscode = {
 			}
 			return Promise.resolve(dialogResponses.showQuickPick ?? items[0]);
 		},
+		// Phase C addition (T-C.2): Browse-button flow. Tests set
+		// `mockOpenDialogResult` to an array of paths or null (cancel).
+		showOpenDialog: (_opts: unknown) => {
+			if (mockOpenDialogResult === null) { return Promise.resolve(undefined); }
+			return Promise.resolve(
+				mockOpenDialogResult.map((p) => ({ fsPath: p, scheme: 'file', path: p, toString: () => `file://${p}` })),
+			);
+		},
 	},
 	workspace: {
 		getConfiguration: (section?: string) => ({
@@ -442,6 +469,16 @@ export const mockVscode = {
 				if (fullKey in mockConfigValues) { return mockConfigValues[fullKey]; }
 				if (key in mockConfigValues) { return mockConfigValues[key]; }
 				return defaultValue;
+			},
+			// Phase C addition (T-C.3): update() records the write into the
+			// shared mockConfigValues map so subsequent `get` calls observe
+			// the new value. Tests can also assert the resulting state via
+			// `mockConfigValues[key]`. The 3rd arg (ConfigurationTarget) is
+			// captured into mockConfigUpdateCalls for assertion.
+			update: async (key: string, value: unknown, target?: unknown) => {
+				const fullKey = section ? `${section}.${key}` : key;
+				mockConfigValues[fullKey] = value;
+				mockConfigUpdateCalls.push({ key: fullKey, value, target });
 			},
 		}),
 		onDidChangeConfiguration: (handler: (e: { affectsConfiguration: (key: string) => boolean }) => void) => {

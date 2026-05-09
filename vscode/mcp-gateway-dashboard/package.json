@@ -149,6 +149,11 @@
         "icon": "$(gear)"
       },
       {
+        "command": "mcpGateway.openSettingsPanel",
+        "title": "MCP Gateway: Open Settings Panel (sticky-layout webview)",
+        "icon": "$(settings-gear)"
+      },
+      {
         "command": "mcpGateway.cleanupClaudeConfig",
         "title": "MCP Gateway: Cleanup Claude Code Config (remove managed entries)"
       },
@@ -457,6 +462,31 @@
           "default": 7,
           "minimum": 0,
           "description": "Number of days to keep daemon-YYYY-MM-DD.log files in the daemon-logs directory. Older files are deleted on extension activation. 0 = keep forever."
+        },
+        "mcpGateway.defaultVspCommand": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Default VSP executable used by SAP Picker / quick-add when no per-row override is set. Path or PATH-resolved name."
+        },
+        "mcpGateway.defaultGuiUvProject": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Default uv project path used by the SAP-GUI server when defaultGuiMode = 'uv'. Empty = none."
+        },
+        "mcpGateway.defaultGuiMode": {
+          "type": "string",
+          "enum": ["exec", "uv"],
+          "default": "exec",
+          "scope": "machine",
+          "description": "How the SAP-GUI server is launched: 'exec' (direct executable) or 'uv' (uv-run from defaultGuiUvProject)."
+        },
+        "mcpGateway.uvPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Path to the uv binary (empty = use PATH). Used when defaultGuiMode = 'uv'."
         }
       }
     }

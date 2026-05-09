@@ -29,6 +29,7 @@ import { SapDetailPanel } from './webview/sap-detail-panel';
 import { AddServerPanel } from './webview/add-server-panel';
 import { AddSapPanel } from './webview/add-sap-panel';
 import { SapPickerPanel } from './webview/sap-picker-panel';
+import { SettingsPanel } from './webview/settings-panel';
 import { ClaudeCodePanel } from './webview/claude-code-panel';
 import { SlashCommandGenerator } from './slash-command-generator';
 import { assertCompatible } from './version-compat';
@@ -851,6 +852,10 @@ function registerCommands(
 			client,
 			cache,
 		);
+	}));
+
+	push(vscode.commands.registerCommand('mcpGateway.openSettingsPanel', async () => {
+		await SettingsPanel.createOrShow(context.extensionUri, {});
 	}));
 
 	// Phase 8.4: webview detail panels.
