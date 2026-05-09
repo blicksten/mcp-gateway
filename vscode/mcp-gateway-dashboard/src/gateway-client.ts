@@ -9,6 +9,14 @@ import type {
 	StatusResponse,
 	ToolInfo,
 } from './types';
+import type { PickerSnapshot } from './sap-picker-state';
+
+// SAP Picker REST contract — mirrors Go types in
+// internal/api/sap_picker_handler.go (T-A.1). Kept in this file so the
+// gateway-client stays the single seam for HTTP shapes.
+export type SapPickerSnapshotResponse = PickerSnapshot;
+export interface SapBatchBeginResponse { batch_id: string; }
+export interface SapBatchEndResponse { ok: boolean; }
 
 export type GatewayErrorKind = 'connection' | 'http' | 'parse' | 'timeout' | 'auth';
 
@@ -137,6 +145,20 @@ export class GatewayClient {
 		return this.request<CallToolResult>('POST', `/api/v1/servers/${enc(server)}/call`, body);
 	}
 
+	// --- SAP Picker (Phase A T-A.1 contract; Phase B webview consumer) ---
+
+	async getSapPickerSnapshot(): Promise<SapPickerSnapshotResponse> {
+		return this.request<SapPickerSnapshotResponse>('GET', '/api/v1/sap/picker-snapshot');
+	}
+
+	async beginSapBatch(): Promise<SapBatchBeginResponse> {
+		return this.request<SapBatchBeginResponse>('POST', '/api/v1/sap/batch-begin');
+	}
+
+	async endSapBatch(batchId: string): Promise<SapBatchEndResponse> {
+		return this.request<SapBatchEndResponse>('POST', '/api/v1/sap/batch-end', { batch_id: batchId });
+	}
+
 	// --- Core HTTP ---
 
 	// AUDIT B-NEW-29 (Phase 11): request is now async so it can await the
@@ -165,22 +187,51 @@ export class GatewayClient {
 		// Attach Authorization header if the caller supplied a provider.
 		// Provider errors surface as GatewayError('auth', ...) so UI code
 		// can distinguish "no token" from network failures.
+		//
+		// LAYER 1 (Bug B defensive): authHeader race. fs.promises.stat does NOT
+		// accept {signal} — AbortController cannot cancel a hung resolveTokenAsync
+		// (e.g. encrypted FS / OneDrive sync / antivirus probe). A separate
+		// timeout race is the only way to bound this phase. Cap at 5s so a
+		// pathological stat hang cannot defer the HTTP-phase deadline.
 		const provider = opts?.useAdminAuth
 			? (this.adminAuthHeader ?? this.authHeader)
 			: this.authHeader;
 		if (provider) {
+			const authHeaderTimeoutMs = Math.min(this.timeoutMs, 5000);
+			let authTimer: ReturnType<typeof setTimeout> | undefined;
+			const authTimeout = new Promise<never>((_, reject) => {
+				authTimer = setTimeout(
+					() => reject(new GatewayError(
+						'timeout',
+						`authHeader resolution timeout (${authHeaderTimeoutMs}ms) — likely fs.promises.stat hang on token file`,
+					)),
+					authHeaderTimeoutMs,
+				);
+			});
 			try {
-				const hdr = await provider();
+				const hdr = await Promise.race([provider(), authTimeout]);
 				if (hdr) { headers['Authorization'] = hdr; }
 			} catch (err) {
 				if (err instanceof AuthTokenError) {
 					throw new GatewayError('auth', err.message);
 				}
 				throw err;
+			} finally {
+				if (authTimer) { clearTimeout(authTimer); }
 			}
 		}
 
-		return new Promise<T>((resolve, reject) => {
+		// LAYER 2 (Bug B defensive): AbortController for the HTTP phase.
+		// http.RequestOptions.timeout is socket-inactivity (Node docs §http.request),
+		// NOT an absolute deadline — a server that drips one byte per second
+		// keeps the socket "active" indefinitely. AbortController fires after
+		// timeoutMs regardless of socket activity. req.on('timeout') is kept as
+		// belt-and-suspenders for socket-inactivity.
+		const ac = new AbortController();
+		const deadlineTimer = setTimeout(() => ac.abort(), this.timeoutMs);
+
+		try {
+			return await new Promise<T>((resolve, reject) => {
 		const options: http.RequestOptions = {
 			method,
 			hostname: url.hostname,
@@ -220,6 +271,16 @@ export class GatewayClient {
 				});
 			});
 
+			const onAbort = (): void => {
+				req.destroy();
+				reject(new GatewayError('timeout', `Request timeout: ${method} ${path} (${this.timeoutMs}ms)`));
+			};
+			if (ac.signal.aborted) {
+				onAbort();
+				return;
+			}
+			ac.signal.addEventListener('abort', onAbort, { once: true });
+
 			req.on('timeout', () => {
 				req.destroy();
 				reject(new GatewayError('timeout', `Request timeout: ${method} ${path} (${this.timeoutMs}ms)`));
@@ -239,6 +300,9 @@ export class GatewayClient {
 			}
 			req.end();
 		}); // closes new Promise<T>
+		} finally {
+			clearTimeout(deadlineTimer);
+		}
 	}
 }
 

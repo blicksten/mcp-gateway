@@ -312,6 +312,48 @@ describe('GatewayClient', () => {
 				slowServer.close();
 			}
 		});
+
+		it('Bug B Layer 1: hung authHeader provider rejects with kind:timeout (authHeader)', async () => {
+			// Defense-in-depth: fs.promises.stat does NOT accept {signal} option,
+			// so AbortController on the HTTP phase cannot cancel a hung token
+			// resolution. authHeader gets its own Promise.race + timeout, capped
+			// at min(timeoutMs, 5000).
+			//
+			// We register a healthy /servers route to prove the request never
+			// reaches the HTTP phase — the timeout fires entirely in Layer 1.
+			let routeCalled = false;
+			addRoute('GET', '/api/v1/servers', () => {
+				routeCalled = true;
+				return { status: 200, body: [] };
+			});
+
+			// Provider that never resolves — simulates fs.promises.stat hanging.
+			const hangingProvider = async (): Promise<string> => {
+				await new Promise<never>(() => { /* never */ });
+				return 'unreachable';
+			};
+			// timeoutMs=100 → authHeaderTimeoutMs = min(100, 5000) = 100.
+			const hangClient = new GatewayClient(
+				`http://127.0.0.1:${port}`,
+				100,
+				hangingProvider,
+			);
+			await assert.rejects(
+				() => hangClient.listServers(),
+				(err: GatewayError) => {
+					assert.strictEqual(err.kind, 'timeout');
+					assert.ok(
+						err.message.includes('authHeader'),
+						`expected authHeader-specific timeout message, got: ${err.message}`,
+					);
+					return true;
+				},
+			);
+			assert.strictEqual(
+				routeCalled, false,
+				'HTTP phase must not run when authHeader is still resolving',
+			);
+		});
 	});
 
 	// MCPR.3: admin-scope auth provider must be used for /shutdown.

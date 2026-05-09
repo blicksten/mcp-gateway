@@ -567,4 +567,67 @@ describe('ServerDataCache', () => {
 			assert.equal(callCount, 1, 'no drain call after dispose');
 		});
 	});
+
+	describe('Bug B Layer 3 watchdog (defense-in-depth)', () => {
+		it('refresh hung past watchdog → emits offline event and clears refreshInFlight', async () => {
+			// Outermost layer protects against any hang inside refresh() that
+			// the per-request authHeader race + AbortController did not catch
+			// (e.g. logic added later, third-party listeners on the cache, etc.).
+			// Without it, refreshInFlight=true leaks forever and auto-refresh
+			// ticks silently skip work, freezing the UI in "offline" state.
+			let resolveListServers: (value: ServerView[]) => void;
+			const listServersGate = new Promise<ServerView[]>((resolve) => {
+				resolveListServers = resolve;
+			});
+			let listServersCalls = 0;
+			const client = {
+				listServers: async () => {
+					listServersCalls++;
+					if (listServersCalls === 1) {
+						// First call hangs until we manually resolve it AFTER the
+						// watchdog has fired. The watchdog event must fire even
+						// though the underlying promise is still pending.
+						return await listServersGate;
+					}
+					// Subsequent calls succeed — proves refreshInFlight unblocks.
+					return mixedServers;
+				},
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			// 50ms watchdog so the test runs fast.
+			cache = new ServerDataCache(client as any, undefined, 50);
+
+			// Capture the offline event the watchdog must emit.
+			const watchdogEvent = await new Promise<CacheRefreshPayload>((resolve) => {
+				const sub = cache.onDidRefresh((p) => { sub.dispose(); resolve(p); });
+				void cache.refresh();
+			});
+
+			assert.equal(watchdogEvent.lastRefreshFailed, true, 'watchdog must mark refresh as failed');
+			assert.equal(watchdogEvent.lastAuthFailed, false, 'watchdog must NOT spuriously flag auth failure');
+			assert.equal(watchdogEvent.gatewayHealth, null, 'watchdog must clear gateway health to render offline');
+
+			// Critical: refreshInFlight must be cleared so the next tick runs.
+			// Trigger a second refresh; with mixedServers it must resolve and
+			// return successfully. If the flag had leaked, the call would no-op.
+			const secondEvent = await new Promise<CacheRefreshPayload>((resolve) => {
+				const sub = cache.onDidRefresh((p) => { sub.dispose(); resolve(p); });
+				void cache.refresh();
+			});
+			assert.equal(secondEvent.lastRefreshFailed, false, 'recovery refresh must succeed');
+			assert.equal(secondEvent.servers.length, 3, 'recovery refresh must return fresh server list');
+			assert.equal(listServersCalls, 2, 'second refresh must hit listServers (refreshInFlight cleared)');
+
+			// Drain the orphaned first call so it does not leak between tests.
+			resolveListServers!(mixedServers);
+		});
+	});
 });

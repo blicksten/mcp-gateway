@@ -25,6 +25,12 @@ export interface CacheRefreshPayload {
  */
 export type ImportedSystemsProvider = () => readonly string[];
 
+/** Sentinel returned by the watchdog branch of refresh()'s Promise.race. */
+const REFRESH_WATCHDOG = Symbol('refresh-watchdog');
+
+/** Default refresh watchdog deadline. Bug B defensive — outermost layer. */
+const DEFAULT_REFRESH_WATCHDOG_MS = 30_000;
+
 export class ServerDataCache implements vscode.Disposable {
 	private readonly client: IGatewayClient;
 	private readonly importedProvider: ImportedSystemsProvider | undefined;
@@ -48,10 +54,22 @@ export class ServerDataCache implements vscode.Disposable {
 	private pendingRefresh = false;
 	private _lastRefreshFailed = false;
 	private _lastAuthFailed = false;
+	// Bug B defensive (Layer 3): outermost watchdog. If refresh()'s combined
+	// listServers + getHealth + post-processing does not finish within this
+	// many ms, the cache treats the call as failed and emits an offline event.
+	// This guarantees refreshInFlight cannot stay stuck even if a lower layer
+	// hangs (covers paths not bounded by GatewayClient's authHeader race or
+	// AbortController-bounded HTTP). Configurable per instance for tests.
+	private readonly watchdogTimeoutMs: number;
 
-	constructor(client: IGatewayClient, importedProvider?: ImportedSystemsProvider) {
+	constructor(
+		client: IGatewayClient,
+		importedProvider?: ImportedSystemsProvider,
+		watchdogTimeoutMs: number = DEFAULT_REFRESH_WATCHDOG_MS,
+	) {
 		this.client = client;
 		this.importedProvider = importedProvider;
+		this.watchdogTimeoutMs = watchdogTimeoutMs;
 	}
 
 	async refresh(): Promise<void> {
@@ -63,7 +81,21 @@ export class ServerDataCache implements vscode.Disposable {
 			return;
 		}
 		this.refreshInFlight = true;
+
+		// Bug B defensive (Layer 3): outermost watchdog.
+		// Any path inside the try-block that hangs longer than watchdogTimeoutMs
+		// would leak refreshInFlight=true forever (auto-refresh ticks see the
+		// flag and return without calling listServers, freezing the UI in
+		// "offline" state). Promise.race against a watchdog promise guarantees
+		// we either get the result OR observe a watchdog sentinel within the
+		// deadline. The finally block always clears refreshInFlight so the
+		// next tick can run regardless of which branch wins.
+		let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
+		const watchdogMs = this.watchdogTimeoutMs;
 		try {
+			const watchdog = new Promise<typeof REFRESH_WATCHDOG>((resolve) => {
+				watchdogTimer = setTimeout(() => resolve(REFRESH_WATCHDOG), watchdogMs);
+			});
 			// Phase D.3: fetch /servers and /health in parallel so the gateway
 			// metadata (pid/version/uptime) is available on the same refresh
 			// event that carries the server list. Health failures do not mark
@@ -71,10 +103,41 @@ export class ServerDataCache implements vscode.Disposable {
 			// always present; only the extended metadata fields (pid, version,
 			// uptime_seconds, started_at) are new and optional in HealthResponse,
 			// so older daemons degrade to "no uptime displayed" rather than error.
-			const [serversResult, healthResult] = await Promise.allSettled([
+			type SettledPair = [
+				PromiseSettledResult<unknown[]>,
+				PromiseSettledResult<unknown>,
+			];
+			const settle = Promise.allSettled([
 				this.client.listServers(),
 				this.client.getHealth(),
-			]);
+			]) as Promise<SettledPair>;
+
+			const raced = await Promise.race([settle, watchdog]);
+
+			if (raced === REFRESH_WATCHDOG) {
+				// Refresh hung past watchdog deadline. Emit offline event so
+				// the UI flips to "offline" instead of staying frozen, and
+				// bail out — the in-flight Promise.allSettled is now orphaned
+				// (dangling but harmless: when it eventually settles, no one
+				// awaits it). Preserves last-known-good cachedServers, mirroring
+				// the transient-error path semantics so consumers do not flicker.
+				logger.error(
+					'server-data-cache',
+					`refresh() did not complete within ${watchdogMs}ms — emitting offline event`,
+				);
+				this._lastRefreshFailed = true;
+				this._lastAuthFailed = false;
+				this.cachedGatewayHealth = null;
+				this._onDidRefresh.fire({
+					servers: this.cachedServers,
+					lastRefreshFailed: true,
+					lastAuthFailed: false,
+					gatewayHealth: null,
+				});
+				return;
+			}
+
+			const [serversResult, healthResult] = raced;
 
 			if (serversResult.status === 'fulfilled') {
 				// Cast required: IGatewayClient.listServers is typed as Promise<unknown[]>
@@ -150,6 +213,7 @@ export class ServerDataCache implements vscode.Disposable {
 				gatewayHealth: this.cachedGatewayHealth,
 			});
 		} finally {
+			if (watchdogTimer) { clearTimeout(watchdogTimer); }
 			this.refreshInFlight = false;
 		}
 
