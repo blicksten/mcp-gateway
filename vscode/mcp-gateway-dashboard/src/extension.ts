@@ -28,6 +28,7 @@ import { ServerDetailPanel } from './webview/server-detail-panel';
 import { SapDetailPanel } from './webview/sap-detail-panel';
 import { AddServerPanel } from './webview/add-server-panel';
 import { AddSapPanel } from './webview/add-sap-panel';
+import { SapPickerPanel } from './webview/sap-picker-panel';
 import { ClaudeCodePanel } from './webview/claude-code-panel';
 import { SlashCommandGenerator } from './slash-command-generator';
 import { assertCompatible } from './version-compat';
@@ -50,6 +51,12 @@ export interface IGatewayClient {
 	resetCircuit(name: string): Promise<unknown>;
 	callTool(server: string, tool: string, args?: Record<string, unknown>): Promise<unknown>;
 	listTools(): Promise<unknown[]>;
+	// SAP Picker — Phase B webview consumer. Optional so legacy injected
+	// clients in older tests still satisfy the interface; the panel guards
+	// for absence and surfaces a clear "older daemon" message.
+	getSapPickerSnapshot?(): Promise<unknown>;
+	beginSapBatch?(): Promise<unknown>;
+	endSapBatch?(batchId: string): Promise<unknown>;
 }
 
 export function activate(
@@ -835,6 +842,14 @@ function registerCommands(
 			client,
 			cache,
 			() => { void cache.refresh(); },
+		);
+	}));
+
+	push(vscode.commands.registerCommand('mcpGateway.openSapPicker', async () => {
+		await SapPickerPanel.createOrShow(
+			context.extensionUri,
+			client,
+			cache,
 		);
 	}));
 

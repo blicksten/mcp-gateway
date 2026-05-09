@@ -139,6 +139,11 @@
         "icon": "$(add)"
       },
       {
+        "command": "mcpGateway.openSapPicker",
+        "title": "MCP Gateway: Open SAP Picker (landscape ∪ KeePass)",
+        "icon": "$(list-unordered)"
+      },
+      {
         "command": "mcpGateway.openSettings",
         "title": "MCP Gateway: Open Settings",
         "icon": "$(gear)"
@@ -193,6 +198,11 @@
           "command": "mcpGateway.addSapSystem",
           "when": "view == mcpSapSystems",
           "group": "navigation@20"
+        },
+        {
+          "command": "mcpGateway.openSapPicker",
+          "when": "view == mcpSapSystems",
+          "group": "navigation@25"
         },
         {
           "command": "mcpGateway.showClaudeCodeIntegration",
