@@ -127,6 +127,21 @@ Delivered in one v1.7.0 bundle:
 
 ---
 
+## SAP Picker + Import-from-Claude track (Wave 1 in progress)
+
+Plan: `docs/PLAN-sap-picker-and-import-mcp.md` · Tasks: `docs/TASKS-sap-picker-and-import-mcp.md` · Spike: `docs/spikes/2026-05-07-sap-picker-and-import-mcp.md` (PAL round-4 PASS) · audit closed cycle-12 (cross-validate APPROVE).
+
+Two-feature delivery split across Wave 1 (SAP Picker + Settings, ships independently as daemon `v1.8.0` + VSIX `1.31.0`) and Wave 2 (Import-from-Claude, ships as daemon `v1.9.0` + VSIX `1.32.0`). 6 phases A–F, ≈ 21.5 d single-dev, MEDIUM-HIGH risk.
+
+| # | Phase | Status |
+|---|-------|--------|
+| A.0 | gokeepasslib/v3 + composite-keyfile + recycle-bin PoC (R-16) | ✅ 2026-05-08 — `docs/spikes/2026-05-08-keepass-poc.md`, 6/6 acceptance, MIT not BSD-3, KDBX4-default cipher = ChaCha20 |
+| A.1 | REST contracts: `picker-snapshot` + `batch-begin`/`batch-end` (R-15 gap-fill) | ✅ 2026-05-09 — new `internal/api/sap_picker_handler.go` + 8 tests; `/api/v1/sap/*` group on `claudeCodeCORS + authMW` (no csrf, ADR-0003 §csrf-scope precedent); 5-min batch TTL replaces literal cfgMu hold (deadlock-safe); `TriggerPluginRegen` suppression deferred to T-A.5 refactor |
+| A.2..A.5 + GATE | grammar codegen, saplandscape parser, KeePass extraction + intersection, addServerInProcess refactor + lifecycle Stop-error fix | ⏳ pending — resume via `/run sap-picker-and-import-mcp` |
+| B–F | webview pickers, settings, import backend/UI, tests + docs | ⏳ pending |
+
+---
+
 ## UX toggles (post-v1.7.x)
 
 | # | Phase | Status |

@@ -90,6 +90,21 @@ type Server struct {
 	shutdownFn     context.CancelFunc
 	shutdownMu     sync.Mutex
 	shutdownCalled bool
+
+	// SAP Picker batch state (Phase A T-A.1, R-27 / X3).
+	// sapBatchMu serialises begin→end transitions; sapBatchID names the live
+	// batch (empty = no batch). sapBatchExpiry auto-releases an abandoned
+	// batch after sapBatchTTL so a crashed client cannot freeze later
+	// callers indefinitely. Plan T-A.1 explicitly defers the per-call
+	// TriggerPluginRegen suppression to T-A.5 (where addServerInProcess /
+	// removeServerInProcess factor out and accept SuppressPluginRegen).
+	// Holding cfgMu across the begin→end span as the spike literally
+	// describes would deadlock on any other handler that takes cfgMu — we
+	// instead rely on the active-flag pattern, which the T-A.5 refactor
+	// will read on each in-process call.
+	sapBatchMu     sync.Mutex
+	sapBatchID     string
+	sapBatchExpiry time.Time
 }
 
 // Addr returns the bound listener address, or nil if ListenAndServe has
@@ -442,6 +457,21 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/probe-result", s.handleClaudeCodeProbeResult)
 			r.Post("/plugin-sync", s.handleClaudeCodePluginSync)
 			r.Get("/compat-matrix", s.handleClaudeCodeCompatMatrix)
+		})
+
+		// SAP Picker routes (Phase A T-A.1). Same middleware shape as
+		// /claude-code (claudeCodeCORS + authMW, no csrfProtect) — the
+		// picker is a VSCode webview client with Bearer auth, not a
+		// cookie-bearing browser session, so csrf does not apply per
+		// ADR-0003 §csrf-scope. Reusing the existing claudeCodeCORS
+		// middleware avoids a near-duplicate webview-CORS helper.
+		r.Route("/sap", func(r chi.Router) {
+			r.Use(claudeCodeCORS)
+			r.Use(authMW)
+
+			r.Get("/picker-snapshot", s.handleSAPPickerSnapshot)
+			r.Post("/batch-begin", s.handleSAPBatchBegin)
+			r.Post("/batch-end", s.handleSAPBatchEnd)
 		})
 	})
 
