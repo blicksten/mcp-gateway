@@ -29,6 +29,7 @@ import { SapDetailPanel } from './webview/sap-detail-panel';
 import { AddServerPanel } from './webview/add-server-panel';
 import { AddSapPanel } from './webview/add-sap-panel';
 import { SapPickerPanel } from './webview/sap-picker-panel';
+import { ImportClaudePanel } from './webview/import-claude-panel';
 import { SettingsPanel } from './webview/settings-panel';
 import { ClaudeCodePanel } from './webview/claude-code-panel';
 import { SlashCommandGenerator } from './slash-command-generator';
@@ -58,6 +59,11 @@ export interface IGatewayClient {
 	getSapPickerSnapshot?(): Promise<unknown>;
 	beginSapBatch?(): Promise<unknown>;
 	endSapBatch?(batchId: string): Promise<unknown>;
+	// Import-from-Claude — Phase E webview consumer. Optional for the same
+	// reason as the SAP picker methods above; ImportClaudePanel guards for
+	// absence and surfaces a "v1.9+ daemon required" message.
+	importSnapshot?(source: string, projectRoot?: string): Promise<unknown>;
+	importApply?(ops: unknown[]): Promise<unknown>;
 }
 
 export function activate(
@@ -851,6 +857,13 @@ function registerCommands(
 			context.extensionUri,
 			client,
 			cache,
+		);
+	}));
+
+	push(vscode.commands.registerCommand('mcpGateway.openImportClaude', async () => {
+		await ImportClaudePanel.createOrShow(
+			context.extensionUri,
+			client,
 		);
 	}));
 

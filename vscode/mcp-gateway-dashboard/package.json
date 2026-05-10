@@ -144,6 +144,11 @@
         "icon": "$(list-unordered)"
       },
       {
+        "command": "mcpGateway.openImportClaude",
+        "title": "MCP Gateway: Import from Claude (cc_global / cc_project / desktop)",
+        "icon": "$(cloud-download)"
+      },
+      {
         "command": "mcpGateway.openSettings",
         "title": "MCP Gateway: Open Settings",
         "icon": "$(gear)"
@@ -188,6 +193,11 @@
           "command": "mcpGateway.addServer",
           "when": "view == mcpBackends",
           "group": "navigation@20"
+        },
+        {
+          "command": "mcpGateway.openImportClaude",
+          "when": "view == mcpBackends",
+          "group": "navigation@30"
         },
         {
           "command": "mcpGateway.showClaudeCodeIntegration",

@@ -159,6 +159,24 @@ export class GatewayClient {
 		return this.request<SapBatchEndResponse>('POST', '/api/v1/sap/batch-end', { batch_id: batchId });
 	}
 
+	// --- Import-from-Claude (Phase D backend; Phase E webview consumer) ---
+
+	async importSnapshot(source: string, projectRoot?: string): Promise<unknown> {
+		// Per claude_code_import_handler.go: project_root is required for
+		// cc_project source, optional otherwise. encodeURIComponent handles
+		// any spaces or special chars in the workspace path.
+		const params = new URLSearchParams();
+		params.set('source', source);
+		if (projectRoot && projectRoot.length > 0) {
+			params.set('project_root', projectRoot);
+		}
+		return this.request<unknown>('GET', `/api/v1/claude-code/import-snapshot?${params.toString()}`);
+	}
+
+	async importApply(ops: unknown[]): Promise<unknown> {
+		return this.request<unknown>('POST', '/api/v1/claude-code/import-apply', { ops });
+	}
+
 	// --- Core HTTP ---
 
 	// AUDIT B-NEW-29 (Phase 11): request is now async so it can await the
