@@ -113,16 +113,27 @@ func Render(p Paths) (Rendered, error) {
 		return Rendered{}, fmt.Errorf("render ts: %w", err)
 	}
 
+	// Normalise line endings to LF before any formatting. Without this
+	// step, a Windows CI runner with `core.autocrlf=true` checks out the
+	// template files with CRLF; gofmt produces LF-only output for the
+	// Go file but the TS file would otherwise carry CRLF through. The
+	// generated files on disk are committed with LF (git index marker),
+	// so a CRLF generator output would always trip the staleness gate
+	// on Windows. Normalising here means the Render function is
+	// deterministic regardless of how git checked out the template.
+	goBytes := bytes.ReplaceAll(goBuf.Bytes(), []byte("\r\n"), []byte("\n"))
+	tsBytes := bytes.ReplaceAll(tsBuf.Bytes(), []byte("\r\n"), []byte("\n"))
+
 	// Run the Go output through go/format so the generator's output is
 	// byte-identical to `gofmt -w` over the same content. Without this,
 	// the staleness check would report STALE every time a developer ran
 	// gofmt on the generated file (gofmt's spacing rules differ from a
 	// raw template's).
-	formatted, err := format.Source(goBuf.Bytes())
+	formatted, err := format.Source(goBytes)
 	if err != nil {
 		return Rendered{}, fmt.Errorf("gofmt go: %w (rendered output:\n%s)", err, goBuf.String())
 	}
-	return Rendered{Go: formatted, TS: tsBuf.Bytes()}, nil
+	return Rendered{Go: formatted, TS: tsBytes}, nil
 }
 
 // writeIfChanged writes b to path only when the existing content differs.

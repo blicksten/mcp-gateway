@@ -1,0 +1,21 @@
+# mcp-gateway: line-ending normalisation.
+#
+# Go and TypeScript sources must use LF on disk so a Windows runner
+# with core.autocrlf=true cannot inject CRLF that confuses gofmt /
+# byte-identical staleness checks (T-F.5 cross-Wave CI fix —
+# tools/grammar-gen/internal/gen/gen_test.go::TestRender_RealGrammar_Smokes).
+*.go        text eol=lf
+*.ts        text eol=lf
+*.tmpl      text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf
+*.sh        text eol=lf
+Makefile    text eol=lf
+
+# Binary artefacts must not be CRLF-converted under any circumstance.
+*.vsix      binary
+*.png       binary
+*.jpg       binary
+*.gif       binary
