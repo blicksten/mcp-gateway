@@ -93,19 +93,21 @@ jobs:
 
       - name: Wait for gateway health (timeout 30s)
         run: |
-          for i in $(seq 1 60); do
+          # 60 polls × 0.5s = 30s timeout. Single-source-of-truth so the
+          # loop bound and the timeout-check stay in sync (PAL feedback on
+          # audit-e7618c9c closeout, 2026-05-10).
+          MAX_POLLS=60
+          for i in $(seq 1 $MAX_POLLS); do
             if curl -sf http://127.0.0.1:8765/api/v1/health > /dev/null; then
               echo "gateway ready after ${i}x 500ms polls"
-              break
+              exit 0
             fi
             sleep 0.5
-            if [ "$i" -eq 60 ]; then
-              echo "::error::gateway did not become healthy within 30s"
-              echo "--- gateway.log ---"
-              cat gateway.log
-              exit 1
-            fi
           done
+          echo "::error::gateway did not become healthy within $((MAX_POLLS / 2))s"
+          echo "--- gateway.log ---"
+          cat gateway.log
+          exit 1
 
       - name: Assert health.version is not dev-build (audit F-A4)
         run: |

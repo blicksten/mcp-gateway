@@ -66,5 +66,44 @@ describe('version-format helpers (audit-e7618c9c SC-C-M1)', () => {
 				'v0.0.0-3c0f59c714a7',
 			);
 		});
+
+		it('never produces a double-v prefix (regression guard for audit-e7618c9c)', () => {
+			// Pre-migration, status-bar.ts emitted `v${health.version}` unconditionally,
+			// which produced 'vv0.0.0-...' when the daemon's runtime/debug.ReadBuildInfo()
+			// fallback synthesised a version starting with 'v'. The helper detects
+			// the existing prefix via startsWith('v') — this test pins that contract
+			// so a future "simpler" refactor can't silently regress to 'vv...'.
+			// PAL feedback on closeout review, 2026-05-10.
+			const cases = [
+				'v1.29.0',
+				'v0.0.0-20260506054626-3c0f59c714a7',
+				'v0.0.0-20260506054626-3c0f59c714a7+dirty',
+				'v2.0.0-rc1',
+			];
+			for (const v of cases) {
+				const out = formatGatewayVersion(v);
+				assert.ok(
+					!out.startsWith('vv'),
+					`formatGatewayVersion(${JSON.stringify(v)}) must not produce double-v, got: ${out}`,
+				);
+				assert.equal(out, v, `v-prefixed input must round-trip unchanged: ${v}`);
+			}
+		});
+	});
+
+	describe('hasRealVersion as TS type predicate', () => {
+		it('narrows the type so callers do not need non-null assertion', () => {
+			const v: string | undefined = 'v1.29.0' as string | undefined;
+			if (hasRealVersion(v)) {
+				// If the predicate signature is `v is string`, TS narrows v here
+				// to plain `string` (not `string | undefined`). This test exists
+				// for compile-time verification — at runtime it just confirms
+				// the value is usable as a string without assertions.
+				const noAssertNeeded: string = v;
+				assert.equal(noAssertNeeded.length > 0, true);
+			} else {
+				assert.fail('predicate should accept v1.29.0');
+			}
+		});
 	});
 });

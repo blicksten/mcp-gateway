@@ -21,10 +21,14 @@
  * or VCS-derived. False for `undefined`, empty string, or the `"dev"`
  * sentinel.
  *
+ * Declared as a TypeScript type predicate (`v is string`) so callers don't
+ * need a non-null assertion on the version after the guard (PAL feedback
+ * on audit-e7618c9c closeout, 2026-05-10).
+ *
  * Use for predicate checks (footer visibility, version-compat short-circuit,
  * tree-item state). For a display string, use {@link formatGatewayVersion}.
  */
-export function hasRealVersion(version: string | undefined): boolean {
+export function hasRealVersion(version: string | undefined): version is string {
 	return typeof version === 'string' && version.length > 0 && version !== 'dev';
 }
 

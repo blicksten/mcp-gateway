@@ -66,7 +66,7 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 		// "dev" means a local source build — not useful to show.
 		const version = this.cache.gatewayHealth?.version;
 		if (hasRealVersion(version)) {
-			items.push(new GatewayVersionItem(version!));
+			items.push(new GatewayVersionItem(version));
 		}
 		return items;
 	}
@@ -97,7 +97,7 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 		// gateway goes offline mid-session (stale icons need to become grey).
 		const staleMark = lastRefreshFailed ? 'S' : '';
 		// Only include version in fingerprint for real releases (not "dev").
-		const effectiveVersion = hasRealVersion(version) ? version! : '';
+		const effectiveVersion = hasRealVersion(version) ? version : '';
 		const parts: string[] = [placeholder ? 'P' : 'N', staleMark, effectiveVersion];
 		for (const s of servers) {
 			parts.push([
