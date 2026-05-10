@@ -492,6 +492,60 @@ The panel displays plugin + patch + channel status, a 12-mode failure
 matrix, and `[Activate]` / `[Probe reconnect]` / `[Copy diagnostics]`
 buttons.
 
+## Connecting Claude Desktop to the Gateway
+
+Claude Desktop has no plugin system, so the gateway is registered
+manually as a single MCP backend in `claude_desktop_config.json`. After
+this one-time edit, Claude Desktop sees every backend the gateway
+proxies — adding or removing servers in the gateway requires no further
+Desktop config changes.
+
+**Config path:**
+
+| Platform | Path |
+|---------|------|
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
+
+**Entry to add** (under existing `mcpServers`, preserving any other
+entries you have):
+
+```json
+{
+  "mcpServers": {
+    "mcp-gateway": {
+      "type": "http",
+      "url": "http://localhost:8765/mcp",
+      "headers": {
+        "Authorization": "Bearer <contents of ~/.mcp-gateway/auth.token>"
+      }
+    }
+  }
+}
+```
+
+The gateway's aggregate `/mcp` endpoint exposes every registered backend
+under namespaced tool names (`<backend>__<tool>`). Replace `8765` with
+your `mcpGateway.apiUrl` port if you changed it from the default.
+
+Restart Claude Desktop after editing. Tools appear under one
+`mcp-gateway` source in Desktop's MCP panel.
+
+**Why no `install-claude-desktop` CLI?** The Desktop install is one JSON
+edit — far less work than Claude Code (which needs plugin marketplace
+registration, plugin install, and an optional webview patch). The
+sample above is the install. If you script this for many machines,
+templating the snippet with your config-management tool of choice is
+simpler than a dedicated subcommand.
+
+**Per-backend entries (advanced).** If you prefer separate Desktop
+entries per backend (one per gateway-registered server) instead of the
+single aggregate entry above, use the per-backend URL form:
+`http://localhost:8765/mcp/<backend-name>`. The cost is keeping the
+Desktop entry list manually in sync with the gateway as you add or
+remove backends — the aggregate form avoids that entirely.
+
 ## Commands vs MCP servers
 
 Two different things live under `.claude/`, both are markdown, both are
