@@ -78,6 +78,23 @@ const (
 )
 
 // OpResult is one row in an Apply response.
+//
+// Partial-success contract (T-F.5 finding MEDIUM-4, 2026-05-10):
+// Status=StatusApplied with ProvenanceWarning != "" is a partial-success
+// state. The gateway-side mutation (AddServer/RemoveServer + source-file
+// rename for `move`) succeeded; the provenance sidecar write at
+// ~/.mcp-gateway/claude-imported.json failed. Callers MUST surface
+// ProvenanceWarning to the operator — the next snapshot's "previously
+// imported" badge will be missing for this row, so a re-import attempt
+// would not show as a re-import. The webview's TS-side OpResult
+// interface (vscode/mcp-gateway-dashboard/src/import-claude-state.ts)
+// declares provenance_warning as an optional field; rendering of this
+// non-blocking notice is a webview UX concern, not a daemon concern.
+//
+// Same-position move with SourceUpdated=false + Reason!="" (typically
+// "mtime changed") is also a partial-success: the gateway has the new
+// entry, but the source file was NOT mutated because a concurrent
+// external write was detected.
 type OpResult struct {
 	Name              string   `json:"name"`
 	DestName          string   `json:"dest_name"`
@@ -92,7 +109,8 @@ type OpResult struct {
 	// write (e.g. Windows Rename access-denied due to AV scanner).
 	// The operation itself succeeded but the next snapshot's
 	// "previously imported" badge will not show this import
-	// (F-07 fix — was a silent discard).
+	// (F-07 fix — was a silent discard). See the partial-success
+	// contract on OpResult above.
 	ProvenanceWarning string `json:"provenance_warning,omitempty"`
 }
 
@@ -503,9 +521,15 @@ func mutateSourceRemove(snap *claudeconfig.Snapshot, name, projectRoot string, d
 	if deps.BeforeSourceWrite != nil {
 		deps.BeforeSourceWrite(snap.Path)
 	}
+	// writeSucceeded is flipped to true ONLY after os.Rename returns
+	// nil. Passing the correct value to AfterSourceWrite preserves the
+	// hook's contract: a "resume reflector" implementation can choose
+	// whether to trust the file (success=true) or re-read it
+	// (success=false) — T-F.5 finding MEDIUM-1, 2026-05-10.
+	writeSucceeded := false
 	defer func() {
 		if deps.AfterSourceWrite != nil {
-			deps.AfterSourceWrite(snap.Path, true)
+			deps.AfterSourceWrite(snap.Path, writeSucceeded)
 		}
 	}()
 
@@ -545,5 +569,6 @@ func mutateSourceRemove(snap *claudeconfig.Snapshot, name, projectRoot string, d
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename: %w", err)
 	}
+	writeSucceeded = true
 	return nil
 }

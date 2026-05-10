@@ -181,3 +181,44 @@ be noisy.
   Phase 16 plan audit + Phase 16.3 implementation review.
 - PAL thinkdeep verification 2026-05-08 (gpt-5.1-codex internal,
   gate_verdict: PASS) for the MCPR.4 design pivot.
+
+## Appendix A — Import-from-Claude endpoints (additivity confirmation, v1.9.0)
+
+**Wave 2** of [docs/PLAN-sap-picker-and-import-mcp.md](PLAN-sap-picker-and-import-mcp.md)
+adds two REST endpoints under the existing FROZEN
+`/api/v1/claude-code/*` namespace:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/v1/claude-code/import-snapshot` | Read source rows + drift / provenance metadata for one of `cc_global` / `cc_project` / `desktop`. |
+| POST | `/api/v1/claude-code/import-apply` | Per-row apply (copy / move × skip / overwrite) with single end-of-batch `TriggerPluginRegen`. |
+
+**Additivity proof.** Both endpoints are new HTTP verbs on new paths
+under the existing FROZEN namespace established in this ADR's main
+text (v1.6.0). They:
+
+- Do NOT change response shape or wire format of the prior FROZEN
+  endpoints (`patch-heartbeat`, `patch-status`, `pending-actions`,
+  `pending-actions/{id}/ack`, `probe-trigger`, `probe-result`,
+  `plugin-sync`, `compat-matrix`).
+- Mount with the SAME `claudeCodeCORS + authMW` middleware stack as
+  the existing routes — explicit code comment in
+  `internal/api/server.go` immediately above the new routes references
+  this appendix.
+- Use the SAME 401 / 4xx error envelope.
+- Are gated by the existing `compat-matrix` version-skew probe — older
+  daemons (≤v1.5) return 404 on these routes and the dashboard
+  surfaces "Upgrade gateway to v1.6+ to import" instead of attempting
+  the call (R-24).
+
+**Backward-compat clients** that ignore the two new routes see no
+behavioural change. There is no breaking-config knob, no migration,
+no opt-in setting required to KEEP the existing v1.6.0 contract — the
+`compat-matrix` advertises `v1.9.0` and a client that already supports
+the v1.6.0 set continues to work unchanged.
+
+**FROZEN extension policy.** Future additions under this namespace
+follow the same pattern: append-only at the path level, do not change
+existing response shapes, document with an appendix entry here. The
+`compat-matrix` endpoint is the source of truth for what a client
+should advertise as "supported".

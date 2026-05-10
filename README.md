@@ -120,7 +120,16 @@ FRONTEND (clients connect to gateway)     BACKEND (gateway connects to servers)
 
 ## Status
 
-**v1.0.0** — all core features complete and tested.
+**Daemon v1.9.0 + Extension 1.32.0** (Wave 2 of `sap-picker-and-import-mcp`)
+— SAP Picker (Wave 1) and Import-from-Claude (Wave 2) complete on top of
+the v1.7.x daemon-lifecycle and v1.6.x Claude Code integration baselines.
+
+The two semver tracks are independent: `mcp-gateway` daemon is
+ldflags-versioned (visible via `mcp-ctl version`); the VSCode extension
+is `package.json`-versioned. Wave 1 git tag jumped from the legacy
+`v1.0.0` to **`v1.8.0`** to align with the embedded daemon version
+users have been seeing all along (PLAN-sap-picker-and-import-mcp.md
+§C OQ-5 records the rationale).
 
 See [CHANGELOG.md](CHANGELOG.md) for details.
 
@@ -280,6 +289,144 @@ Every `server_name` in `commands.json` must resolve to an entry in `servers.json
 ### Known limitation — slash-command edits below line 1
 
 Catalog-enriched slash-command files carry a magic-header marker on line 1. When the server re-transitions to `running`, the file is regenerated in full and any edits **below** line 1 are silently overwritten. To preserve operator edits, delete the line-1 marker — the generator treats markerless files as operator-owned and leaves them alone. A hash-augmented marker that tolerates below-line-1 edits is a v1.6 candidate.
+
+## SAP Picker
+
+> Available in v1.8.0+ (Wave 1 of `docs/PLAN-sap-picker-and-import-mcp.md`).
+
+The **SAP Picker** webview replaces the per-system "Add SAP System" form
+with a hybrid landscape ∪ KeePass picker. It enumerates every SID found
+in `SAPUILandscape.xml`, joins it with KeePass entries, and lets the
+operator register or unregister `vsp-<SID>-<CLIENT>` and
+`sap-gui-<SID>-<CLIENT>` backends in a single batch.
+
+**Open it:** command palette → `MCP Gateway: Open SAP Picker`, or click the
+`[⊞]` icon at the top of the **SAP Systems** view.
+
+**What it does:**
+
+- Reads `SAPUILandscape.xml` via a regex-free `encoding/xml` parser
+  (`internal/saplandscape/parser.go`) — handles `<Include>` chains with
+  cycle detection, UNC normalisation, and `%APPDATA%`/`%USERPROFILE%`
+  expansion.
+- Reads KeePass via `gokeepasslib/v3` and joins on `(SID, Client)`.
+  Recycle-bin entries are filtered out (`internal/sapcreds/keepass.go`).
+- Hybrid join: every landscape SID appears, with `kpMissing: true` flag
+  when the KeePass DB has no matching entry (R-14 / R-30 — registration
+  blocked at the UI for `kpMissing` rows; tooltip points at
+  `mcp-ctl credential import`).
+- Batch Apply suppresses per-call `TriggerPluginRegen` and fires a
+  single regen + `RebuildTools` at end-of-batch (R-26 / X2 fix —
+  `addServerInProcess` / `removeServerInProcess` refactor in
+  `internal/api/server.go`). Per-row status surfaces in a 9-state
+  machine (`pending` → `in_progress` → `config_added_running` /
+  `config_added_start_failed` / `removed` / `removed_with_orphan` / …).
+- `removed_with_orphan` rows expose a **Force kill** button — surfaces
+  Stop errors that classical lifecycle code silently swallowed (R-28 /
+  X4 fix — `internal/lifecycle/manager.go::RemoveServer` now returns
+  `RemoveResult{Orphan, StopErr}`).
+
+**Settings used:**
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `mcpGateway.sapSystemsEnabled` | `false` | Show the SAP Systems view + enable the picker entry point. |
+| `mcpGateway.keepassPath` | `""` | Path to the KDBX file. Required for the join to surface non-`kpMissing` rows. |
+| `mcpGateway.defaultVspCommand` | `""` | Default `command` for `vsp-*` backends — pre-fills the override field. |
+| `mcpGateway.defaultGuiUvProject` | `""` | Default `--directory` for `sap-gui-*` backends when `defaultGuiMode = "uv"`. |
+| `mcpGateway.defaultGuiMode` | `"exec"` | `"exec"` (raw command) or `"uv"` (resolves through `uvx --directory <project>`). |
+| `mcpGateway.uvPath` | `""` | Path to `uv` / `uvx`. Empty = use PATH. |
+
+REST contract (FROZEN as of v1.8.0):
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/v1/sap/picker-snapshot` | Joined landscape ∪ KeePass rows |
+| POST | `/api/v1/sap/batch-begin` | Open a 5-minute batch window; returns `{batch_id}` |
+| POST | `/api/v1/sap/batch-end` | Close the batch + fire single regen |
+
+## Import-from-Claude
+
+> Available in v1.9.0+ (Wave 2 of `docs/PLAN-sap-picker-and-import-mcp.md`).
+
+The **Import from Claude** webview ingests MCP server entries from
+Claude Code and Claude Desktop config files into the gateway. Read-only
+on the gateway side; the daemon never writes to Claude's config files
+unless the operator picks `move` action.
+
+**Open it:** command palette → `MCP Gateway: Open Import from Claude`.
+
+**What it imports:**
+
+| Source | Path |
+|--------|------|
+| `cc_global` | `~/.claude.json` (`mcpServers` key) |
+| `cc_project` | `<workspace>/.mcp.json` (`mcpServers` key) |
+| `desktop` | `%APPDATA%\Claude\claude_desktop_config.json` (Windows) · `$HOME/Library/Application Support/Claude/claude_desktop_config.json` (macOS) · `$XDG_CONFIG_HOME/Claude/claude_desktop_config.json` (Linux) |
+
+**Action / conflict matrix:**
+
+| Action | Conflict = `skip` | Conflict = `overwrite` |
+|--------|-------------------|------------------------|
+| `copy` | If gateway has the name, leave gateway as-is | Replace gateway entry; source file untouched |
+| `move` | If gateway has the name, leave both as-is | Replace gateway entry **AND delete from source file** (banner warning surfaces) |
+
+`duplicate` is intentionally not supported (R-25). The webview surfaces
+a red banner whenever any checked row matches `move + overwrite` — the
+combination mutates the source AND discards local edits, so the
+operator gets two visual cues (banner + modal repeat) before Apply.
+
+**How `move` is safe against the Claude Code config reflector (R-31 / X7):**
+
+- Daemon side: `internal/claudeimport/apply.go::mutateSourceRemove` runs
+  under a per-file refcounted mutex, re-reads the source under that
+  lock, asserts the mtime has not changed since the snapshot was taken,
+  then writes via `CreateTemp` + `Rename` (atomic on POSIX,
+  best-effort-atomic on Windows).
+- TS side: the existing `vscode/mcp-gateway-dashboard/src/claude-config-sync.ts`
+  reflector ALREADY implements CAS-style retry over a sha256 of the
+  `mcpServers` value before / after its own writes. The two layers
+  jointly cover the "concurrent external write" surface — a daemon
+  write that lands between the reflector's read and rename is caught by
+  the reflector's hash mismatch and retried; a reflector write that
+  lands during the daemon's apply is caught by the daemon's mtime-CAS
+  and surfaces as `OpResult.SourceUpdated=false` with a `mtime` reason.
+
+**Provenance:** every successful copy/move appends a record to
+`~/.mcp-gateway/claude-imported.json` (atomic `CreateTemp` + `Rename`,
+in-process `sync.Mutex` serialises concurrent appenders). The next
+snapshot reads the sidecar and surfaces a `◊ previously imported`
+badge with hover-timestamp on rows seen before — operator can decide
+whether to re-import or skip.
+
+**Provenance write failure** (e.g. Windows AV scanner racing the rename)
+is surfaced via `OpResult.ProvenanceWarning` — the Apply succeeded but
+the badge will not show this import.
+
+REST contract (FROZEN as of v1.9.0):
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/v1/claude-code/import-snapshot?source=…&project_root=…` | Source rows + drift / provenance metadata |
+| POST | `/api/v1/claude-code/import-apply` | Per-row apply with single end-of-batch regen |
+
+Older daemons (<v1.6) return 404; the webview detects this via the
+existing `/api/v1/claude-code/compat-matrix` probe and shows
+"Upgrade gateway to v1.6+ to import" instead of calling the endpoint
+(R-24 — version-skew gate).
+
+### Known limitations — webview file dialogs
+
+- **Multi-monitor `showOpenDialog` (Windows, Q3.4).** When VSCode is on
+  a non-primary monitor, the OS Open File dialog (used by the SAP
+  Picker's `[⋮]` override fields and the Settings webview's Browse
+  buttons) may appear on the primary monitor instead of next to the
+  VSCode window. **This is upstream VSCode behaviour, not a gateway
+  bug.** Drag the dialog to the correct monitor, or move VSCode to the
+  primary monitor before clicking Browse. We surface this here rather
+  than working around it because the workarounds (custom dialog,
+  manual coordinate hint) introduce more failure modes than the quirk
+  itself.
 
 ## Connecting Claude Code to the Gateway
 

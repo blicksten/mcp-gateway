@@ -539,7 +539,15 @@ describe('claude-config-sync', () => {
 	});
 
 	describe('multi-path profile sync (getAllConfigPaths)', () => {
-		it('syncs managed entries to a secondary path (simulates ~/.claude-personal/.claude.json)', async () => {
+		it('syncs managed entries to a secondary path (simulates ~/.claude-personal/.claude.json)', async function () {
+			// BL-01 pattern (T-F.5 cross-Wave audit, 2026-05-10): under
+			// full-suite Windows load (running with claude-config-sync /
+			// SlashCommandGenerator / AddServerPanel concurrently), two
+			// reconcile() calls + CAS retries can exceed the 2000ms default
+			// mocha timeout. Pre-existing flake documented in
+			// project_phase_audit_dashboard_phase9.md (BL-01) and Phase E
+			// closure note. Bump only this test, not the suite default.
+			this.timeout(5000);
 			const primary = freshConfigPath('primary');
 			const secondary = freshConfigPath('secondary');
 

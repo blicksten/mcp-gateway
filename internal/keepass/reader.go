@@ -37,7 +37,22 @@ func (e *KeePassEntry) ZeroPassword() {
 // password is the master password (already read from file or interactive prompt).
 // keyFile is the path to a key file (optional, pass "" to skip).
 // Wraps Decode in a narrow recover() to convert panics from malformed KDBX to errors.
+//
+// Symlink-rejection invariant (T-F.5 finding MEDIUM-2, 2026-05-10): both
+// `path` and `keyFile` are Lstat'd before any read so symlinks placed at
+// the operator-configured path cannot redirect the open into an
+// unrelated sensitive file (e.g. /etc/shadow, Windows SAM). KeePass
+// credential paths must be regular files — a symlink shape is rejected
+// with a typed error rather than silently followed.
 func OpenDatabase(path string, password []byte, keyFile string) (*gokeepasslib.Database, error) {
+	if info, err := os.Lstat(path); err != nil {
+		return nil, fmt.Errorf("kdbx file: %w", err)
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("kdbx file %q is a symlink — rejected (must be a regular file)", path)
+	} else if info.IsDir() {
+		return nil, fmt.Errorf("kdbx file %q is a directory", path)
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open KDBX: %w", err)
@@ -48,6 +63,9 @@ func OpenDatabase(path string, password []byte, keyFile string) (*gokeepasslib.D
 		info, err := os.Lstat(keyFile)
 		if err != nil {
 			return nil, fmt.Errorf("key file: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("key file %q is a symlink — rejected (must be a regular file)", keyFile)
 		}
 		if info.IsDir() {
 			return nil, fmt.Errorf("key file %q is a directory", keyFile)

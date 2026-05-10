@@ -5,6 +5,151 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Daemon 1.9.0 + Extension 1.32.0] - 2026-05-10 — Wave 2 (Import-from-Claude)
+
+**Plan:** [docs/PLAN-sap-picker-and-import-mcp.md](docs/PLAN-sap-picker-and-import-mcp.md) Wave 2 (Phases D + E + F).
+
+### Added — Daemon
+
+- **Import-from-Claude REST endpoints** under FROZEN `/api/v1/claude-code/*`
+  namespace (R-15 + ADR-0005 §Appendix A):
+  - `GET /api/v1/claude-code/import-snapshot?source={cc_global|cc_project|desktop}&project_root=…` — returns rows + per-row gateway-state diff with `drift_fields` + provenance badge.
+  - `POST /api/v1/claude-code/import-apply` — per-row copy/move with conflict policy (skip/overwrite), single end-of-batch `TriggerPluginRegen` (R-26 / X2 — closes the N×regen-storm under bulk import).
+- **`internal/claudeconfig/`** — `cc_global` / `cc_project` / `desktop` readers with mtime-CAS retry (R-08), unrecognized-field preservation, and lockfile acquisition.
+- **`internal/claudeconfig/rawroot.go`** — byte-level scanner that splices new `mcpServers` value into `~/.claude.json` while keeping every other top-level key (`oauthAccount`, `cachedGrowthBookFeatures`, `projects`, …) byte-identical (R-02). Zero regex; rejects duplicate `mcpServers`, non-object roots, and pathological string-escape inputs explicitly.
+- **`internal/claudeimport/`** — apply / diff / commandresolve / provenance:
+  - Refcounted per-file source-write mutex (`sourceLocks`) — entries deleted at zero waiters so the map is bounded by active concurrent paths, not total paths ever seen (F-02 audit fix).
+  - `mutateSourceRemove` mtime-CAS catches concurrent external writers (TS-side reflector) and surfaces `Status=Applied, SourceUpdated=false, Reason="mtime"` (R-31 / X7 — see ANALYSIS §R-31 for the two-layer coordination contract).
+  - `commandresolve.go` resolves `npx` / `uvx` / `node` to absolute paths via `os/exec.LookPath`; on Windows strips `.exe`/`.cmd`/`.bat` suffix for canonical name comparison.
+  - `provenance.go` — atomic `CreateTemp` + `Rename` write of `~/.mcp-gateway/claude-imported.json`; in-process `sync.Mutex` serialises concurrent appenders; `OpResult.ProvenanceWarning` surfaces non-fatal write failures.
+- **`internal/lifecycle/manager.go::RemoveServer`** signature change: now returns `(RemoveResult{Orphan bool, StopErr error}, error)`. `Orphan=true` surfaces when the OS Stop call fails — entry deletion remains unconditional (operator intent honoured even if OS process leaks). Closes R-28 / X4 (Stop-error swallow).
+
+### Added — VSCode extension
+
+- **Import-from-Claude webview** (`mcpGateway.openImportClaude` command):
+  - Sources radio (`cc_global` / `cc_project` / `desktop`); refetches on switch.
+  - Per-row checkbox + name + transport + command preview; provenance badge `◊ previously imported` + drift badge `⚠ drift: <fields>` + collision badge `◇ name in use`.
+  - Action select (copy / move) × Conflict select (skip / overwrite). `move + overwrite` surfaces a red toolbar banner whenever any CHECKED row matches — visual cue is duplicated in the Preview / Apply modal (R-23).
+  - Preview button: local-projection of final state per row — no destructive backend round-trip (spec evolution from TASKS T-E.3 — `dry_run` removed in favour of stateless host-side projection; closure record in PLAN-sap-picker-and-import-mcp.md Phase E section).
+  - Apply button: 7-state row machine (`idle` / `pending` / `in_progress` / `applied` / `skipped` / `conflict` / `error`); retry-failed-rows captures pre-reset failed-key set so a fresh `idle+checked` row cannot slip through.
+  - Host-side `coerceEdits` tamper guard: rejects payloads with `action='duplicate'` / `conflict='merge'` / unknown source / oversized rowKey before the daemon ever sees them.
+- **`mcp-ctl install-claude-code`** — unchanged contract; the new endpoints are additive under the existing FROZEN namespace and require no installer flag.
+
+### Documentation
+
+- README — new "SAP Picker" + "Import-from-Claude" sections (Wave 1 + Wave 2 features) and a "Known limitations — webview file dialogs" subsection covering Q3.4 multi-monitor `showOpenDialog` quirk.
+- `docs/ANALYSIS.md` — new section "Patterns introduced in Wave 1 + Wave 2" covering R-21 codegen, R-31 reflector hash-CAS coordination, R-03 provenance sidecar, R-02 raw-bytes-splice.
+- `docs/ADR-0005-claude-code-integration.md` — Appendix A: additivity proof for the Import endpoints under the existing FROZEN `/api/v1/claude-code/*` namespace.
+- `docs/SMOKE-2026-05-07.md` — 13-item manual smoke checklist for Windows + Linux.
+
+### Breaking
+
+None on the wire. `RemoveServer` Go signature change is structurally backward-compatible — new `Orphan` field; callers ignoring it preserve prior behaviour.
+
+### Tag-history note
+
+The daemon's git tag `v1.0.0` was a legacy stale tag from the initial public release; the next git tag jumps to **`v1.9.0`** to align with the ldflags-embedded version users see (`mcp-ctl version`). See [docs/PLAN-sap-picker-and-import-mcp.md](docs/PLAN-sap-picker-and-import-mcp.md) §C OpenQuestion 5 for the full rationale.
+
+## [Daemon 1.8.0 + Extension 1.31.0] - 2026-05-09 — Wave 1 (SAP Picker + Settings)
+
+**Plan:** [docs/PLAN-sap-picker-and-import-mcp.md](docs/PLAN-sap-picker-and-import-mcp.md) Wave 1 (Phases A + B + C).
+
+### Added — Daemon
+
+- **SAP Picker REST endpoints** under new `/api/v1/sap/*` namespace
+  (additive under existing claudeCodeCORS + authMW middleware,
+  ADR-0003 §csrf-scope precedent — comment in `internal/api/server.go`
+  references it explicitly):
+  - `GET /api/v1/sap/picker-snapshot` — joined landscape ∪ KeePass
+    rows.
+  - `POST /api/v1/sap/batch-begin` — opens a 5-minute batch window;
+    returns `{batch_id}`.
+  - `POST /api/v1/sap/batch-end` — closes the batch + fires single
+    `TriggerPluginRegen` + `RebuildTools` (R-26 / X2 fix). 409 on
+    nested batches.
+- **`internal/saplandscape/parser.go`** — regex-free `encoding/xml`
+  parser for `SAPUILandscape.xml` with `<Include>` cycle detection
+  (visited map + max depth 8), URL normalisation
+  (`%APPDATA%`/`%USERPROFILE%` expansion, `file:///C:/path` → backslash,
+  `file://server/share/...` → UNC, `\\?\` long-path passthrough).
+  Malformed XML / cycles / missing-include surface as
+  `Landscape.Warnings`, never crashes the parser (R-05 / R-06).
+- **`internal/sapcreds/keepass.go`** — production `ListEntries(kdbxPath, password, keyfile)` via
+  `gokeepasslib/v3` (MIT-licensed, validated in T-A.0 PoC). Recycle-bin
+  entries filtered. Locked-vault path returns typed
+  `keepass.ErrNoCredentials`.
+- **`internal/sapcreds/intersection.go`** — hybrid join: every landscape
+  SID returned with `kpMissing: bool` flag; KP-only entries excluded
+  (R-14 / R-30 backend).
+- **`tools/grammar-gen/`** — codegen pipeline: single YAML SoT at
+  `docs/grammar/sap-server-name.yaml` produces both Go
+  (`internal/sapname/grammar_gen.go`) and TS
+  (`vscode/mcp-gateway-dashboard/src/sap-name-grammar.gen.ts`) parsers.
+  Both are regex-free; charcode comparisons only. Staleness check at
+  `tools/grammar-gen/check`. CI job `grammar-staleness` in
+  `.github/workflows/ci.yml` (NEW — repo's first GitHub Actions
+  workflow file). 50 cross-language fixture cases at
+  `testdata/sap-name-fixtures.json` shared by Go + TS test suites
+  (R-21 / X1 fix).
+- **`mcp-ctl credential list-structured`** — new cobra subcommand
+  emitting `[{sid,client,user,kpMissing}]` JSON to stdout.
+- **`internal/api/server.go`** — `addServerInProcess` /
+  `removeServerInProcess` extracted from HTTP handlers; auto-suppress
+  `TriggerPluginRegen` + `RebuildTools` when `s.sapBatchActive()` is
+  true. Single end-of-batch regen verified by
+  `TestSapBatch_SingleRegen` (5 servers added in one batch → exactly
+  1 regen).
+
+### Added — VSCode extension
+
+- **SAP Picker webview** (`mcpGateway.openSapPicker` command): hybrid
+  picker with virtualized rows (`content-visibility: auto`),
+  3-toggle filter (registered/available/no-credentials) with
+  degenerate-state guard, per-row VSP+GUI checkboxes (disabled +
+  tooltip on `kpMissing` rows — R-30 UI), `[⋮]` expand whose state
+  survives filter (R-18) + per-row override fields (vspCommand /
+  guiCommand / guiUvProject), batch Apply (concurrency=4) with 9-state
+  row lifecycle, retry-failed-rows preserves succeeded rows,
+  force-kill button on `removed_with_orphan` rows surfaces
+  `removeServerInProcess` Orphan via confirm-dialog (R-28 UI).
+- **Settings webview** (`mcpGateway.openSettings`): sticky
+  header + footer + scroll body fits 800 px viewport (R-10), Browse
+  buttons with `defaultUri` fallback chain
+  (`currentValue → parentDir → os.homedir()` — R-17), debounced (300 ms
+  trailing) + LRU (TTL=10 s, max 64 entries) live validation (R-11),
+  Save batches all changes atomically (any one error rejects entire
+  batch, no partial writes), restart-required toast on
+  `apiUrl`/`daemonPath`/`authTokenPath`/`claudeConfigSync.{enabled,namespacePrefix,path,aggregateEntryName}`
+  with `[Restart Daemon]` action (R-29 / X5),
+  `[Import paths from mcpDashboard]` button maps the four legacy
+  `mcpDashboard.*` paths to `mcpGateway.*` equivalents (only fills
+  empty targets — does not overwrite).
+- **4 new `mcpGateway.*` settings** declared in `package.json`:
+  `defaultVspCommand`, `defaultGuiUvProject`, `defaultGuiMode`
+  (`exec` | `uv`), `uvPath`.
+- **Regex-free server-name parsing** — `vscode/mcp-gateway-dashboard/src/sap-detector.ts`
+  regex constants `VSP_RE` / `GUI_RE` DELETED; replaced by import
+  from generated `sap-name-grammar.gen.ts`.
+
+### Security
+
+- SAP routes mount with `claudeCodeCORS + authMW` only — explicit code
+  comment in `internal/api/server.go` references ADR-0003 §csrf-scope
+  precedent. Picker is a VSCode-webview origin-restricted call; csrf
+  stays off for the same reason as the existing `claude-code/*` group.
+- `coerceEdits` tamper guard (Settings + SAP Picker + Import) — host
+  validates every webview message envelope BEFORE invoking
+  `vscode.workspace.getConfiguration().update()` or the daemon REST
+  client. Tampered diffs (`disabled=false` on a `kpMissing` row,
+  unknown action enum, oversized rowKey) are dropped at the host
+  boundary.
+
+### Breaking
+
+None. All additions are backward-compatible — new REST endpoints under
+new path, new settings have sensible defaults, generated parsers
+mirror the regex behaviour they replaced.
+
 ## [1.9.1] - 2026-04-24
 
 ### Added — VSCode extension

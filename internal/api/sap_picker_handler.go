@@ -136,6 +136,14 @@ func (s *Server) handleSAPBatchEnd(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "batch_id is required")
 		return
 	}
+	// Bound batch_id length so a malicious client cannot allocate a
+	// large string + force a string-comparison cost spike under auth
+	// (T-F.5 finding LOW-1, 2026-05-10). newSAPBatchID returns 16 hex
+	// chars, so 64 is comfortable headroom for any future widening.
+	if len(req.BatchID) > 64 {
+		writeError(w, http.StatusBadRequest, "batch_id too long")
+		return
+	}
 
 	s.sapBatchMu.Lock()
 	defer s.sapBatchMu.Unlock()
@@ -169,6 +177,18 @@ func (s *Server) handleSAPBatchEnd(w http.ResponseWriter, r *http.Request) {
 // sapBatchActive reports whether a non-expired SAP batch is currently
 // open. Read by T-A.5's addServerInProcess / removeServerInProcess to
 // decide whether to skip per-call TriggerPluginRegen.
+//
+// LOCK-ORDER INVARIANT (T-F.5 finding HIGH-1, 2026-05-10): callers MUST
+// NOT hold s.cfgMu (read or write) when invoking this function. The
+// invariant exists because handleSAPBatchEnd holds sapBatchMu across
+// TriggerPluginRegen, which itself acquires cfgMu.RLock — taking
+// sapBatchMu while already holding cfgMu would create AB-BA deadlock
+// risk. Today's callers (handleAddServer / handleRemoveServer /
+// addServerInProcess / removeServerInProcess) honour the invariant
+// because they release cfgMu before checking sapBatchActive(). Future
+// refactors that move the sapBatchActive() call into a cfgMu critical
+// section MUST also restructure handleSAPBatchEnd to release sapBatchMu
+// before regen — pick one or the other; never both held at once.
 func (s *Server) sapBatchActive() bool {
 	s.sapBatchMu.Lock()
 	defer s.sapBatchMu.Unlock()
