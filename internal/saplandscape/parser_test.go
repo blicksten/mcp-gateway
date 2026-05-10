@@ -3,6 +3,7 @@ package saplandscape
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -155,7 +156,16 @@ func TestParse_UNCNormalization(t *testing.T) {
 
 // TestParse_AppDataExpansion verifies that %APPDATA% inside an Include URL
 // is expanded to the value of the APPDATA environment variable.
+//
+// Windows-only: the Include URL uses a literal backslash separator
+// (`%APPDATA%\extra.xml`) which only Windows resolves to a path; on Linux
+// the OS treats the resulting `/tmp/xyz\extra.xml` as a single filename
+// and the include is silently skipped. The cross-platform forward-slash
+// case is covered by the file:// URL variants in TestNormalizeURL.
 func TestParse_AppDataExpansion(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skipf("Windows-only env-var-with-backslash path syntax; non-Windows file systems do not split %%APPDATA%%\\file on the backslash")
+	}
 	tmpDir := t.TempDir()
 	t.Setenv("APPDATA", tmpDir)
 

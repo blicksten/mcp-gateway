@@ -18,23 +18,27 @@ import (
 
 func TestIsDaemonBasename(t *testing.T) {
 	cases := []struct {
-		input string
-		want  bool
+		input       string
+		want        bool
+		windowsOnly bool // skipped on non-Windows because filepath.Base does not split on `\`
 	}{
-		{"mcp-gateway", true},
-		{"mcp-gateway.exe", true},
-		{"MCP-Gateway.exe", true}, // Windows case-insensitive
-		{"MCP-GATEWAY", true},
-		{"/usr/local/bin/mcp-gateway", true}, // strips dir prefix
-		{`C:\Program Files\MCP\mcp-gateway.exe`, true},
-		{"notepad.exe", false},
-		{"chrome.exe", false},
-		{"mcp-gateway-helper", false}, // similar but different
-		{"go", false},
-		{"", false},
+		{input: "mcp-gateway", want: true},
+		{input: "mcp-gateway.exe", want: true},
+		{input: "MCP-Gateway.exe", want: true}, // Windows case-insensitive
+		{input: "MCP-GATEWAY", want: true},
+		{input: "/usr/local/bin/mcp-gateway", want: true}, // strips dir prefix
+		{input: `C:\Program Files\MCP\mcp-gateway.exe`, want: true, windowsOnly: true},
+		{input: "notepad.exe", want: false},
+		{input: "chrome.exe", want: false},
+		{input: "mcp-gateway-helper", want: false}, // similar but different
+		{input: "go", want: false},
+		{input: "", want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.input, func(t *testing.T) {
+			if tc.windowsOnly && runtime.GOOS != "windows" {
+				t.Skipf("Windows-only path syntax (backslash separator); filepath.Base on %s does not strip the prefix", runtime.GOOS)
+			}
 			got := isDaemonBasename(tc.input)
 			assert.Equal(t, tc.want, got)
 		})
