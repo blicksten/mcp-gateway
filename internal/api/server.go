@@ -469,6 +469,14 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/probe-result", s.handleClaudeCodeProbeResult)
 			r.Post("/plugin-sync", s.handleClaudeCodePluginSync)
 			r.Get("/compat-matrix", s.handleClaudeCodeCompatMatrix)
+
+			// Import-from-Claude routes (Phase D T-D.1). Additive
+			// under the FROZEN /api/v1/claude-code/* namespace per
+			// ADR-0005 §FROZEN appendix. Reuses claudeCodeCORS+authMW
+			// (no csrfProtect) — same precedent as ADR-0003 §csrf-scope:
+			// Bearer-auth webview client, not a cookie session.
+			r.Get("/import-snapshot", s.handleImportSnapshot)
+			r.Post("/import-apply", s.handleImportApply)
 		})
 
 		// SAP Picker routes (Phase A T-A.1). Same middleware shape as
