@@ -4,7 +4,8 @@
 **Companion files:** [docs/TASKS-docs-spikes-2026.md](TASKS-docs-spikes-2026.md), [docs/REVIEW-docs-spikes-2026.md](REVIEW-docs-spikes-2026.md)
 **Source spike:** [docs/spikes/2026-05-05-server-rename.md](spikes/2026-05-05-server-rename.md) (v4 — fully validated; revision history confirms all 13 findings F-1..F-13 from prior audit `checkpoint-check-d1c32725` were addressed)
 **Created:** 2026-05-06 by Porfiry [Opus 4.7]
-**Status:** Drafted by dev-lead in pipeline `planning-19b7b15b`; awaits operator approval before `/run docs-spikes-2026`
+**Actualized:** 2026-05-11 by Porfiry [Opus 4.7] — see §11 below for the diff vs. the 2026-05-06 draft.
+**Status:** Drafted by dev-lead in pipeline `planning-19b7b15b`; actualized in-session 2026-05-11; awaits operator approval before `/run docs-spikes-2026`
 
 ---
 
@@ -18,9 +19,9 @@ The feature blocks at API and UI on **SAP-named** servers (`vsp-XXX`, `sap-gui-X
 
 | Item | Value |
 |------|-------|
-| Total LOC | ~990 (Go ~540, TS ~450) |
-| Total tests | **34** (21 Go + 13 TS) plus a 9-item manual E2E checklist — spike's 31 base + Test 7f (F-ARCH-4) + Test 19b (T3.9) |
-| Expected duration | ~16 hours of focused work, gated across 4 phases |
+| Total LOC | **~940** (Go ~490, TS ~450) — **down ~50** vs. 2026-05-06 draft (no `internal/api/sap.go` because `mcp-gateway/internal/sapname.IsSAP` already exists from sap-picker T-A.2 codegen) |
+| Total tests | **33** (20 Go + 13 TS) plus a 9-item manual E2E checklist — spike's 31 base + Test 7f (F-ARCH-4) + Test 19b (T3.9) − Test 13 (TestIsSAPName moved to existing `internal/sapname/grammar_gen_test.go`); **+1 trivial extension to `MockSecretStorage` failure-injection** (Phase 2 prereq T2.0) |
+| Expected duration | **~14.5 hours** of focused work, gated across 4 phases (down from 16h: −1h sap.go authoring, −0.5h test 13 retire, +0.5h spike sanity-check + mock extension) |
 | Phases | **4** (Go API → TS client → TS UI → Documentation/E2E/VSIX) |
 | Risk level | MEDIUM — touches lifecycle manager, secret store, and Claude Code config sync; mitigated by Plan A rollback + index-first credential migration |
 
@@ -36,7 +37,7 @@ The architect (Step 1 of pipeline `planning-19b7b15b`) raised 9 findings (2 HIGH
 | F-ARCH-4 | MEDIUM | T1.17 (Phase 1 new test = Test 7f) | Test 7f added to Phase 1 with assertion shape: `lm.RemoveServer=nil but Stop timed out → silent zombie child` |
 | F-ARCH-5 | LOW | Plan structure decision | **4-phase** kept (rationale in §4) — fine-grained PAL gates per concern outweigh the ~200 LOC collapse benefit |
 | F-ARCH-6 | LOW | T1.0 (Phase 1 prerequisite) | Verification step "lm-error-injection helpers + SecretStorage mock helpers exist" added; if missing, +2-3h documented in plan-level estimate |
-| F-ARCH-7 | LOW | T1.5 (Phase 1 task description) | Go regex updated to `(?:-\d{3})?` non-capturing group for parity with TS |
+| F-ARCH-7 | LOW | T1.5 (Phase 1 task description) — **OBSOLETED by 2026-05-11 actualization** | No regex is rolled at all. Plan now imports `mcp-gateway/internal/sapname` (regex-free, codegen from `docs/grammar/sap-server-name.yaml`, R-21) and calls `sapname.IsSAP(name)`. Drift between Go and TS detectors is structurally impossible because both sides are emitted from the same YAML. |
 | F-ARCH-8 | LOW | T1.21 (Phase 1 Test 11 task description) | Test 11 (no-op rename) response body assertion: `{'status':'updated'}` |
 | F-ARCH-9 | LOW | Phase 1 description notes | `context.Background()` rollback choice + rate-limit follow-up notes included verbatim in Phase 1 description below |
 
@@ -54,18 +55,18 @@ The architect (Step 1 of pipeline `planning-19b7b15b`) raised 9 findings (2 HIGH
 ## 5. Phase Breakdown
 
 ```
-Phase 1 — Go API                  (≈ 540 LOC, 21 tests, ~7.5 h)   ← rename branch + isSAPName + Plan A rollback
-Phase 2 — TS Extension Client     (≈ 75 LOC,  6 tests,  ~1.3 h)   ← gateway-client.patchServer + credential-store
+Phase 1 — Go API                  (≈ 490 LOC, 20 tests, ~6.5 h)   ← rename branch + sapname.IsSAP import + Plan A rollback (no new sap.go)
+Phase 2 — TS Extension Client     (≈ 85 LOC,  6 tests,  ~1.5 h)   ← +T2.0 mock-knob (~10 LOC) + gateway-client.patchServer + credential-store
 Phase 3 — TS Extension UI         (≈ 125 LOC, 7 tests,  ~2.2 h)   ← package.json + extension.ts handler + UI tests
-Phase 4 — Documentation + E2E     (≈ — LOC,   9 manual, ~2.0 h)   ← README + manual E2E + VSIX deploy + commit
-PAL gate cycles + buffer          (—,  —, ~3.0 h)                 ← codereview/thinkdeep/rollback fix-loops across 4 phases
+Phase 4 — Documentation + E2E     (≈ — LOC,   9 manual, ~2.0 h)   ← README + manual E2E + VSIX deploy + commit (target: extension v1.33.0)
+PAL gate cycles + buffer          (—,  —, ~2.3 h)                 ← codereview/thinkdeep/rollback fix-loops across 4 phases
                                        ─────────────────
-                                       ≈ 16 h
+                                       ≈ 14.5 h  (was 16 h on 2026-05-06; −1.5 h via sapname reuse + helper-existence verify)
 ```
 
 ### Phase 1 — Go API
 
-**Goal:** Implement the gateway-side rename branch in `handlePatchServer` with Plan A ordering (lm.AddServer first → lm.RemoveServer second → cfg-mutation third), the `isSAPName` helper, model change, and 19 Go tests including 6 new failure-path cases.
+**Goal:** Implement the gateway-side rename branch in `handlePatchServer` with Plan A ordering (lm.AddServer first → lm.RemoveServer second → cfg-mutation third), the `sapname.IsSAP` import (from existing `internal/sapname` codegen — no new file, no regex; see T1.5 for rationale), model change, and **20 Go test functions across 18 test tasks** (T1.22 contains 3 sub-functions: `_RebuildToolsCalled`, `_NilGateway_NoPanic`, `_PatchEnvOnly_NoRebuildTools`) — including 6 new failure-path cases (T1.12..T1.17).
 
 **F-ARCH-1 / F-ARCH-9 notes (carry into commit message):**
 
@@ -75,19 +76,16 @@ PAL gate cycles + buffer          (—,  —, ~3.0 h)                 ← codere
 
 **Tasks:**
 
-- [ ] **T1.0 (F-ARCH-1, F-ARCH-6, F-SPEC-1 — prerequisites; THREE edit targets in the spike):** Update [docs/spikes/2026-05-05-server-rename.md](spikes/2026-05-05-server-rename.md) on the following targets:
+- [ ] **T1.0 (F-ARCH-1, F-ARCH-6, F-SPEC-1 — prerequisites; ACTUALIZED 2026-05-11):** Update [docs/spikes/2026-05-05-server-rename.md](spikes/2026-05-05-server-rename.md) on the following targets:
     1. **Line 27** — the inconsistency-window bullet starting `Between region (a) and (b)` — to read `Bounded to lm.Stop duration (up to ~9s for stdio, ~2s for HTTP/SSE)` instead of the current `Bounded to ~1ms in practice`. Locate by content (`Between region (a) and (b)`) rather than by raw line number to be resilient against unrelated edits. **Note: line 22 is the harmless `(b)`-row of the atomic-regions table — do NOT edit it.**
-    2. **Lines 263-264 (F-SPEC-1)** — the `sap.go` code block must use **non-capturing** groups for parity with PLAN T1.5 and the F-ARCH-7 resolution. Change:
-       ```go
-       sapVSPRe = regexp.MustCompile(`^vsp-[A-Z0-9]{3}(-\d{3})?$`)
-       sapGUIRe = regexp.MustCompile(`^sap-gui-[A-Z0-9]{3}(-\d{3})?$`)
-       ```
-       to:
-       ```go
-       sapVSPRe = regexp.MustCompile(`^vsp-[A-Z0-9]{3}(?:-\d{3})?$`)
-       sapGUIRe = regexp.MustCompile(`^sap-gui-[A-Z0-9]{3}(?:-\d{3})?$`)
-       ```
-    3. ALSO: verify `internal/api/server_test.go` already exposes `lm-error-injection helpers` (used by Tests 7/7b/7c) and that `vscode/mcp-gateway-dashboard/src/test/helpers/` has SecretStorage mock helpers (used by Test 16b). If either set is missing, log +2–3 h to the plan-level estimate.
+    2. **Lines 257-270 (F-SPEC-1, REWRITTEN 2026-05-11):** the §"3. SAP name helper" block currently proposes a new `internal/api/sap.go` with hand-rolled regex. **REWRITE the block** to read: *"3. SAP name helper — gateway-side enforcement uses the existing regex-free codegen package `mcp-gateway/internal/sapname` (emitted by `tools/grammar-gen` from `docs/grammar/sap-server-name.yaml`, R-21). Import the package in `internal/api/server.go` and call `sapname.IsSAP(name)` for the rename refusal. No new file. No regex (CLAUDE.md "Regex Discipline (MANDATORY)" rule). Drift between Go and TS detectors is structurally impossible because both sides are emitted from the same YAML."* The hand-rolled regex code block must be deleted (the comparison sample for `(?:-\d{3})?` non-capturing group becomes moot — there is no Go regex to compare to TS regex).
+    3. **Verify pre-conditions (already satisfied as of 2026-05-11; record in REVIEW):**
+       - `lm-error-injection` helper: ✅ present (`testStopHook` in [internal/lifecycle/manager.go:55](../internal/lifecycle/manager.go#L55), gated to tests).
+       - `MockSecretStorage`: ✅ present (`vscode/mcp-gateway-dashboard/src/test/mock-vscode.ts:242`) and already imported by `credential-store.test.ts`. **Limitation:** the existing mock has no failure-injection knob — addressed by net-new T2.0 below (~10 LOC extension), NOT by a separate helper file.
+       - **No estimate inflation needed** — both helpers exist; the +2–3h overrun warned in the 2026-05-06 draft does not apply.
+- [ ] **T1.0b (NEW 2026-05-11 — cross-spike sanity check before T1.3):** Read both [docs/spikes/2026-05-08-mcp-server-routing-bypasses.md](spikes/2026-05-08-mcp-server-routing-bypasses.md) and [docs/spikes/2026-05-09-reflector-coordination.md](spikes/2026-05-09-reflector-coordination.md) and record in REVIEW one paragraph each:
+    1. **2026-05-08 (routing bypasses)** — confirm that since F1 cleanup landed, **all** MCP routing flows through gateway (`.mcp.json` stdio entries removed; `~/.claude.json::mcpServers` namespaced under `mcp-gateway:*`). Therefore `RebuildTools` after rename (T1.3 step 5) is the single channel through which clients learn the new name; no additional cross-window broadcast is needed. F3 (zombie children on Stop) is being addressed in `sap-picker-and-import-mcp` T-A.5 and is independent of rename.
+    2. **2026-05-09 (reflector coordination)** — confirm that the `~/.claude.json` propagation path used by manual E2E item 9 (T4.1) is the **TS-side** reflector `vscode/mcp-gateway-dashboard/src/claude-config-sync.ts`, with its own CAS-style content-fingerprint retry. There is **no** Go-side `internal/api/claude_config_sync.go` despite what some older plan text in the wider repo may suggest. Rename does not need a new daemon hook — the next reflector tick after `cache.refresh()` carries the new name into `~/.claude.json`.
 - [ ] **T1.1:** Add `NewName *string` field to `models.ServerPatch` in [internal/models/types.go](../internal/models/types.go) — pointer so empty string is distinguishable from "field absent". JSON tag `json:"new_name,omitempty"`.
 - [ ] **T1.2:** Add `ValidateServerName` invocation path: confirm existing `models.ValidateServerName` works on `*patch.NewName` and produces a 400 with the existing error wording. No new validator function needed.
 - [ ] **T1.3:** Implement `handlePatchServer` rename branch in [internal/api/server.go:824](../internal/api/server.go#L824). Follow the validation order pinned in spike §"Validation order (pinned)" — JSON decode → SAP refusal (only when `patch.NewName != nil`) → ValidateServerName → existing env/header validation → cfgMu.Lock → 404 lookup → scCopy build/merge → scCopy.Validate → branch on rename. Rename branch implements Plan A:
@@ -97,21 +95,12 @@ PAL gate cycles + buffer          (—,  —, ~3.0 h)                 ← codere
   - **Step 4** `if !scCopy.Disabled { s.lm.Start(r.Context(), newName) }` — **warn-only**, do NOT roll back (parity with `handleAddServer:787-789`).
   - **Step 5** `if s.gw != nil { s.gw.RebuildTools() }`; `s.TriggerPluginRegen()`.
   - **Response:** 200 with `{"status":"patched","old_name":name,"new_name":newName}`.
-- [ ] **T1.4:** Add SAP refusal pre-check at top of handler — fires only when `patch.NewName != nil`; if `isSAPName(name) || isSAPName(*patch.NewName)` → 400 with body message exactly `"renaming SAP-named servers is not supported"`. Confirms the codebase 400-for-validation convention. **Existing env-only / disabled-only PATCHes against SAP-named servers must still work**; SAP non-goal is renaming, not all-mutation.
-- [ ] **T1.5 (F-ARCH-7):** Create new file `internal/api/sap.go` with two regexes using **non-capturing** groups for parity with the TS detector at [vscode/mcp-gateway-dashboard/src/sap-detector.ts:37-38](../vscode/mcp-gateway-dashboard/src/sap-detector.ts#L37):
+- [ ] **T1.4 (ACTUALIZED 2026-05-11 — call-site renamed):** Add SAP refusal pre-check at top of handler — fires only when `patch.NewName != nil`; if `sapname.IsSAP(name) || sapname.IsSAP(*patch.NewName)` → 400 with body message exactly `"renaming SAP-named servers is not supported"`. Confirms the codebase 400-for-validation convention. **Existing env-only / disabled-only PATCHes against SAP-named servers must still work**; SAP non-goal is renaming, not all-mutation.
+- [ ] **T1.5 (F-ARCH-7 — REWRITTEN 2026-05-11):** Use the existing regex-free codegen helper `mcp-gateway/internal/sapname.IsSAP(name string) bool` ([internal/sapname/grammar_gen.go:127](../internal/sapname/grammar_gen.go#L127)). It is emitted by `tools/grammar-gen` from [docs/grammar/sap-server-name.yaml](../docs/grammar/sap-server-name.yaml) (R-21, sap-picker T-A.2, commit `85cbebc`) and uses only string-prefix and char-code-range checks per CLAUDE.md "Regex Discipline (MANDATORY)".
 
-  ```go
-  var (
-      sapVSPRe = regexp.MustCompile(`^vsp-[A-Z0-9]{3}(?:-\d{3})?$`)
-      sapGUIRe = regexp.MustCompile(`^sap-gui-[A-Z0-9]{3}(?:-\d{3})?$`)
-  )
+  **No new file.** Add the import line `"mcp-gateway/internal/sapname"` to [internal/api/server.go](../internal/api/server.go) (the rename refusal site in T1.4 is the only call site) and replace the proposed `isSAPName(name)` calls with `sapname.IsSAP(name)`.
 
-  func isSAPName(name string) bool {
-      return sapVSPRe.MatchString(name) || sapGUIRe.MatchString(name)
-  }
-  ```
-
-  No capturing groups (we only test membership, not extract SID/client) — parity with TS regex without leaking match-group identifiers.
+  **Drift impossibility:** because both Go and TS detectors are emitted from the same YAML grammar, F-ARCH-7's original concern (capturing-group / parity drift between hand-rolled Go regex and the TS regex literal) is structurally eliminated — there are no regex literals on either side anymore, just YAML-derived grammar.
 - [ ] **T1.6:** Test 1 — `TestPatchServer_Rename_Success`: name swap in cfg + lm; env/headers preserved; auto-start under new name; old name absent from `cfg.Servers`.
 - [ ] **T1.7:** Test 2 — `TestPatchServer_Rename_NameCollision`: pre-populate cfg with both `ctx7` and `ctx8`; PATCH ctx7 with `new_name=ctx8` → 409; cfg + lm unchanged.
 - [ ] **T1.8:** Test 3 — `TestPatchServer_Rename_InvalidName`: `new_name=""` and `new_name="bad name with spaces"` both → 400 with `ValidateServerName` error wording.
@@ -129,12 +118,12 @@ PAL gate cycles + buffer          (—,  —, ~3.0 h)                 ← codere
 - [ ] **T1.20:** Test 10 — `TestPatchServer_Rename_DisabledFlag`: rename of disabled server: no auto-start under new name (Step 4 guard `if !scCopy.Disabled`).
 - [ ] **T1.21 (F-ARCH-8):** Test 11 — `TestPatchServer_RenameNoOp_SameName`: PATCH `{new_name: "ctx7", add_env: [...]}` with `name == new_name` → rename branch SKIPPED, env/headers patch executes; **assertion: response body == `{"status":"updated"}`** (NOT `{"status":"patched","old_name":...,"new_name":...}` — that latter shape only fires when an actual rename happens). Env/headers actually applied to cfg.
 - [ ] **T1.22:** Test 12 + 12b + 12c — `TestPatchServer_Rename_RebuildToolsCalled` (per-backend mcp.Server cleaned up for old, created for new on `s.gw != nil` path), `TestPatchServer_Rename_NilGateway_NoPanic` (server constructed without `gw` — rename succeeds without RebuildTools call), `TestPatchServer_PatchEnvOnly_NoRebuildTools` regression guard (in-place env-only PATCH does NOT call RebuildTools — wire spy `proxy.Gateway` with a counter; assert `count == 0`).
-- [ ] **T1.23:** Test 13 — `TestIsSAPName`: positive cases `vsp-DEV`, `vsp-DEV-100`, `sap-gui-DEV`, `sap-gui-DEV-100`; negative cases `vsp-dev` (lowercase), `vsp-DE` (too short), `vspDEV` (no hyphen), `vsp-DEV-1000` (4-digit suffix), `vsp-DEV-`, `random-server`.
+- [ ] **T1.23 (REWRITTEN 2026-05-11):** ~~Test 13 `TestIsSAPName`~~ **DROPPED** — the codegen helper has its own grammar tests at [internal/sapname/grammar_gen_test.go](../internal/sapname/grammar_gen_test.go); duplicating them in `internal/api/sap_test.go` would violate DRY and tie us to a generated symbol surface. **Replacement:** Test 13 — `TestPatchServer_RenameRefusal_UsesSapnamePackage`: assert that the rename branch refuses (a) `vsp-DEV` (positive case), (b) `random-server` (negative — must NOT 400-for-SAP; rename proceeds normally). Lock down that the rename refusal call site actually invokes `sapname.IsSAP` rather than a regression to a hand-rolled check (covered indirectly by tests 5/6 already, but a fresh test with `random-server` makes the negative path explicit).
 - [ ] **T1.24:** Run `go test ./...` + `go vet ./...` + `go build ./...` — must all pass with zero failures. Quote test count + failures into the GATE evidence block.
 
 **Rollback (Phase 1):**
 
-If Phase 1 lands a regression, revert via `git revert <commit-hash>` of the Phase 1 commit. The change is contained in three files (`internal/models/types.go`, `internal/api/server.go`, `internal/api/sap.go`) plus tests. No DB migrations, no config-file format change, no external service contract change. Existing PATCH callers (env-only, headers-only, disabled-only) are byte-identical because the rename branch is only entered when `patch.NewName != nil && *patch.NewName != name`. Daemon restart picks up reverted binary cleanly.
+If Phase 1 lands a regression, revert via `git revert <commit-hash>` of the Phase 1 commit. The change is contained in **two files** (`internal/models/types.go` for the `NewName *string` field, `internal/api/server.go` for the rename branch + `sapname` import) plus tests. No new file (`internal/api/sap.go` was retired in the 2026-05-11 actualization in favor of importing the existing `mcp-gateway/internal/sapname` package). No DB migrations, no config-file format change, no external service contract change. Existing PATCH callers (env-only, headers-only, disabled-only) are byte-identical because the rename branch is only entered when `patch.NewName != nil && *patch.NewName != name`. Daemon restart picks up reverted binary cleanly.
 
 - [ ] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding)
 
@@ -143,6 +132,8 @@ If Phase 1 lands a regression, revert via `git revert <commit-hash>` of the Phas
 **Goal:** Implement the extension-side gateway client signature update (`patchServer` accepts `new_name`), the credential-store rename helper with index-first ordering, and the credentials listing helper. 5 unit tests including the load-bearing crash-recovery test (T2.5 / Test 16b).
 
 **Tasks:**
+
+- [ ] **T2.0 (NEW 2026-05-11 — Phase 2 prerequisite, ~10 LOC):** Extend `MockSecretStorage` in [vscode/mcp-gateway-dashboard/src/test/mock-vscode.ts:242](../vscode/mcp-gateway-dashboard/src/test/mock-vscode.ts#L242) with a failure-injection knob — a `failAfterNStores(n: number, error: Error)` method that arms the mock to throw `error` on the (n+1)-th `store()` call, leaving the first n calls passing through normally. Also a matching `failAfterNGets(n, error)` for symmetry. **Both are no-ops by default** — existing call sites (`commands.test.ts:37`, `credential-store.test.ts:8`, `add-server-panel.test.ts:48`, `sap-detail-panel.test.ts:26`, `server-detail-panel.test.ts:26`) continue to compile and pass byte-identically. Required by T2.5 / Test 16b "crash mid-rename → reconcile recoverable" which needs `secrets.store` to throw after the first key copied. **Why not a separate helper file:** keeping the failure-injection in the existing mock means there is one MockSecretStorage type for the whole extension test suite; a separate "FailingMockSecretStorage" subclass would create a second hierarchy and a new import path for tests that need both behaviors.
 
 - [ ] **T2.1:** Update `patchServer` signature in [vscode/mcp-gateway-dashboard/src/gateway-client.ts](../vscode/mcp-gateway-dashboard/src/gateway-client.ts) to accept the new shape:
 
@@ -169,7 +160,7 @@ If Phase 1 lands a regression, revert via `git revert <commit-hash>` of the Phas
 - [ ] **T2.4 (F-ARCH-2 — option (a) chosen; F-SPEC-2 corrected assertion):** Test 17 — `credential-store.test.ts — renameServerCredentials race + stranded-index-detection`. Setup: pre-populate index with `{ctx7: {env:[K1,K2], headers:[]}}`. Spawn two concurrent operations: (a) `storeEnvVar('ctx7', 'K3', 'v')`, (b) `renameServerCredentials('ctx7', 'ctx8')`. Force ordering via mock-call-order recorder so the `storeEnvVar` chain task runs AFTER the `renameServerCredentials` chain task completes (post-rename `_addToIndex('ctx7','env','K3')` resurrects the `ctx7` index entry per [credential-store.ts:232-234](../vscode/mcp-gateway-dashboard/src/credential-store.ts#L232)). Assert final state: index = `{ctx8: {env:[K1,K2], headers:[]}, ctx7: {env:[K3], headers:[]}}` (ctx7 resurrected by post-rename storeEnvVar); secrets exist for `mcpGateway/ctx8/env/K1`, `mcpGateway/ctx8/env/K2`, `mcpGateway/ctx7/env/K3`. **Then call `reconcile()` and assert the ctx7 index entry is NOT pruned** — secret K3 is still present, so reconcile (`_reconcileLocked`, [credential-store.ts:134-179](../vscode/mcp-gateway-dashboard/src/credential-store.ts#L134)) cannot identify it as logically orphaned (it only prunes index entries whose secrets are missing, not entries whose secrets are stale-but-present). Document in REVIEW: stranded ctx7 index entry persists after rename if a concurrent `storeEnvVar` resurrects it — manual cleanup via a future `auditOrphanSecrets` command is the documented mitigation path. **Do NOT assert reconcile prunes the entry — that assertion would be incorrect.**
 
   **Decision rationale (F-ARCH-2):** Option (a) chosen over option (b) because (1) the orphan-detection assertion makes the existing race observable as a test-recorded behavior rather than waiting for a future audit, (2) the alternative (audit storeEnvVar/storeHeader to move secrets.store inside _chainIndexMutation) is a wider refactor that touches the public contract of credential-store and could destabilize Phase 11 of audit-dashboard track which already shipped async token caching changes, (3) keeping the test ensures any future move of secrets.store inside _chainIndexMutation is validated against this race semantics.
-- [ ] **T2.5:** Test 16b — `credential-store.test.ts — crash mid-rename → reconcile recoverable`. Force `secrets.store` to throw after first key copied (mock SecretStorage rejects every call after the first `store()`); the `_chainIndexMutation` callback throws mid-Step-2; assert: index has `{newName: entry-shape}` (Step 1 committed), one secret partially migrated, `_setIndex` for cleanup not invoked. Then call `reconcile()`; assert recovery — orphan-secret keys remain (reconcile doesn't auto-prune secrets without index entries — documented limitation), but index is consistent and no double-entry exists.
+- [ ] **T2.5 (ACTUALIZED 2026-05-11 — uses T2.0 knob):** Test 16b — `credential-store.test.ts — crash mid-rename → reconcile recoverable`. Use the T2.0 `failAfterNStores(1, new Error('SecretStorage unavailable'))` knob to make `secrets.store` throw after the first key copied; the `_chainIndexMutation` callback throws mid-Step-2; assert: index has `{newName: entry-shape}` (Step 1 committed), one secret partially migrated, `_setIndex` for cleanup not invoked. Then call `reconcile()`; assert recovery — orphan-secret keys remain (reconcile doesn't auto-prune secrets without index entries — documented limitation), but index is consistent and no double-entry exists.
 - [ ] **T2.6:** Test 14 — `gateway-client.test.ts — patchServer with new_name`: http stub records `PATCH /api/v1/servers/ctx7` with body `{new_name: "ctx8"}` and `Authorization` header from `buildAuthHeader()`; response shape `{status, old_name, new_name}` parsed correctly.
 - [ ] **T2.7:** Test 15 — `credential-store.test.ts — renameServerCredentials migrates env+header`: pre-populated index + secrets; rename ctx7 → ctx8; assert all secrets moved from old to new key, old keys deleted, index updated; **assert index updated to point at newName BEFORE first `secrets.store` call** (verifies STEP 1 ordering — captured via mock-call-order recorder).
 - [ ] **T2.8:** Test 16 — `credential-store.test.ts — renameServerCredentials handles missing entry`: rename a server not in index → early return, no error, no secret operations recorded.
@@ -225,8 +216,8 @@ If Phase 1 lands a regression, revert via `git revert <commit-hash>` of the Phas
   8. **(NEW per F-ARCH-3)** Credential-migration failure UX. Pre-arrange VSCode SecretStorage to be in a degraded state (e.g. lock the user's keychain on macOS / revoke DPAPI on Windows for the test machine — alternatively, mock via the test harness). Trigger rename. Verify: gateway shows new name; warning toast appears with exact wording from T3.2; secrets remain queryable under old name via `mcp-ctl credential list`; tree shows new name; subsequent restart of the new-name server logs missing-credentials warnings.
   9. **(NEW per F-ARCH-3)** `~/.claude.json` propagation. Before rename: confirm `mcp-gateway:ctx7` entry exists in `~/.claude.json::mcpServers` (claude-config-sync wrote it). Trigger rename ctx7 → ctx8. Within `cache.refresh + claude-config-sync` window (~1–2s of polling), confirm `mcp-gateway:ctx7` is removed and `mcp-gateway:ctx8` is added in `~/.claude.json::mcpServers` with the same Bearer header reference. Verify Claude Code 2.x picks up the change without restart (via FS watcher); aggregate `/mcp` URL unchanged so existing connections stay valid; `claude mcp list` after a few seconds reflects the new namespaced name.
 - [ ] **T4.2:** README "Renaming a server" section in `README.md`: explain the UI flow (right-click server → Rename Server → enter new name → confirm), the SAP-name limitation, the credential preservation behavior, and the `~/.claude.json` automatic propagation. Add a callout noting Plan A rollback semantics (atomic rollback on lm-removal failure) and the credential-migration failure path with explicit "remains under old name in keychain" wording.
-- [ ] **T4.3:** CHANGELOG.md entry under Unreleased / next version (match existing CHANGELOG semver cadence — `vNN.NN.0` increments by minor for new feature). Sections: **Added** (rename via PATCH new_name + extension Rename Server command), **Security** (SAP refusal both sides + index-first credential migration), **Known limitations** (orphan secrets after credential-migration failure require manual cleanup; documented via Tracker reference).
-- [ ] **T4.4:** ROADMAP.md update — add a new track section "Server Rename track" with one-line Phase summary, link to plan + spike, mark all 4 phases complete with commit hashes after Phase 4 commits.
+- [ ] **T4.3 (ACTUALIZED 2026-05-11 — version anchor):** CHANGELOG.md entry under the next minor — **target version `v1.33.0`** (extension currently `1.32.0` per [vscode/mcp-gateway-dashboard/package.json:5](../vscode/mcp-gateway-dashboard/package.json#L5), shipped via `54cd911` "chore(vsix): bump extension 1.30.1 -> 1.32.0"). Earlier plan-internal references to "v1.6.0" / "v1.7.0" are stale (those were the gateway-side numbers from Phase 16-17, not the post-Wave-2 extension semver). Sections: **Added** (rename via PATCH new_name + extension Rename Server command), **Security** (SAP refusal via `sapname.IsSAP` codegen on both sides + index-first credential migration), **Known limitations** (orphan secrets after credential-migration failure require manual cleanup; documented via tracker `v17-rename-orphan-audit` reference).
+- [ ] **T4.4 (ACTUALIZED 2026-05-11):** ROADMAP.md update — promote the existing "Server Rename Feature Track (Drafted)" section from `Drafted` to `Released` with all 4 phases marked complete with commit hashes after Phase 4 commits. Note in the section header that the actualization on 2026-05-11 retired the hand-rolled `internal/api/sap.go` in favor of `mcp-gateway/internal/sapname` codegen reuse (per R-21).
 - [ ] **T4.5:** Final security cross-validation pass via PAL `mcp__pal__codereview` (model: `gpt-5.2-pro`, gate_mode=true) on all changed files across Phases 1–3. Findings at any severity → fix in-cycle. If PAL MCP unavailable, fall back to internal cross-model review per CLAUDE.md (Agent tool, different model tier).
 - [ ] **T4.6:** Commit + push: stage VSIX + source + docs in a single commit per CLAUDE.md VSCode Extension Build Discipline. Push to `origin/main`. Inspect commit and push output for hook failures per Post-Commit/Push Discipline. Notify operator (per Git & GitLab section) and offer to push if not auto-pushed.
 - [ ] **T4.7:** Post-push smoke: verify GitLab CI pipeline green (gitleaks, dogfood-smoke, go test, npm test). If any CI step fails, fix in-cycle (do not weaken rules per CLAUDE.md).
@@ -279,6 +270,23 @@ After operator approval:
 1. **Should T2.4 / Test 17 audit option (b) be promoted to a follow-up tracker?** Decision in §3 chose option (a) with the orphan-detection assertion. If `reconcile()` cannot detect orphan-secret-without-index in the test, log a follow-up tracker `v17-rename-orphan-audit` to either extend reconcile or move secrets.store inside `_chainIndexMutation`.
 2. **Should compile time of Phase 4 T4.5 PAL pass include all Phase 1–3 commits as a single review?** Recommended yes — the surface area of ~990 LOC is reviewable in one PAL pass and catches cross-phase contract drift (e.g. response body shape mismatch between Go and TS).
 3. **Should the manual E2E `~/.claude.json` propagation timing (item 9) be tightened?** Currently `~1–2s of polling`; this depends on `cache.startAutoRefresh` interval. If E2E reveals propagation lag exceeds operator tolerance, raise to a follow-up tracker; do not block GATE 4.
+
+## 11. Actualization log
+
+**2026-05-11 — drift sweep before first `/run`** (this session, by Porfiry [Opus 4.7]):
+
+| # | Change | Rationale | Affected items |
+|---|---|---|---|
+| 1 | T1.5 dropped hand-rolled `internal/api/sap.go` regex helper. Plan now imports `mcp-gateway/internal/sapname.IsSAP` from existing YAML-grammar codegen ([internal/sapname/grammar_gen.go](../internal/sapname/grammar_gen.go), shipped in commit `85cbebc` as part of sap-picker T-A.2). | Between 2026-05-06 (plan draft) and 2026-05-11, the SAP server-name detector source-of-truth moved to `docs/grammar/sap-server-name.yaml` with Go + TS codegen. R-21 ("never re-introduce a regex literal") + CLAUDE.md "Regex Discipline (MANDATORY)" make a hand-rolled regex a deliberate violation. Codegen is regex-free (string-prefix + char-code-range only). | T1.5 rewritten; T1.4 call-site renamed `isSAPName` → `sapname.IsSAP`; T1.0 spike-edit target #2 reframed (delete §3 SAP helper code block, replace with reuse note); T1.23 dropped `TestIsSAPName` (covered by `internal/sapname/grammar_gen_test.go`), replaced with thin "rename refusal uses sapname package" assertion |
+| 2 | T1.0 verify-step (3) — `MockSecretStorage` confirmed present ([vscode/mcp-gateway-dashboard/src/test/mock-vscode.ts:242](../vscode/mcp-gateway-dashboard/src/test/mock-vscode.ts#L242)), no helper file needed. Limitation: no failure-injection knob → addressed by net-new T2.0 (~10 LOC extension). | The 2026-05-06 draft warned of +2-3h overrun if SecretStorage mock helpers were missing. They aren't missing — the search path was wrong (looked in `src/test/helpers/`, mock lives in `src/test/mock-vscode.ts`). | T1.0 verify-step (3) rewritten; T2.0 added; T2.5 updated to use the T2.0 knob |
+| 3 | T1.0b (NEW) — cross-spike sanity-check task before T1.3 RebuildTools wiring, referencing two spikes that landed 2026-05-08 and 2026-05-09. | The 2026-05-06 draft was unaware of (a) the routing-bypass cleanup in `2026-05-08-mcp-server-routing-bypasses.md` (now all MCP traffic flows through the gateway, so RebuildTools is the single propagation channel); (b) the reflector-coordination clarification in `2026-05-09-reflector-coordination.md` (the `~/.claude.json` propagation channel is the TS-side `claude-config-sync.ts` reflector, not a phantom Go-side reflector). | T1.0b inserted between T1.0 and T1.1; manual E2E item 9 (T4.1) confirmed correct as written |
+| 4 | T4.3 CHANGELOG version anchor pinned to **v1.33.0** (extension currently 1.32.0 per package.json, shipped via Wave 2 commit `54cd911`). Earlier plan-internal references to "v1.6.0/v1.7.0" era retired. | The plan was drafted before Wave 1 + Wave 2 of the sap-picker-and-import-mcp track shipped (commits `4656a6d..1f2a650`). The CHANGELOG / VSIX target version moved on. | T4.3 updated; T4.4 ROADMAP-update task references v1.33.0 |
+| 5 | DEBUG-INSTR investigation closure noted explicitly: spike `2026-05-09-dashboard-kills-gateway-closure.md` confirms root cause = MCPR.3 two-tier auth, safety net = B-NEW-32 daemon supervisor (v1.30.0). Working tree was polluted with DEBUG-INSTR markers on 2026-05-06 (blocked the first `/run` attempt) — that pollution was resolved between sessions and is no longer a precondition. | Pre-flight scope check from earlier session is now a no-op. Plan does not need any shutdown-related changes. | Pre-flight section in `/run` invocation no longer blocks |
+| — | **Plan-level facts updated:** Total LOC 990 → ~940; Total tests 34 → 33 (kept the +1 from T1.23 reframing as one positive + one negative case); Expected duration 16h → ~14.5h. | Direct consequence of items 1 + 2 above. | §2 plan-level facts table; §5 phase-breakdown table |
+
+**Underlying surfaces NOT changed since 2026-05-06** (verified 2026-05-11): `models.ServerPatch` shape, `handlePatchServer` body and validation order, `gateway-client.ts::patchServer({ disabled?: boolean })` signature, `credential-store.ts::_chainIndexMutation` pattern. Phases 1/2/3/4 task bodies remain valid as written, modulo the 5 corrections above.
+
+**No re-audit triggered** — corrections (1)-(5) are scope-tightening (replace stale code spec with reuse of newer canonical helpers) and version-anchor freshening, not behavior changes. The 17 architect/lead-audit/specialist findings closed in pipeline `planning-19b7b15b` (2026-05-06) remain Fixed; F-ARCH-7 + F-SPEC-1 are *more thoroughly* addressed by item (1) than by the 2026-05-06 resolution.
 
 ---
 
