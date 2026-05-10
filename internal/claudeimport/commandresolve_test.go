@@ -49,9 +49,18 @@ func TestBaseName(t *testing.T) {
 	for _, c := range cases {
 		got := baseName(c.in)
 		want := c.want
-		if runtime.GOOS != "windows" && c.in == "NODE.EXE" {
-			// On non-Windows we don't strip ".exe" — name stays "node.exe" lowercased.
-			want = "node.exe"
+		if runtime.GOOS != "windows" {
+			// On non-Windows we don't strip ".exe" — name stays
+			// "node.exe" lowercased. And filepath.Base on Linux does not
+			// split on `\`, so a Windows-style path like
+			// `C:\Program Files\nodejs\node.exe` is treated as a single
+			// filename whose ".exe" suffix is also retained.
+			switch c.in {
+			case "NODE.EXE":
+				want = "node.exe"
+			case "C:\\Program Files\\nodejs\\node.exe":
+				want = "node.exe"
+			}
 		}
 		if got != want {
 			t.Errorf("baseName(%q) = %q, want %q", c.in, got, want)
