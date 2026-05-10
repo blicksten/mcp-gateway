@@ -370,25 +370,46 @@ func TestPluginSync_ReturnsConflictWhenPluginDirUnset(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rr.Code)
 }
 
-func TestCompatMatrix_Returns503WhenFileMissing(t *testing.T) {
-	// Default project directory has no configs/supported_claude_code_versions.json
-	// at this phase — the file is authored in Phase 16.4.7. Handler returns
-	// 503 with a descriptive error so the dashboard distinguishes
-	// "matrix not yet configured" from "bad URL".
+func TestCompatMatrix_ReturnsEmbeddedJSON(t *testing.T) {
+	// As of audit-e7618c9c Scope B SB-1 (commit 1b98785, 2026-05-06) the
+	// compat matrix is //go:embed-ed into the daemon binary at compile
+	// time. The handler now ALWAYS returns 200 with valid JSON because the
+	// build-time embed guarantees presence.
+	//
+	// Previously (T16.4.7) the handler read configs/... via os.ReadFile
+	// CWD-relative, and this test accepted BOTH 200 and 503 outcomes —
+	// rationalising a path-resolution defect as documented behaviour
+	// (audit SB-5 MEDIUM defect-as-feature anti-pattern). The dual-assert
+	// is now removed: any 503 here is a regression of SB-1.
 	srv, _ := setupClaudeCodeServer(t)
 	h := srv.Handler()
 
 	rr := doClaudeCodeRequest(t, h, "GET", "/api/v1/claude-code/compat-matrix", "", nil, ccTestBearer)
-	// The test binary's working directory is the package directory
-	// (internal/api); configs/ does not exist there. Either 503 (missing
-	// file) or 200 (file exists because this test ran in a checkout where
-	// Phase 16.4.7 has landed). Accept both, assert body is JSON when 200.
-	if rr.Code == http.StatusOK {
-		var body map[string]any
-		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
-		return
+	require.Equal(t, http.StatusOK, rr.Code,
+		"compat-matrix endpoint must return 200 with embedded JSON; any 503 is a regression of SB-1 (//go:embed bypass)")
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body),
+		"compat-matrix response must be valid JSON")
+
+	// The embedded matrix has a stable contract: top-level "min" + "max_tested"
+	// keys plus optional "alt_e_verified_versions" array. Assert the
+	// load-bearing fields rather than a deep-equal so the test survives
+	// matrix data updates without code-side changes.
+	if _, ok := body["min"]; !ok {
+		t.Errorf("compat-matrix JSON missing required top-level key 'min'; got keys: %v", mapKeys(body))
 	}
-	assert.Equal(t, http.StatusServiceUnavailable, rr.Code)
+	if _, ok := body["max_tested"]; !ok {
+		t.Errorf("compat-matrix JSON missing required top-level key 'max_tested'; got keys: %v", mapKeys(body))
+	}
+}
+
+func mapKeys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func TestHandlersReturn503WhenPatchStateUnset(t *testing.T) {

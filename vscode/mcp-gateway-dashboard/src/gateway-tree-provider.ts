@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import type { ServerDataCache } from './server-data-cache';
 import type { HealthResponse } from './types';
 import { escapeMd } from './markdown-utils';
+import { formatGatewayVersion } from './version-format';
 
 /**
  * Phase D.4 — dedicated tree view for the gateway daemon itself.
@@ -126,7 +127,7 @@ class GatewayDetailItem extends vscode.TreeItem {
 function buildDetailItems(health: HealthResponse): GatewayDetailItem[] {
 	return [
 		new GatewayDetailItem('PID', health.pid !== undefined ? String(health.pid) : 'unknown', 'symbol-number'),
-		new GatewayDetailItem('Version', health.version ?? 'unknown', 'tag'),
+		new GatewayDetailItem('Version', formatGatewayVersion(health.version), 'tag'),
 		new GatewayDetailItem('Started', health.started_at ?? 'unknown', 'calendar'),
 		new GatewayDetailItem('Uptime', formatUptime(health.uptime_seconds), 'watch'),
 	];

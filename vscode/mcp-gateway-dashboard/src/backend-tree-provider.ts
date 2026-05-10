@@ -3,6 +3,7 @@ import type { ServerDataCache } from './server-data-cache';
 import { BackendItem } from './backend-item';
 import { PlaceholderTreeItem } from './tree-placeholder';
 import type { ServerView } from './types';
+import { hasRealVersion } from './version-format';
 
 /**
  * Footer item shown at the bottom of the backends tree.
@@ -64,8 +65,8 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 		// Show version footer only when the daemon reports a real release version.
 		// "dev" means a local source build — not useful to show.
 		const version = this.cache.gatewayHealth?.version;
-		if (version && version !== 'dev') {
-			items.push(new GatewayVersionItem(version));
+		if (hasRealVersion(version)) {
+			items.push(new GatewayVersionItem(version!));
 		}
 		return items;
 	}
@@ -96,7 +97,7 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 		// gateway goes offline mid-session (stale icons need to become grey).
 		const staleMark = lastRefreshFailed ? 'S' : '';
 		// Only include version in fingerprint for real releases (not "dev").
-		const effectiveVersion = (version && version !== 'dev') ? version : '';
+		const effectiveVersion = hasRealVersion(version) ? version! : '';
 		const parts: string[] = [placeholder ? 'P' : 'N', staleMark, effectiveVersion];
 		for (const s of servers) {
 			parts.push([

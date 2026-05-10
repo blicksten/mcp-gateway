@@ -113,6 +113,26 @@ jobs:
           fi
           echo "Health endpoint returned HTTP $status"
 
+      - name: Assert health.version is not dev-build (audit F-A4)
+        run: |
+          # F-A4 (audit-e7618c9c, 2026-05-06): the original Scope A defect
+          # was that `go build` without -ldflags produced a daemon reporting
+          # version="dev". The smoke test asserted HTTP 200 but never the
+          # version field, so the defect shipped uncaught for weeks.
+          # runtime/debug.ReadBuildInfo() (commit 1b98785) now resolves a
+          # real version from VCS info — assert that the daemon never
+          # reports a bare "dev" again from a CI build.
+          version=$(curl -s http://127.0.0.1:18765/api/v1/health | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+          if [ -z "$version" ]; then
+            echo "FAIL: /health did not return a version field"
+            exit 1
+          fi
+          if [ "$version" = "dev" ]; then
+            echo "FAIL: daemon reports version=dev — runtime/debug.ReadBuildInfo() should have synthesised a VCS-derived version. CI runner missing .git or Go too old."
+            exit 1
+          fi
+          echo "OK: daemon version=$version"
+
       - name: Graceful shutdown
         run: |
           kill -TERM "$PID"

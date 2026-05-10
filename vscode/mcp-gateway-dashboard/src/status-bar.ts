@@ -3,6 +3,7 @@ import type { ServerDataCache } from './server-data-cache';
 import type { HealthResponse, ServerView } from './types';
 import { formatUptime } from './gateway-tree-provider';
 import { escapeMd } from './markdown-utils';
+import { formatGatewayVersion } from './version-format';
 
 /**
  * Aggregate MCP status bar indicator.
@@ -115,7 +116,10 @@ export class McpStatusBar implements vscode.Disposable {
 				parts.push(formatUptime(health.uptime_seconds));
 			}
 			if (health.version !== undefined) {
-				parts.push(`v${escapeMd(health.version)}`);
+				// formatGatewayVersion handles "dev" → "dev build" and adds
+				// a v-prefix only when missing, avoiding the historic "vdev"
+				// status-bar string. Audit SC-C-M1 helper consolidation.
+				parts.push(escapeMd(formatGatewayVersion(health.version)));
 			}
 			if (health.pid !== undefined) {
 				parts.push(`pid ${health.pid}`);

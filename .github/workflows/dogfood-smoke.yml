@@ -96,14 +96,34 @@ jobs:
           for i in $(seq 1 60); do
             if curl -sf http://127.0.0.1:8765/api/v1/health > /dev/null; then
               echo "gateway ready after ${i}x 500ms polls"
-              exit 0
+              break
             fi
             sleep 0.5
+            if [ "$i" -eq 60 ]; then
+              echo "::error::gateway did not become healthy within 30s"
+              echo "--- gateway.log ---"
+              cat gateway.log
+              exit 1
+            fi
           done
-          echo "::error::gateway did not become healthy within 30s"
-          echo "--- gateway.log ---"
-          cat gateway.log
-          exit 1
+
+      - name: Assert health.version is not dev-build (audit F-A4)
+        run: |
+          # F-A4 (audit-e7618c9c, 2026-05-06): smoke test previously asserted
+          # HTTP 200 but never checked the version field, so the missing-ldflags
+          # defect (Scope A F-A1) shipped uncaught. runtime/debug.ReadBuildInfo()
+          # (commit 1b98785) now synthesises a VCS-derived version even from a
+          # plain `go build`. Guard against any future regression here.
+          version=$(curl -s http://127.0.0.1:8765/api/v1/health | jq -r '.version')
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "::error::/health did not return a version field"
+            exit 1
+          fi
+          if [ "$version" = "dev" ]; then
+            echo "::error::daemon reports version=dev — runtime/debug.ReadBuildInfo() should produce a VCS-derived version on CI. Check that .git is present in the workspace and Go >= 1.18."
+            exit 1
+          fi
+          echo "OK: daemon version=$version"
 
       - name: Assert all configured backends registered running (timeout 60s for npx warmup)
         run: |
