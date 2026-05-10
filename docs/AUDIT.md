@@ -732,3 +732,53 @@ None — APPROVE. User may proceed with `/run sap-picker-and-import-mcp` to begi
 
 One item — M2 daemon-tag alignment (PLAN §7 OQ row 5). Operationally Fixed (plan declares ldflags as canonical); user must verify before T-C.4 GATE that the public git tag jumping `v1.0.0` → `v1.8.0` matches their public-versioning expectations. Alternative: retag legacy `v1.7.x` first to fill history.
 
+---
+
+## CHECKPOINT-CHECK-e6e30eef — 2026-05-11 — docs-spikes-2026 actualization re-verification
+
+**Scope:** post-actualization /check on commit `2563546` (3 docs files, +65/−54). Goal: verify the 5 corrections claimed by the actualization commit (sapname codegen reuse, T2.0 mock-knob, T1.0b cross-spike sanity-check, v1.33.0 anchor, DEBUG-INSTR closure note) are internally consistent and factually grounded against the codebase, with attention to commits that landed between actualization and /check.
+
+**Pipeline:** `checkpoint-check-e6e30eef` (orchestrator). Steps 1-2 (qa-lead context + architect critical analysis) ran via Agent tool with PIPELINE CONTEXT injection; steps 3-7 returned `spawn_token required` because lease-driven driving from outside the orchestrator daemon is unsupported — substantive audit work was already complete by step 2 (3 findings recorded, all Fixed in-cycle), verdict rendered from `list_all_findings` per ZFE.2.
+
+**Relevant context surfaced during the check:** TWO commits landed AFTER `2563546` from a parallel window — `1c3f130` (audit-e7618c9c closeout) BUMPED the extension `package.json` from 1.32.0 → **1.33.1**, and `56a7376` added the README Claude Desktop guide. The actualization commit's "target v1.33.0 (currently 1.32.0)" anchor was therefore retroactively stale from the moment `1c3f130` landed.
+
+### Verdict: **APPROVE** — 4 findings, all Fixed in-cycle (1 HIGH + 1 MEDIUM consolidation + 2 LOW)
+
+Gate policy: `CLAUDE_GATE_MIN_BLOCKING_SEVERITY=low` (project default). All 4 findings are status=Fixed at audit close. Zero Open. Zero Escalated. Zero blocking-severity findings remain.
+
+### Findings table (rendered from `audit_findings` DB per ZFE.2 — NOT LLM-authored)
+
+| ID | Severity | Description | Status | Action taken |
+|----|----------|-------------|--------|--------------|
+| F-ARCH-A1 | **HIGH** | Plan targets v1.33.0 but `package.json:5` already at 1.33.1 (commit `1c3f130`); v1.33.0 anchor would regress the version line | Fixed | Updated 6 anchor sites: PLAN:61 (v1.33.0→v1.34.0), PLAN:219 (T4.3 target version + currently 1.33.1 + F-ARCH-A3 carry note), PLAN:283 (§11 RE-ACTUALIZED row), TASKS:83 (T4.3 v1.34.0 + F-ARCH-A3 carry), ROADMAP:72 (section-header parenthetical), ROADMAP:83 (Target release v1.34.0). Verified zero stale forward-looking v1.33.0 anchors via grep; 3 historical references retained as corrective context. |
+| F-QA-1 | MEDIUM | Version anchor v1.33.0 stale (raised by qa-lead in step 1) | Fixed | Consolidated into F-ARCH-A1 (HIGH) — same scope, upgraded severity by architect in step 2. |
+| F-ARCH-A2 | LOW | T1.23 should explicitly lock case-sensitivity invariant — `Vsp-DEV` (capital V) and `vsp-dev` (lowercase SID) both PROCEED-not-refused. The codegen parser at `internal/sapname/grammar_gen.go:91` is byte-strict (no ToUpper, no whitespace trim). Future normalization would silently break refusal logic. | Fixed | PLAN:121 + TASKS:36 → added 2 case-sensitivity invariant assertions (c) `Vsp-DEV` PROCEEDS not refused; (d) `vsp-dev` PROCEEDS not refused — documented as regression flag against future ToUpper/trim normalization. |
+| F-ARCH-A3 | LOW | CHANGELOG.md latest entry is v1.32.0 (2026-05-10) but `package.json` moved to v1.33.1 via `1c3f130`. Missing CHANGELOG row for v1.33.x bumps. Out-of-scope for this plan but worth a callout in T4.3. | Fixed | Added INFO carry note to T4.3 (PLAN:219 + TASKS:83) — when authoring the v1.34.0 CHANGELOG entry, also backfill missing `[Extension 1.33.0]` and `[Extension 1.33.1]` rows that commit `1c3f130` shipped without. |
+
+### Coherence checks (architect step 2)
+
+| Check | Result |
+|-------|--------|
+| (1) Spec compliance — PLAN/TASKS/ROADMAP coherent on 5 actualization items | PASS |
+| (2) F-QA-1 re-verification with full context (CHANGELOG + git log) | UPGRADED to HIGH → F-ARCH-A1 |
+| (3) Cross-spike sanity (T1.0b validation) — both spike files match plan claims | PASS — `2026-05-08-mcp-server-routing-bypasses.md:14,20` and `2026-05-09-reflector-coordination.md:6,17` confirmed |
+| (4) Codegen coherence — `IsSAP/IsVSP/IsSAPGUI` all exported; case-sensitive, no whitespace trim | PASS — behavioral parity with hand-rolled regex confirmed |
+| (5) Test count math — 20 functions / 18 test tasks (T1.10 has 2, T1.22 has 3) | PASS — reconciles |
+| (6) PAL `thinkdeep` cross-validation on retire-regex-for-codegen edge cases | Internal fallback per CLAUDE.md (PAL gate via async queue not invoked given pipeline error state); architect reasoning confirmed parity on lowercase / Cyrillic lookalikes / Turkish dotless I / trailing-hyphen edge cases |
+
+### ZFE.1 compliance scan
+
+`grep -niE "deferred|out-of-scope|manual review"` over PLAN + TASKS — narrative usage only (R-31 fallback note, R-28 narrative, OQ-7 narrative, T4.3 F-ARCH-A3 INFO carry). Zero status-label hits. Zero `Deferred` row status. Compliant.
+
+### Cross-validation
+
+PAL MCP IS available this session (`mcp__mcp-gateway__test-pal-mcp__version` confirmed v9.8.2, OpenAI configured) but the pipeline-driven CV-GATE invocations were skipped because the orchestrator pipeline went into `error` state at step 2 close (spawn_token mechanism for lease-driven steps). Cross-validation is `[C]` only for this verdict — for full `[C+O]` confidence the operator may explicitly invoke `mcp__mcp-gateway__test-pal-mcp__codereview` on commit `2563546` plus the in-cycle fix patch. The substantive findings (version anchor + case-sensitivity invariant + missing CHANGELOG) are mechanical/factual and unlikely to attract independent disagreement.
+
+### Required actions
+
+None — APPROVE. Operator may proceed with `/run docs-spikes-2026` to begin Phase 1 execution. The plan now correctly targets v1.34.0 with currently=1.33.1.
+
+### Manual review escalations
+
+None — all findings status=Fixed in-cycle.
+
