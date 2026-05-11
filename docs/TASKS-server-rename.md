@@ -1,6 +1,6 @@
 # TASKS — Server Rename Feature
 
-**Companion to:** [docs/PLAN-docs-spikes-2026.md](PLAN-docs-spikes-2026.md)
+**Companion to:** [docs/PLAN-server-rename.md](PLAN-server-rename.md)
 **Source spike:** [docs/spikes/2026-05-05-server-rename.md](spikes/2026-05-05-server-rename.md)
 **Created:** 2026-05-06 by Porfiry [Opus 4.7]
 **Actualized:** 2026-05-11 — see PLAN §11 for the full diff vs. draft.

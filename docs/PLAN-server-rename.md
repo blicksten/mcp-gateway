@@ -1,11 +1,11 @@
 # PLAN — Server Rename Feature — Implementation Plan
 
-**Session label:** `docs-spikes-2026`
-**Companion files:** [docs/TASKS-docs-spikes-2026.md](TASKS-docs-spikes-2026.md), [docs/REVIEW-docs-spikes-2026.md](REVIEW-docs-spikes-2026.md)
+**Session label:** `server-rename` (renamed from `docs-spikes-2026` on 2026-05-11 — the auto-derived path-based label had no semantic content; renamed to match the spike topic)
+**Companion files:** [docs/TASKS-server-rename.md](TASKS-server-rename.md), [docs/REVIEW-server-rename.md](REVIEW-server-rename.md)
 **Source spike:** [docs/spikes/2026-05-05-server-rename.md](spikes/2026-05-05-server-rename.md) (v4 — fully validated; revision history confirms all 13 findings F-1..F-13 from prior audit `checkpoint-check-d1c32725` were addressed)
 **Created:** 2026-05-06 by Porfiry [Opus 4.7]
 **Actualized:** 2026-05-11 by Porfiry [Opus 4.7] — see §11 below for the diff vs. the 2026-05-06 draft.
-**Status:** Drafted by dev-lead in pipeline `planning-19b7b15b`; actualized in-session 2026-05-11; awaits operator approval before `/run docs-spikes-2026`
+**Status:** Drafted by dev-lead in pipeline `planning-19b7b15b`; actualized in-session 2026-05-11; awaits operator approval before `/run server-rename`
 
 ---
 
@@ -238,9 +238,9 @@ Per CLAUDE.md "Per-Phase Gate (MANDATORY)":
 
 ## 7. Plan Artifacts
 
-- **PLAN-docs-spikes-2026.md** (this file) — phase + gate definitions
-- **TASKS-docs-spikes-2026.md** — flat task checklist (companion file)
-- **REVIEW-docs-spikes-2026.md** — accumulating findings with severity, action_taken, and cycle metadata (created by lead-auditor and code-reviewer agents during `/run`)
+- **PLAN-server-rename.md** (this file) — phase + gate definitions
+- **TASKS-server-rename.md** — flat task checklist (companion file)
+- **REVIEW-server-rename.md** — accumulating findings with severity, action_taken, and cycle metadata (created by lead-auditor and code-reviewer agents during `/run`)
 - **docs/qa/server-rename-smoke.md** — created in T4.1; manual E2E checklist (9 items)
 - **docs/spikes/2026-05-05-server-rename.md** — source spike (edited in T1.0 to correct line 22)
 
@@ -249,9 +249,9 @@ Per CLAUDE.md "Per-Phase Gate (MANDATORY)":
 After operator approval:
 
 ```
-/run docs-spikes-2026          # runs Phase 1, halts at GATE 1
-/run docs-spikes-2026 2        # runs 2 phases
-/run docs-spikes-2026 all      # runs everything to completion
+/run server-rename          # runs Phase 1, halts at GATE 1
+/run server-rename 2        # runs 2 phases
+/run server-rename all      # runs everything to completion
 ```
 
 ## 9. Risks (carried from spike §13 — recap, accurate to v4)

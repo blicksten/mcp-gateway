@@ -734,7 +734,7 @@ One item — M2 daemon-tag alignment (PLAN §7 OQ row 5). Operationally Fixed (p
 
 ---
 
-## CHECKPOINT-CHECK-e6e30eef — 2026-05-11 — docs-spikes-2026 actualization re-verification
+## CHECKPOINT-CHECK-e6e30eef — 2026-05-11 — server-rename (formerly docs-spikes-2026) actualization re-verification
 
 **Scope:** post-actualization /check on commit `2563546` (3 docs files, +65/−54). Goal: verify the 5 corrections claimed by the actualization commit (sapname codegen reuse, T2.0 mock-knob, T1.0b cross-spike sanity-check, v1.33.0 anchor, DEBUG-INSTR closure note) are internally consistent and factually grounded against the codebase, with attention to commits that landed between actualization and /check.
 
@@ -776,7 +776,7 @@ PAL MCP IS available this session (`mcp__mcp-gateway__test-pal-mcp__version` con
 
 ### Required actions
 
-None — APPROVE. Operator may proceed with `/run docs-spikes-2026` to begin Phase 1 execution. The plan now correctly targets v1.34.0 with currently=1.33.1.
+None — APPROVE. Operator may proceed with `/run server-rename` to begin Phase 1 execution (label renamed 2026-05-11 from `docs-spikes-2026` after operator pointed out the auto-derived label had no semantic content). The plan now correctly targets v1.34.0 with currently=1.33.1.
 
 ### Manual review escalations
 

@@ -69,9 +69,9 @@ Phases 1–16 implemented. Full history preserved locally in `full-history-backu
 
 ## Server Rename Feature Track (Drafted, actualized 2026-05-11)
 
-Plan: `docs/PLAN-docs-spikes-2026.md` (2026-05-06 draft, **actualized 2026-05-11** — see PLAN §11 for diff: switched to `internal/sapname` codegen reuse per R-21, added Phase 2 `MockSecretStorage` failure-injection extension, version anchor pinned to v1.34.0 (initially v1.33.0; re-corrected same day via /check pipeline `checkpoint-check-e6e30eef` after commit `1c3f130` bumped extension to 1.33.1), cross-spike sanity-check task added). Sourced from `docs/spikes/2026-05-05-server-rename.md` v4. Audit history: 9 architect findings (F-ARCH-1..9) + 5 lead-audit findings (F-AUD-1..5) + 3 specialist-audit findings (F-SPEC-1..3) — **all 17 findings status=Fixed in-cycle** during planning pipeline `planning-19b7b15b`; F-ARCH-7 + F-SPEC-1 are *more thoroughly* addressed by the 2026-05-11 sapname-package reuse than by the 2026-05-06 draft.
+Plan: `docs/PLAN-server-rename.md` (renamed from `PLAN-docs-spikes-2026.md` 2026-05-11; 2026-05-06 draft, **actualized 2026-05-11** — see PLAN §11 for diff: switched to `internal/sapname` codegen reuse per R-21, added Phase 2 `MockSecretStorage` failure-injection extension, version anchor pinned to v1.34.0 (initially v1.33.0; re-corrected same day via /check pipeline `checkpoint-check-e6e30eef` after commit `1c3f130` bumped extension to 1.33.1), cross-spike sanity-check task added). Sourced from `docs/spikes/2026-05-05-server-rename.md` v4. Audit history: 9 architect findings (F-ARCH-1..9) + 5 lead-audit findings (F-AUD-1..5) + 3 specialist-audit findings (F-SPEC-1..3) — **all 17 findings status=Fixed in-cycle** during planning pipeline `planning-19b7b15b`; F-ARCH-7 + F-SPEC-1 are *more thoroughly* addressed by the 2026-05-11 sapname-package reuse than by the 2026-05-06 draft.
 
-**Status: Drafted — awaits operator approval before `/run docs-spikes-2026`**
+**Status: Drafted — awaits operator approval before `/run server-rename`**
 
 | # | Phase | Description | Tests | LOC | Est. Duration |
 |---|-------|-------------|-------|-----|---|
