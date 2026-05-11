@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 import { DaemonManager, type SpawnFn } from '../daemon';
 import { _setLoggerForTests } from '../logger';
 import type { IGatewayClient } from '../extension';
+import { GatewayError } from '../gateway-client';
 import type { ChildProcess } from 'node:child_process';
 
 // Minimal mock client — only getHealth() and shutdown() are used by DaemonManager.
@@ -1813,6 +1814,171 @@ describe('DaemonManager supervisor', () => {
 			abortEvents.length >= 1,
 			`fileLogger.writeEvent must be called with 'aborted' on crash-loop abort, recorded events: ${JSON.stringify(mockFileLogger.events)}`,
 		);
+	});
+
+	// ---------------------------------------------------------------------------
+	// FM 8 — kind discrimination + belt-and-suspenders re-probe
+	// (spike 2026-05-11: blanket catch replaced with GatewayError.kind check)
+	// ---------------------------------------------------------------------------
+
+	// FM 8a — GatewayError(timeout) means daemon is alive-but-slow → skip spawn
+	it('FM 8a: GatewayError(timeout) does NOT spawn (daemon assumed alive-but-slow)', async () => {
+		// Pre-fix: blanket catch treated ALL errors as "offline → spawn".
+		// Fix: only GatewayError(connection) triggers spawn; timeout/auth/parse/http
+		// indicate the daemon is alive (just slow or rejecting). Spawning a second
+		// daemon on the same port causes a PID-collision crash.
+		let spawnCount = 0;
+		let healthCalls = 0;
+		const timeoutClient: IGatewayClient = {
+			getHealth: async () => {
+				healthCalls++;
+				throw new GatewayError('timeout', 'simulated timeout');
+			},
+			shutdown: async () => { return { status: 'shutting_down' }; },
+			listServers: async () => [],
+			getServer: async () => ({}),
+			addServer: async () => ({ status: 'ok' }),
+			removeServer: async () => ({ status: 'ok' }),
+			patchServer: async () => ({ status: 'ok' }),
+			restartServer: async () => ({ status: 'ok' }),
+			resetCircuit: async () => ({ status: 'ok' }),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+
+		const mockSpawnLocal: SpawnFn = () => { spawnCount++; return createMockChild(); };
+		const dm = new DaemonManager(timeoutClient, 'mcp-gateway', output as any, mockSpawnLocal);
+		try {
+			const spawned = await dm.start();
+			assert.strictEqual(spawned, false,
+				'FM 8a regression: must NOT spawn on GatewayError(timeout) — daemon is alive-but-slow');
+			assert.strictEqual(spawnCount, 0,
+				'FM 8a regression: spawn function must not be called for timeout errors');
+			// With FM 8 fix: initial probe fires, kind=timeout → skip spawn immediately.
+			// No re-probe needed for non-connection errors.
+			assert.strictEqual(healthCalls, 1,
+				'FM 8a: exactly one health probe (kind=timeout short-circuits, no re-probe)');
+		} finally {
+			await dm.dispose();
+		}
+	});
+
+	// FM 8b — GatewayError(auth) means daemon is alive (rejecting auth) → skip spawn
+	it('FM 8b: GatewayError(auth) does NOT spawn (daemon alive, rejecting auth)', async () => {
+		let spawnCount = 0;
+		const authClient: IGatewayClient = {
+			getHealth: async () => { throw new GatewayError('auth', '401 Unauthorized'); },
+			shutdown: async () => { return { status: 'shutting_down' }; },
+			listServers: async () => [],
+			getServer: async () => ({}),
+			addServer: async () => ({ status: 'ok' }),
+			removeServer: async () => ({ status: 'ok' }),
+			patchServer: async () => ({ status: 'ok' }),
+			restartServer: async () => ({ status: 'ok' }),
+			resetCircuit: async () => ({ status: 'ok' }),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+
+		const mockSpawnLocal: SpawnFn = () => { spawnCount++; return createMockChild(); };
+		const dm = new DaemonManager(authClient, 'mcp-gateway', output as any, mockSpawnLocal);
+		try {
+			const spawned = await dm.start();
+			assert.strictEqual(spawned, false,
+				'FM 8b regression: must NOT spawn on GatewayError(auth) — daemon is alive, rejecting auth');
+			assert.strictEqual(spawnCount, 0,
+				'FM 8b regression: spawn function must not be called for auth errors');
+		} finally {
+			await dm.dispose();
+		}
+	});
+
+	// FM 8c — GatewayError(connection) on BOTH probes → genuinely offline → spawn
+	it('FM 8c: GatewayError(connection) on both probes spawns daemon (genuinely offline)', async () => {
+		// The FM 8 fix adds a re-probe after the first connection error to close the
+		// race window where two slow parallel probes both decide "offline". Only when
+		// BOTH probes return connection errors is the daemon treated as truly offline.
+		let healthCalls = 0;
+		let spawnCount = 0;
+
+		const connectionClient: IGatewayClient = {
+			getHealth: async () => {
+				healthCalls++;
+				throw new GatewayError('connection', 'ECONNREFUSED');
+			},
+			shutdown: async () => { return { status: 'shutting_down' }; },
+			listServers: async () => [],
+			getServer: async () => ({}),
+			addServer: async () => ({ status: 'ok' }),
+			removeServer: async () => ({ status: 'ok' }),
+			patchServer: async () => ({ status: 'ok' }),
+			restartServer: async () => ({ status: 'ok' }),
+			resetCircuit: async () => ({ status: 'ok' }),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+
+		const mockSpawnLocal: SpawnFn = () => { spawnCount++; return createMockChild(); };
+		const dm = new DaemonManager(connectionClient, 'mcp-gateway', output as any, mockSpawnLocal);
+		try {
+			const spawned = await dm.start();
+			assert.strictEqual(spawned, true,
+				'FM 8c regression: two ECONNREFUSED probes must conclude daemon is offline and spawn');
+			assert.strictEqual(spawnCount, 1,
+				'FM 8c regression: exactly one spawn after two consecutive connection failures');
+			assert.strictEqual(healthCalls, 2,
+				'FM 8c regression: FM 8 fix must issue exactly 2 health probes (initial + re-probe) before spawning');
+		} finally {
+			// Emit exit to allow clean dispose
+			const childRef = (dm as any).child;
+			if (childRef) { childRef.emit('exit', 0, null); }
+			await dm.dispose();
+		}
+	});
+
+	// FM 8d — re-probe success cancels spawn (race window: another window starts daemon first)
+	it('FM 8d: re-probe success cancels spawn (race won by another window)', async () => {
+		// Scenario: first probe returns connection error (daemon seems offline), but
+		// a concurrent VSCode window spawns the daemon in the ~1ms gap. The re-probe
+		// then succeeds (returns health OK) — we must NOT spawn a second daemon.
+		let healthCalls = 0;
+		let spawnCount = 0;
+
+		const racingClient: IGatewayClient = {
+			getHealth: async () => {
+				healthCalls++;
+				if (healthCalls === 1) {
+					// First probe: connection refused (daemon appears offline)
+					throw new GatewayError('connection', 'ECONNREFUSED');
+				}
+				// Re-probe: daemon now reachable (started by another window in the gap)
+				return { status: 'ok', servers: 0, running: 0 };
+			},
+			shutdown: async () => { return { status: 'shutting_down' }; },
+			listServers: async () => [],
+			getServer: async () => ({}),
+			addServer: async () => ({ status: 'ok' }),
+			removeServer: async () => ({ status: 'ok' }),
+			patchServer: async () => ({ status: 'ok' }),
+			restartServer: async () => ({ status: 'ok' }),
+			resetCircuit: async () => ({ status: 'ok' }),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+
+		const mockSpawnLocal: SpawnFn = () => { spawnCount++; return createMockChild(); };
+		const dm = new DaemonManager(racingClient, 'mcp-gateway', output as any, mockSpawnLocal);
+		try {
+			const spawned = await dm.start();
+			assert.strictEqual(spawned, false,
+				'FM 8d regression: re-probe success must cancel spawn — race won by another window');
+			assert.strictEqual(spawnCount, 0,
+				'FM 8d regression: no spawn when re-probe confirms daemon is reachable');
+			assert.strictEqual(healthCalls, 2,
+				'FM 8d regression: exactly 2 health calls (initial + re-probe)');
+		} finally {
+			await dm.dispose();
+		}
 	});
 
 	// A17 — pendingRestartScheduled true while timer armed, false after fire

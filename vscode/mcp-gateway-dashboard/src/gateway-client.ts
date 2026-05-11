@@ -54,6 +54,15 @@ export class GatewayClient {
 	// daemon and surface as GatewayError('auth', ...). Recommended:
 	// always wire both providers in extension.ts so daemon-control works.
 	private readonly adminAuthHeader?: AuthHeaderProvider;
+	// FM 7 (spike 2026-05-11): keep-alive agent eliminates per-request TCP
+	// socket churn that caused Windows ephemeral port exhaustion + TIME_WAIT
+	// pile-up + spurious connect failures under N-window load.
+	private readonly agent = new http.Agent({
+		keepAlive: true,
+		maxSockets: 8,
+		maxFreeSockets: 4,
+		keepAliveMsecs: 1000,
+	});
 
 	constructor(
 		baseUrl = 'http://localhost:8765',
@@ -250,16 +259,17 @@ export class GatewayClient {
 
 		try {
 			return await new Promise<T>((resolve, reject) => {
-		const options: http.RequestOptions = {
-			method,
-			hostname: url.hostname,
-			port: url.port,
-			path: url.pathname + url.search,
-			headers,
-			timeout: this.timeoutMs,
-		};
+				const options: http.RequestOptions = {
+					method,
+					hostname: url.hostname,
+					port: url.port,
+					path: url.pathname + url.search,
+					headers,
+					timeout: this.timeoutMs,
+					agent: this.agent,
+				};
 
-			const req = http.request(options, (res) => {
+				const req = http.request(options, (res) => {
 				let data = '';
 				res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
 				res.on('end', () => {
@@ -321,6 +331,11 @@ export class GatewayClient {
 		} finally {
 			clearTimeout(deadlineTimer);
 		}
+	}
+
+	/** Release the keep-alive agent's pooled sockets. Idempotent. */
+	dispose(): void {
+		this.agent.destroy();
 	}
 }
 

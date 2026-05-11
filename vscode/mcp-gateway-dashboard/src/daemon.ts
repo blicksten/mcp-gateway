@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import * as vscode from 'vscode';
 import type { IGatewayClient } from './extension';
+import { GatewayError } from './gateway-client';
 import { logger } from './logger';
 import type { DaemonLogFile } from './daemon-log-file';
 
@@ -134,8 +135,33 @@ export class DaemonManager {
 					await this.client.getHealth();
 					logger.info('daemon', 'Gateway already running — skipping spawn.');
 					return false;
-				} catch {
-					// Gateway offline — proceed to spawn.
+				} catch (e) {
+					// FM 8 (spike 2026-05-11): only non-connection GatewayError kinds
+					// (timeout/auth/parse/http) indicate the daemon is alive-but-slow
+					// (under FM 7 load). A blanket catch was causing PID-collision crashes
+					// when two windows raced to spawn after parallel slow probes.
+					// Non-GatewayError throws (e.g. plain Error from tests, unexpected
+					// throws) fall through to the re-probe path below — only after the
+					// re-probe also fails with non-skip semantics do we proceed to spawn.
+					if (e instanceof GatewayError && e.kind !== 'connection') {
+						logger.warn('daemon', `getHealth pre-spawn failed (kind=${e.kind}) — assuming gateway is alive, skipping spawn`, e);
+						return false;
+					}
+					// Belt-and-suspenders: re-probe to close the race window where two
+					// simultaneous slow probes both decide "offline". Skip if disposed
+					// during the first probe — manager is shutting down.
+					if (this.disposed) { return false; }
+					try {
+						await this.client.getHealth();
+						logger.info('daemon', 'Gateway reachable on re-probe — skipping spawn.');
+						return false;
+					} catch (e2) {
+						if (e2 instanceof GatewayError && e2.kind !== 'connection') {
+							logger.warn('daemon', `getHealth re-probe failed (kind=${e2.kind}) — assuming gateway is alive, skipping spawn`, e2);
+							return false;
+						}
+						// Both probes failed with connection error — daemon is genuinely down. Proceed to spawn.
+					}
 				}
 			}
 

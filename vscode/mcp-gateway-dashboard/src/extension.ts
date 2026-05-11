@@ -64,6 +64,9 @@ export interface IGatewayClient {
 	// absence and surfaces a "v1.9+ daemon required" message.
 	importSnapshot?(source: string, projectRoot?: string): Promise<unknown>;
 	importApply?(ops: unknown[]): Promise<unknown>;
+	// FM 7 (spike 2026-05-11): optional so legacy injected test clients that
+	// predate the keep-alive agent still satisfy the interface.
+	dispose?(): void;
 }
 
 export function activate(
@@ -147,6 +150,9 @@ export function activate(
 	};
 
 	const client: IGatewayClient = injectedClient ?? new GatewayClient(apiUrl, 5000, authHeader, adminAuthHeader);
+	// FM 7: destroy the keep-alive agent's pooled sockets when the extension
+	// deactivates. No-op for injected test clients that don't implement dispose.
+	context.subscriptions.push({ dispose: () => client.dispose?.() });
 
 	// Phase 8.2: credential store — OS keychain via SecretStorage.
 	// Constructed before the cache so the Phase 17.5 keepass-imported provider

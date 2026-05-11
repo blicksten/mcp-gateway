@@ -356,6 +356,61 @@ describe('GatewayClient', () => {
 		});
 	});
 
+	// FM 7 (spike 2026-05-11): keep-alive agent reuses TCP sockets across requests.
+	// Without the agent, every getHealth() opens a new TCP connection, causing
+	// Windows ephemeral port exhaustion under N-window load. The regression tests
+	// below verify socket reuse (connection count == 1 for N calls) and that
+	// dispose() destroys the agent cleanly.
+	describe('keep-alive socket reuse (FM 7)', () => {
+		it('FM 7: keep-alive agent reuses socket across consecutive requests', async () => {
+			// Use a dedicated server so connection counting is isolated from the
+			// shared server used by other tests (which is kept-alive too, making
+			// the count cumulative and test-order-sensitive).
+			const connectionCount = { n: 0 };
+			const kaServer = http.createServer((req, res) => {
+				res.writeHead(200, { 'Content-Type': 'application/json' });
+				res.end(JSON.stringify({ status: 'ok', servers: 0, running: 0 }));
+			});
+			kaServer.on('connection', () => { connectionCount.n++; });
+			await new Promise<void>((r) => kaServer.listen(0, '127.0.0.1', r));
+			const kaAddr = kaServer.address();
+			const kaPort = kaAddr && typeof kaAddr === 'object' ? (kaAddr as { port: number }).port : 0;
+
+			const kaClient = new GatewayClient(`http://127.0.0.1:${kaPort}`, 2000);
+			try {
+				await kaClient.getHealth();
+				await kaClient.getHealth();
+				await kaClient.getHealth();
+				// FM 7: with keep-alive, all 3 requests share 1 socket.
+				// Without keepAlive:true agent, each request opens a new connection
+				// and connectionCount.n would equal 3.
+				assert.strictEqual(
+					connectionCount.n, 1,
+					`FM 7 regression: expected 1 socket for 3 sequential requests, got ${connectionCount.n}. ` +
+					`This indicates the keep-alive agent (FM 7 fix) is not being used.`,
+				);
+			} finally {
+				kaClient.dispose();
+				await new Promise<void>((r) => kaServer.close(() => r()));
+			}
+		});
+
+		it('FM 7: dispose() destroys keep-alive agent and is idempotent', () => {
+			const kaClient = new GatewayClient('http://127.0.0.1:9999');
+			// Access the private agent field — TS-private but runtime-public.
+			const agent = (kaClient as unknown as { agent: http.Agent }).agent;
+			assert.ok(agent, 'FM 7 regression: GatewayClient must expose a private http.Agent field');
+			assert.strictEqual(typeof agent.destroy, 'function', 'http.Agent must have destroy()');
+			// First dispose — destroys the agent.
+			kaClient.dispose();
+			// Second dispose must not throw (idempotency — agent.destroy() is safe to call twice).
+			assert.doesNotThrow(
+				() => kaClient.dispose(),
+				'FM 7 regression: dispose() must be idempotent — second call must not throw',
+			);
+		});
+	});
+
 	// MCPR.3: admin-scope auth provider must be used for /shutdown.
 	// The regular Bearer must NOT leak into daemon-control endpoints —
 	// otherwise VSCode 1.119's McpGatewayService (which only knows the

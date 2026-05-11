@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.33.1",
+  "version": "1.33.2",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -487,7 +487,10 @@
         },
         "mcpGateway.defaultGuiMode": {
           "type": "string",
-          "enum": ["exec", "uv"],
+          "enum": [
+            "exec",
+            "uv"
+          ],
           "default": "exec",
           "scope": "machine",
           "description": "How the SAP-GUI server is launched: 'exec' (direct executable) or 'uv' (uv-run from defaultGuiUvProject)."
