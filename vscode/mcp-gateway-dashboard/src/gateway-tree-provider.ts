@@ -149,6 +149,10 @@ function buildRootTooltip(health: HealthResponse): vscode.MarkdownString {
 	}
 	md.appendMarkdown(`- Uptime: ${formatUptime(health.uptime_seconds)}\n`);
 	md.appendMarkdown(`- Servers: ${health.running}/${health.servers}\n`);
+	// FM-3 mitigation: surface the observability scope gap so users know where
+	// to look when MCP tools fail despite the dashboard showing "healthy".
+	md.appendMarkdown('\n\n---\n\n');
+	md.appendMarkdown('⚠ Dashboard health = server-side only. Per-claude.exe MCP transport state is invisible — if MCP tools fail, try /clear in the affected session.');
 	return md;
 }
 

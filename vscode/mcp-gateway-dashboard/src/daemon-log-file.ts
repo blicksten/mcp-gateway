@@ -131,9 +131,26 @@ export class DaemonLogFile implements vscode.Disposable {
 
 		if (!this.writeStream) { return; }
 
-		const line = `[${now.toISOString()}] [${stream}] ${text.trimEnd()}\n`;
+		// FM-9 fix: split multi-line chunks so each logical log line gets its own
+		// timestamp prefix. A single write() call is used for the whole chunk to
+		// preserve atomic-write semantics — no interleaving across concurrent appends.
+		//
+		// KNOWN LIMITATION: if a slog entry is split across two data events (line
+		// straddles a chunk boundary), the second half will get a fresh [ISO] prefix
+		// and appear as a separate event. This is theoretical — slog never emits a
+		// single log entry across multiple write() calls.
+		const iso = now.toISOString();
+		const parts = text.split('\n');
+		let written = '';
+		for (const ln of parts) {
+			// Trim trailing \r so Windows \r\n line endings don't pollute log lines.
+			const trimmed = ln.trimEnd();
+			if (!trimmed) { continue; }
+			written += `[${iso}] [${stream}] ${trimmed}\n`;
+		}
+		if (!written) { return; }
 		try {
-			this.writeStream.write(line);
+			this.writeStream.write(written);
 		} catch {
 			// Stream may be in a bad state — swallow to protect callers.
 		}

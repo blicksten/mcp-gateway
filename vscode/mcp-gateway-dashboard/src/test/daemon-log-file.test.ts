@@ -456,6 +456,46 @@ describe('DaemonLogFile', () => {
 			`day 2 file must contain "second message", got: ${content}`);
 	});
 
+	// FM-9: multi-line chunk splits each line with its own timestamp prefix
+	it('FM 9: multi-line chunk prefixes each line individually', () => {
+		const now = makeDate('2026-05-11T00:00:00.000Z');
+		logFile = new DaemonLogFile({
+			storageDir: TEST_DIR,
+			retentionDays: 0,
+			enabled: true,
+			clock: () => now,
+			fsImpl: fakeFs,
+		});
+
+		logFile.writeStderr('time=A line 1\ntime=B line 2\ntime=C line 3');
+
+		const expectedFile = path.join(TEST_DIR, 'daemon-2026-05-11.log');
+		assert.ok(fakeFs.files.has(expectedFile), 'log file must exist');
+		const written = fakeFs.files.get(expectedFile)!.content;
+		const occurrences = (written.match(/\[2026-05-11T00:00:00\.000Z\] \[stderr\]/g) ?? []).length;
+		assert.strictEqual(occurrences, 3, `expected 3 prefixes, got ${occurrences}. Content: ${written}`);
+	});
+
+	// FM-9: empty lines in chunk are dropped and not prefixed
+	it('FM 9: empty lines in chunk are dropped, not prefixed', () => {
+		const now = makeDate('2026-05-11T00:00:00.000Z');
+		logFile = new DaemonLogFile({
+			storageDir: TEST_DIR,
+			retentionDays: 0,
+			enabled: true,
+			clock: () => now,
+			fsImpl: fakeFs,
+		});
+
+		logFile.writeStdout('line A\n\n\nline B');
+
+		const expectedFile = path.join(TEST_DIR, 'daemon-2026-05-11.log');
+		assert.ok(fakeFs.files.has(expectedFile), 'log file must exist');
+		const written = fakeFs.files.get(expectedFile)!.content;
+		const occurrences = (written.match(/\[2026-05-11T00:00:00\.000Z\] \[stdout\]/g) ?? []).length;
+		assert.strictEqual(occurrences, 2, `expected 2 prefixes (empty lines dropped), got ${occurrences}. Content: ${written}`);
+	});
+
 	// B11 — empty / whitespace-only writes are no-ops
 	it('B11: empty or whitespace-only writes do not open a file', () => {
 		const now = makeDate('2026-05-08T10:00:00.000Z');
