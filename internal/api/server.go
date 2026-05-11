@@ -768,19 +768,54 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}
 
 	s.httpServer = &http.Server{
-		Handler:           s.Handler(),
-		ReadTimeout:       30 * time.Second,
-		ReadHeaderTimeout: 10 * time.Second, // CR-7 fix: prevent Slowloris
-		WriteTimeout:      60 * time.Second, // H-001 fix: prevent slow-write exhaustion
-		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    64 << 10, // 64 KB — M-003 fix
+		Handler: s.Handler(),
+		// ReadHeaderTimeout protects against Slowloris (slow header-flush attack).
+		// Keep this aggressive — headers should arrive in milliseconds, never
+		// seconds. CR-7 fix.
+		ReadHeaderTimeout: 10 * time.Second,
+		// ReadTimeout caps the wall-clock for reading the full request body.
+		// 30 s is plenty for JSON-RPC payloads under 1 MB (our maxBodySize cap).
+		ReadTimeout: 30 * time.Second,
+		// FM 3 mitigation (spike 2026-05-11): bumped from 60 s -> 10 min so
+		// long-running MCP tool calls (PAL thinkdeep, codereview with
+		// max_wait_s up to 600 s) do not get aborted server-side mid-response.
+		// 60 s was tight even for normal tool calls and would force clients
+		// into the very reconnect-after-RST cycle FM 3 mitigates. Slow-write
+		// exhaustion (original H-001 concern) is still bounded by IdleTimeout
+		// + the per-stage MCP deadlines applied at handler level.
+		WriteTimeout: 10 * time.Minute,
+		// FM 3 mitigation (spike 2026-05-11): bumped from 2 min -> 5 min so
+		// idle MCP HTTP/2 connections survive normal conversation gaps
+		// (assistant thinking, user reading output). Short IdleTimeout closes
+		// the connection with FIN; some MCP HTTP clients then mark the server
+		// as "disconnected" rather than transparently re-dialling.
+		IdleTimeout:    5 * time.Minute,
+		MaxHeaderBytes: 64 << 10, // 64 KB — M-003 fix
 	}
 
+	// Graceful shutdown wiring. When ctx cancels (signal handler in main, or
+	// the REST /api/v1/shutdown admin endpoint), give in-flight MCP tool
+	// calls up to 30 s to complete before forcing close. The drain timeout
+	// matches the longest synchronous handler we expect to be alive at any
+	// instant — anything longer would be using async patterns (queue_review)
+	// and is not bound to a single HTTP request.
+	//
+	// FM 3 mitigation: server.Shutdown sends FIN (not RST) so MCP HTTP
+	// clients see a clean close and can re-handshake against the successor
+	// gateway. Abrupt RST (process kill without Shutdown) is what trips the
+	// MCPR.1 "stuck disconnected" state in Claude Code's client.
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_ = s.httpServer.Shutdown(shutdownCtx)
+		s.logger.Info("HTTP server shutdown: draining in-flight requests",
+			"drain_timeout", "30s")
+		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+			s.logger.Warn("HTTP server shutdown drain incomplete — forcing close",
+				"error", err)
+		} else {
+			s.logger.Info("HTTP server shutdown complete")
+		}
 	}()
 
 	// Publish Addr() last. When observers see Addr() != nil, s.httpServer
