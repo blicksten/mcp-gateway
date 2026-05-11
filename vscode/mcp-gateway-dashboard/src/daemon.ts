@@ -256,7 +256,7 @@ export class DaemonManager {
 		if (!this.disposed) { logger.info('daemon', 'Stopping...'); }
 
 		// 1. Graceful REST shutdown — works for external daemons too.
-		// On success: poll until /health unreachable so the daemon's signal
+		// On success: poll until /api/v1/health unreachable so the daemon's signal
 		// handler runs to completion (defer pidfile.Remove, etc.). On
 		// failure: fall through to SIGTERM if we own a child.
 		let restShutdownAccepted = false;
@@ -271,7 +271,7 @@ export class DaemonManager {
 			logger.warn('daemon', 'REST shutdown failed — will fall back to SIGTERM if local child is owned.', err);
 		}
 
-		// 2. If REST accepted, poll /health until unreachable bounded by timeoutMs.
+		// 2. If REST accepted, poll /api/v1/health until unreachable bounded by timeoutMs.
 		// (When REST rejected we don't poll — it would just hit the same error
 		// every iteration and waste the deadline before reaching SIGTERM fallback.)
 		// NOTE: we deliberately do NOT short-circuit on this.disposed here. The
@@ -314,7 +314,7 @@ export class DaemonManager {
 	 * Works both for extension-owned children and for daemons started
 	 * externally (mcp-ctl daemon start, manual spawn). The flow is:
 	 *   1. POST /api/v1/shutdown — graceful exit regardless of ownership
-	 *   2. Poll /health until unreachable (daemon actually exited)
+	 *   2. Poll /api/v1/health until unreachable (daemon actually exited)
 	 *   3. Clean up own child handle if any
 	 *   4. start() — spawns a fresh daemon
 	 *
@@ -325,7 +325,7 @@ export class DaemonManager {
 	 * Total wall-clock also includes the shutdown REST call (up to the
 	 * GatewayClient timeout, default 5s) and the post-start health probe,
 	 * so worst-case is roughly `timeoutMs + client.timeoutMs + 2s`. The
-	 * spawn() step is fire-and-forget-detect — start() polls /health via
+	 * spawn() step is fire-and-forget-detect — start() polls /api/v1/health via
 	 * its own fast-path check.
 	 */
 	async restart(timeoutMs = 10_000): Promise<boolean> {
@@ -349,11 +349,11 @@ export class DaemonManager {
 				// Daemon may be unreachable, auth may have failed, or endpoint
 				// may not exist on older daemons. Log the reason so operators
 				// have a diagnostic trail (CV-LOW fix), then proceed to poll —
-				// if /health is reachable we'll still time out and bail out.
-				logger.warn('daemon', 'REST shutdown failed — proceeding to poll /health anyway.', err);
+				// if /api/v1/health is reachable we'll still time out and bail out.
+				logger.warn('daemon', 'REST shutdown failed — proceeding to poll /api/v1/health anyway.', err);
 			}
 
-			// 2. Poll /health until unreachable.
+			// 2. Poll /api/v1/health until unreachable.
 			const deadline = Date.now() + timeoutMs;
 			let daemonStillReachable = true;
 			while (Date.now() < deadline) {
@@ -367,7 +367,7 @@ export class DaemonManager {
 				await new Promise<void>((resolve) => this._setTimeout(() => resolve(), 200));
 			}
 			// If the poll loop exited because we hit the deadline (not because
-			// /health became unreachable), abort without a final extra probe —
+			// /api/v1/health became unreachable), abort without a final extra probe —
 			// otherwise GatewayClient's own HTTP timeout (5s default) could
 			// extend total wait past timeoutMs (CV-LOW fix).
 			if (daemonStillReachable) {

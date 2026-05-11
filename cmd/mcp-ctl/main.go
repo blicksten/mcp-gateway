@@ -145,6 +145,14 @@ func newRootCmd() *cobra.Command {
 	// Phase 7 audit-dashboard — diagnostic checks (closes B-16).
 	root.AddCommand(newDoctorCmd())
 
+	// Spike 2026-05-11 FM 6 — marketplace cleanup. Safe-to-run subcommand
+	// that removes accumulated *.bak shadow trees the installer leaves
+	// behind. Annotated skipClient because cleanup only touches the local
+	// ~/.claude tree, never the daemon.
+	mktCmd := newMarketplaceCmd()
+	mktCmd.Annotations = map[string]string{skipClientAnnotation: "true"}
+	root.AddCommand(mktCmd)
+
 	versionCmd := newVersionCmd()
 	versionCmd.Annotations = map[string]string{skipClientAnnotation: "true"}
 	root.AddCommand(versionCmd)
