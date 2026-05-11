@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.33.3",
+  "version": "1.33.4",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -405,6 +405,12 @@
           "type": "boolean",
           "default": false,
           "description": "When true, the SAP Systems tree shows the union of daemon-detected SAP systems and systems whose credentials have been imported from KeePass. Imported entries appear as stopped until the daemon knows about them."
+        },
+        "mcpGateway.autoKillStaleClaudeSessions": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "FM 3 spike 2026-05-11: when the gateway daemon respawns, sibling claude.exe sessions that started BEFORE the new gateway can have a stuck-disconnected MCP transport (MCPR.1 — Anthropic's MCP HTTP client does not always auto-reconnect). When this setting is OFF (default), the extension shows a notification offering to kill those stale sessions. When ON, they are killed silently as soon as the respawn is detected. Killing a session loses its conversation state — opt in only if you prefer silent recovery to the prompt."
         },
         "mcpGateway.keepassPath": {
           "type": "string",

@@ -33,6 +33,7 @@ import { ImportClaudePanel } from './webview/import-claude-panel';
 import { SettingsPanel } from './webview/settings-panel';
 import { ClaudeCodePanel } from './webview/claude-code-panel';
 import { SlashCommandGenerator } from './slash-command-generator';
+import { createDefaultStalenessDetector } from './transport-staleness';
 import { assertCompatible } from './version-compat';
 import {
 	SERVER_NAME_RE,
@@ -172,6 +173,19 @@ export function activate(
 	// Phase 8.3: shared data cache — single listServers() call for all consumers.
 	const cache = new ServerDataCache(client, importedProvider);
 	context.subscriptions.push(cache);
+
+	// FM 3 proper-fix path D (spike 2026-05-11): transport-staleness
+	// detector. Watches cachedGatewayHealth.started_at across refresh cycles;
+	// when the gateway respawns, identifies sibling claude.exe processes that
+	// pre-date the new start (MCPR.1 risk) and offers to kill them so the
+	// user can reopen Claude with a fresh MCP handshake. Default: prompts
+	// the user; opt-in `mcpGateway.autoKillStaleClaudeSessions=true` kills
+	// silently.
+	const stalenessDetector = createDefaultStalenessDetector();
+	context.subscriptions.push(stalenessDetector);
+	context.subscriptions.push(cache.onDidRefresh((payload) => {
+		void stalenessDetector.noteHealth(payload.gatewayHealth);
+	}));
 
 	const treeProvider = new BackendTreeProvider(cache);
 
