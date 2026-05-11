@@ -46,6 +46,13 @@ type Manager struct {
 	jobClose  sync.Once   // guards closeJobObject against double-close
 	jobClosed atomic.Bool // set after closeJobObject; guards assignProcess race
 
+	// FM 1 (spike 2026-05-11): subprocess registry tracks PIDs of stdio
+	// backends so a future gateway can reap them if this gateway crashes
+	// before its Job Object can fire KILL_ON_JOB_CLOSE. Nil when registry
+	// open failed at NewManager time — degrades to "no FM 1 reaping",
+	// never blocks normal operation.
+	registry *Registry
+
 	// testStopHook is non-nil only in tests. When set, Stop calls this
 	// function instead of performing the real stop sequence. Allows tests
 	// to inject a failing Stop to verify RemoveResult.Orphan semantics.
@@ -66,12 +73,32 @@ func NewManager(cfg *models.Config, version string, logger *slog.Logger) *Manage
 	if err != nil {
 		logger.Warn("failed to create job object (child process cleanup disabled)", "error", err)
 	}
+	// FM 1 (spike 2026-05-11): scan registry dir for orphans from a
+	// previously-crashed gateway and reap them, THEN open our own
+	// registry. Order matters — opening first would race a parallel
+	// startup of two gateways (both seeing each other's fresh files as
+	// "live owner" and skipping legitimate reap). Reuses pidfile's
+	// XDG/TempDir resolution pattern so registry lives next to the
+	// pidfile on every platform.
+	registryDir := DefaultRegistryDir()
+	if reaped := ScanAndReap(registryDir, os.Getpid(), logger); reaped > 0 {
+		logger.Info("subprocess registry: reaped orphans from previous gateway crash",
+			"count", reaped, "dir", registryDir)
+	}
+	registry, regErr := OpenRegistry(registryDir, os.Getpid())
+	if regErr != nil {
+		logger.Warn("subprocess registry: open failed (FM 1 reaping disabled)",
+			"dir", registryDir, "error", regErr)
+		// registry stays nil — every Add/Remove call site nil-checks.
+	}
+
 	m := &Manager{
 		entries:  make(map[string]*entry),
 		impl:     &mcp.Implementation{Name: "mcp-gateway", Version: version},
 		logger:   logger,
 		job:      job,
 		jobValid: jobValid,
+		registry: registry,
 	}
 	for name, sc := range cfg.Servers {
 		m.entries[name] = &entry{
@@ -302,6 +329,18 @@ func (m *Manager) connectStdio(ctx context.Context, name string, client *mcp.Cli
 		}
 	}
 
+	// FM 1 (spike 2026-05-11): record the spawned PID in our subprocess
+	// registry so a future gateway can reap it if we crash. Job Object
+	// + KILL_ON_JOB_CLOSE handles graceful exit; the registry is the
+	// belt-and-suspenders crash-recovery path.
+	if m.registry != nil && cmd.Process != nil {
+		cmdLine := cfg.Command + " " + strings.Join(cfg.Args, " ")
+		if err := m.registry.Add(name, cmd.Process.Pid, cmdLine); err != nil {
+			m.logger.Warn("subprocess registry: Add failed (orphan reaping degraded)",
+				"server", name, "pid", cmd.Process.Pid, "error", err)
+		}
+	}
+
 	return session, client, transport, cmd, nil
 }
 
@@ -459,6 +498,16 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 				m.logger.Error("process did not exit after kill", "server", name)
 			}
 		}
+		// FM 1 (spike 2026-05-11): drop the entry from the registry now
+		// that the child is gone. The registry file lists only LIVE
+		// subprocesses, so a crashed gateway leaves no false orphans
+		// for the next gateway to chase.
+		if m.registry != nil {
+			if err := m.registry.Remove(cmd.Process.Pid); err != nil {
+				m.logger.Warn("subprocess registry: Remove failed",
+					"server", name, "pid", cmd.Process.Pid, "error", err)
+			}
+		}
 	}
 
 	m.logger.Info("server stopped", "server", name)
@@ -545,6 +594,16 @@ func (m *Manager) StopAll(ctx context.Context) {
 				m.logger.Warn("failed to close job object", "error", err)
 			}
 		})
+	}
+
+	// FM 1 (spike 2026-05-11): delete our registry file on graceful
+	// shutdown so the NEXT gateway startup scan sees no orphan to reap.
+	// Crash paths skip this entirely — the file lingers and the next
+	// gateway's ScanAndReap handles it.
+	if m.registry != nil {
+		if err := m.registry.Close(); err != nil {
+			m.logger.Warn("subprocess registry: Close failed", "error", err)
+		}
 	}
 }
 
