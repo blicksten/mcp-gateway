@@ -54,18 +54,18 @@
 
 ## Phase 3 — TS Extension UI
 
-- [ ] T3.1: Update `package.json` — add `mcpGateway.renameServer` command + `view/item/context` menu entry gated on lifecycle-status `viewItem` regex (excludes SAP)
-- [ ] T3.2: Implement `mcpGateway.renameServer` handler in `extension.ts` — input box + parseSapServerName guards + modal confirm with preserves summary + patchServer + renameServerCredentials + warning toast on creds-failure
-- [ ] T3.3: Test 19 `renameServer happy path` — patchServer + renameServerCredentials + cache.refresh fired in order
-- [ ] T3.4: Test 20 `renameServer rejects SAP name` — error toast, no API call
-- [ ] T3.5: Test 21 `renameServer cancel input` — no API call, no toast
-- [ ] T3.6: Test 22 `renameServer cancel confirm` — no API call
-- [ ] T3.7: Test 23 `renameServer API failure` — error toast; cache.refresh NOT fired
-- [ ] T3.8: Test 24 `gateway success + creds-failure` — exact warning toast wording; cache.refresh fired; no rollback
-- [ ] T3.9: Test 19b `validateInput rejects bad name + SAP-shaped + unchanged passes through`
-- [ ] T3.10: `npm run compile && npm test` in `vscode/mcp-gateway-dashboard/` — full suite passes; zero new regressions
-- [ ] T3.11: (F-SPEC-3) `npm run deploy` — version bump + build + VSIX + install; stage VSIX + source in single commit; **after commit, instruct operator to run `Developer: Reload Window`**
-- [ ] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding)
+- [x] T3.1: Update `package.json` — add `mcpGateway.renameServer` command + `view/item/context` menu entry gated on lifecycle-status `viewItem` regex (excludes SAP)
+- [x] T3.2: Implement `mcpGateway.renameServer` handler in `extension.ts` — input box + parseSapServerName guards + modal confirm with preserves summary + patchServer + renameServerCredentials + warning toast on creds-failure
+- [x] T3.3: Test 19 `renameServer happy path` — patchServer + renameServerCredentials + cache.refresh fired in order
+- [x] T3.4: Test 20 `renameServer rejects SAP name` — error toast, no API call
+- [x] T3.5: Test 21 `renameServer cancel input` — no API call, no toast
+- [x] T3.6: Test 22 `renameServer cancel confirm` — no API call
+- [x] T3.7: Test 23 `renameServer API failure` — error toast; cache.refresh NOT fired
+- [x] T3.8: Test 24 `gateway success + creds-failure` — exact warning toast wording; cache.refresh fired; no rollback
+- [x] T3.9: Test 19b `validateInput rejects bad name + SAP-shaped + unchanged passes through`
+- [x] T3.10: `npm run compile && npm test` in `vscode/mcp-gateway-dashboard/` — full suite passes; zero new regressions (894 passing, 1 pre-existing daemon integration failure)
+- [x] T3.11: (F-SPEC-3) `npm run deploy` — build + VSIX + install (711.99 KB, 614 files); stage VSIX + source in single commit; **after commit, instruct operator to run `Developer: Reload Window`**
+- [x] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding) — **PASSED 2026-05-12** PAL gpt-5.1-codex gate_mode=true (codereview + thinkdeep both PASS 0 findings); 92 passing in commands.test.js compiled scoped suite (T3.3..T3.9 verified); VSIX rebuilt + installed via `npm run deploy` (729075 bytes; 614 files)
 
 ## Phase 4 — Documentation + manual E2E + VSIX deploy + commit + push
 

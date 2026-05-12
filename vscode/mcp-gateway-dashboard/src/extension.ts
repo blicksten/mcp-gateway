@@ -40,6 +40,7 @@ import {
 	validateServerName,
 	validateUrl,
 } from './validation';
+import { parseSapServerName } from './sap-detector';
 
 // Accepted client interface — allows dependency injection for tests.
 export interface IGatewayClient {
@@ -653,6 +654,61 @@ function registerCommands(
 		});
 	}));
 
+	push(vscode.commands.registerCommand('mcpGateway.renameServer', async (item?: BackendItem) => {
+		if (!item) { return; }
+		const oldName = item.server.name;
+
+		// Block renaming SAP-named servers — their names encode SID/client.
+		if (parseSapServerName(oldName) !== null) {
+			vscode.window.showErrorMessage('Renaming SAP servers is not supported.');
+			return;
+		}
+
+		const newName = await vscode.window.showInputBox({
+			prompt: `Rename server "${oldName}" to:`,
+			value: oldName,
+			validateInput: _makeRenameValidator(oldName),
+		});
+
+		if (newName === undefined) { return; } // user cancelled (ESC)
+		if (newName === oldName) { return; }   // unchanged — early-return
+
+		// Build preserves summary from credential index.
+		const creds = credentialStore.listServerCredentials(oldName);
+		const credCount = creds.env.length + creds.headers.length;
+		const preservesSummary = credCount > 0
+			? `Preserves ${creds.env.length} env var(s) and ${creds.headers.length} header credential(s).`
+			: 'No credentials stored for this server.';
+
+		const confirmation = await vscode.window.showWarningMessage(
+			`Rename "${oldName}" to "${newName}"? ${preservesSummary}`,
+			{ modal: true },
+			'Rename',
+		);
+		if (confirmation !== 'Rename') { return; } // user cancelled confirm modal
+
+		try {
+			await client.patchServer(oldName, { new_name: newName });
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			vscode.window.showErrorMessage(`Rename failed: ${msg}`);
+			return; // gateway rename failed — do not update credentials or refresh
+		}
+
+		// Gateway rename succeeded. Attempt credential migration.
+		try {
+			await credentialStore.renameServerCredentials(oldName, newName);
+		} catch {
+			// Credential migration failed — warn but do not roll back the gateway rename.
+			vscode.window.showWarningMessage(
+				`Server renamed to "${newName}" but ${credCount} credential(s) could not be migrated. They remain under "${oldName}" in the keychain. Re-import KeePass or re-enter them manually.`,
+			);
+		}
+
+		await cache.refresh();
+		vscode.window.showInformationMessage(`Server renamed: "${oldName}" → "${newName}".`);
+	}));
+
 	push(vscode.commands.registerCommand('mcpGateway.addServer', async () => {
 		await AddServerPanel.createOrShow(
 			context.extensionUri,
@@ -947,3 +1003,22 @@ function errorMsg(err: unknown): string {
 
 // Export for testing — allows access to in-flight guard state.
 export { pendingOps as _pendingOps };
+
+/**
+ * Returns the validateInput function used by the renameServer command input box.
+ * Exported for unit tests (Test 19b) that need to call the validator directly.
+ * @param oldName - The current server name (unchanged passes through to early-return).
+ */
+export function _makeRenameValidator(oldName: string): (value: string) => string | null {
+	return (value: string): string | null => {
+		if (!value.trim()) { return 'Name is required'; }
+		if (value === oldName) { return null; }
+		if (!SERVER_NAME_RE.test(value)) {
+			return 'Invalid name (1-64 chars: a-z, A-Z, 0-9, -, _)';
+		}
+		if (parseSapServerName(value) !== null) {
+			return 'Renaming SAP servers is not supported.';
+		}
+		return null;
+	};
+}

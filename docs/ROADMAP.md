@@ -82,7 +82,7 @@ Plan: `docs/PLAN-server-rename.md` (renamed from `PLAN-docs-spikes-2026.md` 2026
 |---|-------|-------------|-------|-----|---|
 | 1 | Go API | **LANDED 2026-05-12.** `PATCH /api/v1/servers/{name}` rename branch (Plan A ordering), `sapname.IsSAP` import (no new sap.go), SAP-name refusal, 25 tests (planned 20, +7 bonus regression/shape) | 25 Go | ~490 | actual ~6 h |
 | 2 | TS Extension Client | **LANDED 2026-05-12.** `MockSecretStorage` failure-injection (T2.0), `gateway-client.patchServer` signature update, `credential-store.renameServerCredentials` (index-first ordering inside `_chainIndexMutation`), `listServerCredentials`, 6 tests | 6 TS | ~85 | actual ~1.5 h |
-| 3 | TS Extension UI | Package.json command + menu, extension.ts handler (input + modal + credential UX), VSIX deploy, 7 tests | 7 TS | ~125 | ~2.2 h |
+| 3 | TS Extension UI | **LANDED 2026-05-12.** Package.json command + view/item/context menu (whitelist regex excludes SAP), extension.ts `mcpGateway.renameServer` handler (input box + validateInput + modal confirm + patchServer + renameServerCredentials + warning-toast partial-failure UX + cache.refresh), VSIX rebuilt + installed, 7 tests T3.3..T3.9 | 7 TS | ~125 | actual ~2 h |
 | 4 | Documentation + manual E2E | README + CHANGELOG + ROADMAP, 9-item manual E2E checklist (Plan A rollback UX + credential-failure UX + ~/.claude.json propagation), final security CV pass | 9 manual | — | ~2.0 h |
 
 **Total plan (post-actualization 2026-05-11, post-/check correction same day):** ~33 tests (20 Go + 13 TS), ~940 LOC, ~14.5 hours, 4 phases, all 4 phases with rollback subsection + GATE checkpoint. Target release: extension **v1.34.0** (currently 1.33.1; v1.33.x was consumed by audit-e7618c9c closeout commit `1c3f130`).
