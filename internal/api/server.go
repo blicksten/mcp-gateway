@@ -556,10 +556,28 @@ func (s *Server) Handler() http.Handler {
 
 	mcpPolicy := s.mcpTransportPolicy(authMW)
 
-	r.Handle("/mcp", mcpPolicy(streamableHandler))
-	r.Handle("/mcp/*", mcpPolicy(streamableHandler))
-	r.Handle("/sse", mcpPolicy(sseHandler))
-	r.Handle("/sse/*", mcpPolicy(sseHandler))
+	// F-8 generalisation — applies the same SetWriteDeadline-clear pattern to
+	// /mcp + /sse streamable/SSE handlers. Without this, Claude Code's
+	// long-lived GET notification streams die every ~660s when the server's
+	// 10-min WriteTimeout fires; KeepAlive ping frames do NOT reset Go's
+	// single-shot per-connection write deadline. POST is intentionally excluded
+	// so the slow-write DoS protection documented at lines 781-787 still
+	// applies to tool-call request bodies.
+	clearWriteDeadlineForGET := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet {
+				if rc := http.NewResponseController(w); rc != nil {
+					_ = rc.SetWriteDeadline(time.Time{}) // zero = no deadline
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+
+	r.Handle("/mcp", mcpPolicy(clearWriteDeadlineForGET(streamableHandler)))
+	r.Handle("/mcp/*", mcpPolicy(clearWriteDeadlineForGET(streamableHandler)))
+	r.Handle("/sse", mcpPolicy(clearWriteDeadlineForGET(sseHandler)))
+	r.Handle("/sse/*", mcpPolicy(clearWriteDeadlineForGET(sseHandler)))
 
 	return r
 }
