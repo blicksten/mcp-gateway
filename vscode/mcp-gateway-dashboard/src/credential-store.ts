@@ -121,6 +121,83 @@ export class CredentialStore {
 		return Object.keys(index.servers);
 	}
 
+	/**
+	 * Returns shallow copies of the env-key list and header-key list for the
+	 * given server. Returns empty arrays for an unknown server — never throws.
+	 * Read-only; runs directly on the index snapshot (NOT under _chainIndexMutation).
+	 */
+	listServerCredentials(server: string): { env: string[]; headers: string[] } {
+		this._validateServerName(server);
+		const index = this._getIndex();
+		const entry = index.servers[server];
+		if (!entry) {
+			return { env: [], headers: [] };
+		}
+		return { env: [...entry.env], headers: [...entry.headers] };
+	}
+
+	/**
+	 * Renames all credential-store entries from `oldName` to `newName`.
+	 * Uses index-first ordering (matches storeEnvVar at credential-store.ts:50-51):
+	 *   STEP 1 — index updated to point at newName BEFORE any secret is copied.
+	 *   STEP 2 — each secret copied from old key to new key.
+	 *   STEP 3 — old secrets deleted, old index entry removed.
+	 * Crash mid-rename leaves {newName: entry-shape} in the index (Step 1
+	 * committed); reconcile() detects stale entries on next call.
+	 */
+	async renameServerCredentials(oldName: string, newName: string): Promise<void> {
+		this._validateServerName(oldName);
+		this._validateServerName(newName);
+
+		if (oldName === newName) {
+			return;
+		}
+
+		const index = this._getIndex();
+		const entry = index.servers[oldName];
+		if (!entry) {
+			return;
+		}
+
+		await this._chainIndexMutation(async () => {
+			// Re-read index inside the chain to get the serialized snapshot.
+			const chainIndex = this._getIndex();
+			const chainEntry = chainIndex.servers[oldName];
+			if (!chainEntry) {
+				return;
+			}
+
+			// STEP 1: index points at newName FIRST (index-first ordering — crash
+			// recoverable because an orphaned index entry is prunable by reconcile()).
+			chainIndex.servers[newName] = { env: [...chainEntry.env], headers: [...chainEntry.headers] };
+			await this._setIndex(chainIndex);
+
+			// STEP 2: copy each secret from old key to new key.
+			for (const key of chainEntry.env) {
+				const val = await this.secrets.get(`mcpGateway/${oldName}/env/${key}`);
+				if (val !== undefined) {
+					await this.secrets.store(`mcpGateway/${newName}/env/${key}`, val);
+				}
+			}
+			for (const key of chainEntry.headers) {
+				const val = await this.secrets.get(`mcpGateway/${oldName}/header/${key}`);
+				if (val !== undefined) {
+					await this.secrets.store(`mcpGateway/${newName}/header/${key}`, val);
+				}
+			}
+
+			// STEP 3: delete old secrets and remove old index entry.
+			for (const key of chainEntry.env) {
+				await this.secrets.delete(`mcpGateway/${oldName}/env/${key}`);
+			}
+			for (const key of chainEntry.headers) {
+				await this.secrets.delete(`mcpGateway/${oldName}/header/${key}`);
+			}
+			delete chainIndex.servers[oldName];
+			await this._setIndex(chainIndex);
+		});
+	}
+
 	async reconcile(): Promise<void> {
 		// B-NEW-24: the entire reconcile pass — read index, await many
 		// secrets.get calls, write back the pruned index — runs as one

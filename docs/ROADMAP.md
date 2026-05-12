@@ -81,7 +81,7 @@ Plan: `docs/PLAN-server-rename.md` (renamed from `PLAN-docs-spikes-2026.md` 2026
 | # | Phase | Description | Tests | LOC | Est. Duration |
 |---|-------|-------------|-------|-----|---|
 | 1 | Go API | **LANDED 2026-05-12.** `PATCH /api/v1/servers/{name}` rename branch (Plan A ordering), `sapname.IsSAP` import (no new sap.go), SAP-name refusal, 25 tests (planned 20, +7 bonus regression/shape) | 25 Go | ~490 | actual ~6 h |
-| 2 | TS Extension Client | `MockSecretStorage` failure-injection extension (T2.0), gateway-client `patchServer` signature update, credential-store `renameServerCredentials` (index-first ordering), `listServerCredentials`, 6 tests | 6 TS | ~85 | ~1.5 h |
+| 2 | TS Extension Client | **LANDED 2026-05-12.** `MockSecretStorage` failure-injection (T2.0), `gateway-client.patchServer` signature update, `credential-store.renameServerCredentials` (index-first ordering inside `_chainIndexMutation`), `listServerCredentials`, 6 tests | 6 TS | ~85 | actual ~1.5 h |
 | 3 | TS Extension UI | Package.json command + menu, extension.ts handler (input + modal + credential UX), VSIX deploy, 7 tests | 7 TS | ~125 | ~2.2 h |
 | 4 | Documentation + manual E2E | README + CHANGELOG + ROADMAP, 9-item manual E2E checklist (Plan A rollback UX + credential-failure UX + ~/.claude.json propagation), final security CV pass | 9 manual | — | ~2.0 h |
 

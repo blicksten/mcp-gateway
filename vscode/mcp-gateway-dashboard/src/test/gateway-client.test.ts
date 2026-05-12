@@ -134,6 +134,47 @@ describe('GatewayClient', () => {
 			const result = await client.patchServer('ctx7', { disabled: true });
 			assert.strictEqual(result.status, 'updated');
 		});
+
+		// Test 14 — T2.6: patchServer with new_name
+		it('Test 14: patchServer sends new_name and parses {status,old_name,new_name} response', async () => {
+			let capturedAuth: string | undefined;
+			let capturedBody: unknown;
+			addRoute('PATCH', '/api/v1/servers/ctx7', (req, body) => {
+				capturedAuth = req.headers.authorization;
+				capturedBody = JSON.parse(body);
+				return {
+					status: 200,
+					body: { status: 'patched', old_name: 'ctx7', new_name: 'ctx8' },
+				};
+			});
+
+			// Build a client with an auth provider so we can verify the header.
+			const authProvider = async (): Promise<string> => 'Bearer test-token';
+			const authClient = new GatewayClient(`http://127.0.0.1:${port}`, 2000, authProvider);
+
+			const result = await authClient.patchServer('ctx7', { new_name: 'ctx8' });
+
+			assert.strictEqual(result.status, 'patched');
+			assert.strictEqual((result as unknown as { old_name: string }).old_name, 'ctx7');
+			assert.strictEqual((result as unknown as { new_name: string }).new_name, 'ctx8');
+			assert.strictEqual(capturedAuth, 'Bearer test-token',
+				'Authorization header must be forwarded from buildAuthHeader provider');
+			assert.deepStrictEqual(capturedBody, { new_name: 'ctx8' },
+				'body must contain only new_name when no other fields are set');
+
+			authClient.dispose();
+		});
+
+		// Backward-compat regression guard for T2.1: existing callers must still compile.
+		it('backward-compat: existing add_env caller compiles and works unchanged', async () => {
+			addRoute('PATCH', '/api/v1/servers/ctx7', (_req, body) => {
+				const parsed = JSON.parse(body);
+				assert.deepStrictEqual(parsed.add_env, ['API_KEY=secret']);
+				return { status: 200, body: { status: 'updated' } };
+			});
+			const result = await client.patchServer('ctx7', { add_env: ['API_KEY=secret'] });
+			assert.strictEqual(result.status, 'updated');
+		});
 	});
 
 	describe('restartServer', () => {

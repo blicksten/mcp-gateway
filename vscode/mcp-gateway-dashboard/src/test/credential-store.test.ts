@@ -217,4 +217,218 @@ describe('CredentialStore', () => {
 			assert.equal(raw?._version, 1);
 		});
 	});
+
+	// Test 15 — T2.7: renameServerCredentials migrates env+header; index-first ordering
+	describe('renameServerCredentials', () => {
+		it('Test 15: migrates env+header secrets and updates index; index-first ordering verified', async () => {
+			// Pre-populate with two env keys and one header key.
+			await store.storeEnvVar('ctx7', 'K1', 'v1');
+			await store.storeEnvVar('ctx7', 'K2', 'v2');
+			await store.storeHeader('ctx7', 'Auth', 'Bearer tok');
+
+			// Track call order to verify STEP 1 (index) precedes STEP 2 (secrets.store).
+			const callOrder: string[] = [];
+
+			// Intercept _setIndex via globalState.update to record index writes.
+			const realUpdate = ctx.globalState.update.bind(ctx.globalState);
+			(ctx.globalState as any).update = async (key: string, value: unknown) => {
+				callOrder.push(`index:${key}`);
+				return realUpdate(key, value);
+			};
+
+			// Intercept secrets.store to record secret writes.
+			const realStore = ctx.secrets.store.bind(ctx.secrets);
+			(ctx.secrets as any).store = async (key: string, value: string) => {
+				callOrder.push(`secret:${key}`);
+				return realStore(key, value);
+			};
+
+			await store.renameServerCredentials('ctx7', 'ctx8');
+
+			// Restore interceptors.
+			(ctx.globalState as any).update = realUpdate;
+			(ctx.secrets as any).store = realStore;
+
+			// Verify STEP 1: first call-order entry is an index write (before any secret store).
+			const firstEntry = callOrder[0];
+			assert.ok(
+				firstEntry.startsWith('index:'),
+				`Index must be written BEFORE first secrets.store call. First call was: "${firstEntry}"`,
+			);
+
+			// Verify all secrets moved from old to new key.
+			assert.equal(await store.getEnvVar('ctx8', 'K1'), 'v1');
+			assert.equal(await store.getEnvVar('ctx8', 'K2'), 'v2');
+			assert.equal(await store.getHeader('ctx8', 'Auth'), 'Bearer tok');
+
+			// Verify old keys deleted.
+			assert.equal(await store.getEnvVar('ctx7', 'K1'), undefined);
+			assert.equal(await store.getEnvVar('ctx7', 'K2'), undefined);
+			assert.equal(await store.getHeader('ctx7', 'Auth'), undefined);
+
+			// Verify index updated correctly.
+			const servers = store.listServers();
+			assert.ok(servers.includes('ctx8'), 'ctx8 must be in index');
+			assert.ok(!servers.includes('ctx7'), 'ctx7 must be removed from index');
+
+			// Verify secret storage keys directly.
+			const keys = ctx.secrets.keys();
+			assert.ok(keys.includes('mcpGateway/ctx8/env/K1'));
+			assert.ok(keys.includes('mcpGateway/ctx8/env/K2'));
+			assert.ok(keys.includes('mcpGateway/ctx8/header/Auth'));
+			assert.ok(!keys.includes('mcpGateway/ctx7/env/K1'));
+			assert.ok(!keys.includes('mcpGateway/ctx7/env/K2'));
+			assert.ok(!keys.includes('mcpGateway/ctx7/header/Auth'));
+		});
+
+		// Test 16 — T2.8: renameServerCredentials handles missing entry
+		it('Test 16: handles missing entry — early return, no error, no secret operations', async () => {
+			const keysBefore = ctx.secrets.keys();
+
+			// rename a server not in index → should be a no-op
+			await store.renameServerCredentials('nonexistent', 'ctx8');
+
+			const keysAfter = ctx.secrets.keys();
+			assert.deepEqual(keysBefore, keysAfter, 'No secret operations must occur for unknown server');
+			assert.deepEqual(store.listServers(), [], 'Index must remain empty');
+		});
+
+		// T2.8 edge case: same name → no-op
+		it('same-name rename is a no-op', async () => {
+			await store.storeEnvVar('ctx7', 'K1', 'v1');
+			const keysBefore = ctx.secrets.keys().sort();
+
+			await store.renameServerCredentials('ctx7', 'ctx7');
+
+			const keysAfter = ctx.secrets.keys().sort();
+			assert.deepEqual(keysBefore, keysAfter, 'Same-name rename must not mutate secrets');
+			assert.ok(store.listServers().includes('ctx7'), 'ctx7 must still be in index');
+		});
+
+		// Test 16b — T2.5: crash mid-rename → reconcile recoverable
+		it('Test 16b: crash mid-rename (failAfterNStores(1)) leaves index with newName; reconcile leaves consistent state', async () => {
+			// Pre-populate with two env keys.
+			await store.storeEnvVar('ctx7', 'K1', 'v1');
+			await store.storeEnvVar('ctx7', 'K2', 'v2');
+
+			// Arm fail-after-1-stores: first secrets.store(newName/K1) succeeds,
+			// second secrets.store(newName/K2) throws.
+			ctx.secrets.failAfterNStores(1, new Error('SecretStorage unavailable'));
+
+			// rename should throw (propagated from _chainIndexMutation callback).
+			await assert.rejects(
+				() => store.renameServerCredentials('ctx7', 'ctx8'),
+				/SecretStorage unavailable/,
+			);
+
+			// STEP 1 must have committed before the crash: index has ctx8.
+			const servers = store.listServers();
+			assert.ok(servers.includes('ctx8'),
+				'index must contain ctx8 (STEP 1 committed before crash)');
+
+			// Partial migration: first key copied, second not.
+			assert.equal(await store.getEnvVar('ctx8', 'K1'), 'v1',
+				'first migrated secret must be present');
+
+			// Index is consistent (no double-entry for K2 under ctx8 that does not exist in secrets).
+			// Now call reconcile() — it must NOT throw and must leave a consistent state.
+			// ctx8 has K1 (secret present) and K2 (secret absent → pruned).
+			// ctx7 still has its old secrets (Step 3 not reached).
+			await store.reconcile();
+
+			// After reconcile: ctx8 index entry reflects only keys whose secrets exist.
+			const creds = store.listServerCredentials('ctx8');
+			assert.ok(!creds.env.includes('K2'),
+				'K2 must be pruned from ctx8 index by reconcile (secret missing)');
+			// No double-entry: ctx7 and ctx8 do not both claim the same key shape.
+			const allServers = store.listServers();
+			// Both ctx7 and ctx8 may exist — that is acceptable; the invariant is
+			// that ctx8 index entries are consistent (only keys with present secrets).
+			for (const name of allServers) {
+				const c = store.listServerCredentials(name);
+				// All listed keys must have a corresponding secret.
+				for (const key of c.env) {
+					assert.notEqual(await store.getEnvVar(name, key), undefined,
+						`index entry ${name}/env/${key} must have a corresponding secret after reconcile`);
+				}
+				for (const key of c.headers) {
+					assert.notEqual(await store.getHeader(name, key), undefined,
+						`index entry ${name}/header/${key} must have a corresponding secret after reconcile`);
+				}
+			}
+		});
+
+		// Test 17 — T2.4: renameServerCredentials race + stranded-index-detection
+		it('Test 17: race — post-rename storeEnvVar resurrects old index entry; reconcile does NOT prune it', async () => {
+			// Pre-populate index with ctx7 having two env keys.
+			await store.storeEnvVar('ctx7', 'K1', 'v1');
+			await store.storeEnvVar('ctx7', 'K2', 'v2');
+
+			// STEP A: rename ctx7 → ctx8 (completes fully first).
+			await store.renameServerCredentials('ctx7', 'ctx8');
+
+			// Verify rename completed.
+			assert.ok(!store.listServers().includes('ctx7'), 'ctx7 must be gone after rename');
+			assert.ok(store.listServers().includes('ctx8'), 'ctx8 must be present after rename');
+
+			// STEP B: storeEnvVar('ctx7', 'K3', 'v3') runs AFTER rename completes.
+			// Per credential-store.ts:232-234, _addToIndex creates a new ctx7 entry.
+			await store.storeEnvVar('ctx7', 'K3', 'v3');
+
+			// Assert final state: index has both ctx8 (migrated) and ctx7 (resurrected).
+			const finalServers = store.listServers();
+			assert.ok(finalServers.includes('ctx8'), 'ctx8 must be in index');
+			assert.ok(finalServers.includes('ctx7'), 'ctx7 must be resurrected in index by post-rename storeEnvVar');
+
+			// ctx8 has the migrated keys.
+			assert.deepEqual(store.listServerCredentials('ctx8').env.sort(), ['K1', 'K2']);
+			// ctx7 has only the new key.
+			assert.deepEqual(store.listServerCredentials('ctx7').env, ['K3']);
+
+			// Verify secrets exist at the right keys.
+			assert.equal(await store.getEnvVar('ctx8', 'K1'), 'v1');
+			assert.equal(await store.getEnvVar('ctx8', 'K2'), 'v2');
+			assert.equal(await store.getEnvVar('ctx7', 'K3'), 'v3');
+
+			// STEP C: call reconcile() and assert ctx7 is NOT pruned.
+			// Secret K3 is present under ctx7, so reconcile cannot identify ctx7 as orphaned.
+			await store.reconcile();
+
+			assert.ok(store.listServers().includes('ctx7'),
+				'ctx7 must NOT be pruned by reconcile — secret K3 is still present under ctx7 ' +
+				'(stranded index entry persists; manual cleanup via future auditOrphanSecrets is the documented mitigation)');
+			assert.equal(await store.getEnvVar('ctx7', 'K3'), 'v3',
+				'K3 secret must still be accessible under ctx7 after reconcile');
+		});
+	});
+
+	// Test 18 — T2.9: listServerCredentials
+	describe('listServerCredentials', () => {
+		it('Test 18: returns env+header arrays for known server and empty arrays for unknown', async () => {
+			await store.storeEnvVar('ctx7', 'API_KEY', 'secret');
+			await store.storeEnvVar('ctx7', 'TOKEN', 'tok');
+			await store.storeHeader('ctx7', 'Authorization', 'Bearer x');
+
+			const creds = store.listServerCredentials('ctx7');
+			assert.deepEqual(creds.env.sort(), ['API_KEY', 'TOKEN']);
+			assert.deepEqual(creds.headers, ['Authorization']);
+
+			// Verify shallow copy: mutating the returned array does not affect the index.
+			creds.env.push('EXTRA');
+			const creds2 = store.listServerCredentials('ctx7');
+			assert.deepEqual(creds2.env.sort(), ['API_KEY', 'TOKEN'],
+				'mutating returned env array must not affect stored index');
+
+			// Unknown server returns empty arrays.
+			const unknown = store.listServerCredentials('nonexistent');
+			assert.deepEqual(unknown, { env: [], headers: [] });
+		});
+
+		it('throws on invalid server name', () => {
+			assert.throws(
+				() => store.listServerCredentials('../evil'),
+				/Invalid server name/,
+			);
+		});
+	});
 });

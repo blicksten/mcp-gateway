@@ -39,18 +39,18 @@
 
 ## Phase 2 — TS Extension Client
 
-- [ ] T2.0: (NEW 2026-05-11 — Phase 2 prerequisite, ~10 LOC) Extend `MockSecretStorage` in `vscode/mcp-gateway-dashboard/src/test/mock-vscode.ts:242` with `failAfterNStores(n, error)` + `failAfterNGets(n, error)` knobs. Default off — existing tests byte-identical. Required by T2.5 / Test 16b.
-- [ ] T2.1: Update `gateway-client.ts::patchServer` signature to accept new optional `new_name?: string` field; backward-compatible
-- [ ] T2.2: Implement `credential-store.ts::listServerCredentials(server)` returning `{env, headers}` shallow copies; empty for unknown
-- [ ] T2.3: Implement `credential-store.ts::renameServerCredentials(oldName, newName)` with index-first ordering inside `_chainIndexMutation`
-- [ ] T2.4: (F-ARCH-2 option a; F-SPEC-2 corrected) Test 17 — concurrent storeEnvVar(old) + renameServerCredentials race; assert ctx7 entry IS resurrected by post-rename storeEnvVar AND that reconcile() does NOT prune it (stranded-index, not orphan-secret); cleanup deferred to v17-rename-orphan-audit
-- [ ] T2.5: (ACTUALIZED 2026-05-11 — uses T2.0 knob) Test 16b `crash mid-rename → reconcile recoverable` — `failAfterNStores(1, new Error('SecretStorage unavailable'))` makes second `secrets.store` throw; reconcile leaves consistent index
-- [ ] T2.6: Test 14 `gateway-client.test.ts patchServer with new_name` — http stub records body shape + auth header; response parses `{status,old_name,new_name}`
-- [ ] T2.7: Test 15 `renameServerCredentials migrates env+header` — assert index points at newName BEFORE first secrets.store call (mock-call-order recorder)
-- [ ] T2.8: Test 16 `renameServerCredentials handles missing entry` — early return, no error
-- [ ] T2.9: Test 18 `listServerCredentials` — known + unknown server cases
-- [ ] T2.10: `npm run compile && npm test -- --grep "credential-store|gateway-client"` — zero failures in scoped suite
-- [ ] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding)
+- [x] T2.0: (NEW 2026-05-11 — Phase 2 prerequisite, ~10 LOC) Extend `MockSecretStorage` in `vscode/mcp-gateway-dashboard/src/test/mock-vscode.ts:242` with `failAfterNStores(n, error)` + `failAfterNGets(n, error)` knobs. Default off — existing tests byte-identical. Required by T2.5 / Test 16b.
+- [x] T2.1: Update `gateway-client.ts::patchServer` signature to accept new optional `new_name?: string` field; backward-compatible
+- [x] T2.2: Implement `credential-store.ts::listServerCredentials(server)` returning `{env, headers}` shallow copies; empty for unknown
+- [x] T2.3: Implement `credential-store.ts::renameServerCredentials(oldName, newName)` with index-first ordering inside `_chainIndexMutation`
+- [x] T2.4: (F-ARCH-2 option a; F-SPEC-2 corrected) Test 17 — concurrent storeEnvVar(old) + renameServerCredentials race; assert ctx7 entry IS resurrected by post-rename storeEnvVar AND that reconcile() does NOT prune it (stranded-index, not orphan-secret); cleanup deferred to v17-rename-orphan-audit
+- [x] T2.5: (ACTUALIZED 2026-05-11 — uses T2.0 knob) Test 16b `crash mid-rename → reconcile recoverable` — `failAfterNStores(1, new Error('SecretStorage unavailable'))` makes second `secrets.store` throw; reconcile leaves consistent index
+- [x] T2.6: Test 14 `gateway-client.test.ts patchServer with new_name` — http stub records body shape + auth header; response parses `{status,old_name,new_name}`
+- [x] T2.7: Test 15 `renameServerCredentials migrates env+header` — assert index points at newName BEFORE first secrets.store call (mock-call-order recorder)
+- [x] T2.8: Test 16 `renameServerCredentials handles missing entry` — early return, no error
+- [x] T2.9: Test 18 `listServerCredentials` — known + unknown server cases
+- [x] T2.10: `npm run compile && npm test -- --grep "credential-store|gateway-client"` — zero failures in scoped suite
+- [x] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding) — **PASSED 2026-05-12** PAL gpt-5.1-codex gate_mode=true (codereview + thinkdeep both PASS 0 findings); 55/55 scoped tests + 1089/1 full suite (1 pre-existing daemon test unrelated)
 
 ## Phase 3 — TS Extension UI
 

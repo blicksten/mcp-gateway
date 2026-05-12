@@ -241,12 +241,50 @@ export const mockCalls: {
 // Mock SecretStorage — in-memory Map for credential tests.
 export class MockSecretStorage {
 	private _data = new Map<string, string>();
+	private _storeCount = 0;
+	private _getCount = 0;
+	private _failAfterNStores: number | undefined = undefined;
+	private _storeError: Error | undefined = undefined;
+	private _failAfterNGets: number | undefined = undefined;
+	private _getError: Error | undefined = undefined;
+
+	/**
+	 * Arms the mock to throw `error` on the (n+1)-th store() call.
+	 * The first n calls pass through normally. No-op by default.
+	 */
+	failAfterNStores(n: number, error: Error): void {
+		this._failAfterNStores = n;
+		this._storeError = error;
+		this._storeCount = 0;
+	}
+
+	/**
+	 * Arms the mock to throw `error` on the (n+1)-th get() call.
+	 * The first n calls pass through normally. No-op by default.
+	 */
+	failAfterNGets(n: number, error: Error): void {
+		this._failAfterNGets = n;
+		this._getError = error;
+		this._getCount = 0;
+	}
 
 	async get(key: string): Promise<string | undefined> {
+		if (this._failAfterNGets !== undefined) {
+			if (this._getCount >= this._failAfterNGets) {
+				throw this._getError!;
+			}
+			this._getCount++;
+		}
 		return this._data.get(key);
 	}
 
 	async store(key: string, value: string): Promise<void> {
+		if (this._failAfterNStores !== undefined) {
+			if (this._storeCount >= this._failAfterNStores) {
+				throw this._storeError!;
+			}
+			this._storeCount++;
+		}
 		this._data.set(key, value);
 	}
 
@@ -260,6 +298,12 @@ export class MockSecretStorage {
 
 	clear(): void {
 		this._data.clear();
+		this._storeCount = 0;
+		this._getCount = 0;
+		this._failAfterNStores = undefined;
+		this._storeError = undefined;
+		this._failAfterNGets = undefined;
+		this._getError = undefined;
 	}
 }
 

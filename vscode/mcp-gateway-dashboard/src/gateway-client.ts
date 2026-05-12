@@ -114,7 +114,14 @@ export class GatewayClient {
 		return this.request<StatusResponse>('DELETE', `/api/v1/servers/${enc(name)}`);
 	}
 
-	async patchServer(name: string, patch: { disabled?: boolean }): Promise<StatusResponse> {
+	async patchServer(name: string, patch: {
+		new_name?: string;
+		disabled?: boolean;
+		add_env?: string[];
+		remove_env?: string[];
+		add_headers?: Record<string, string>;
+		remove_headers?: string[];
+	}): Promise<StatusResponse> {
 		return this.request<StatusResponse>('PATCH', `/api/v1/servers/${enc(name)}`, patch);
 	}
 
