@@ -9,33 +9,33 @@
 
 ## Phase 1 — Go API
 
-- [ ] T1.0: (F-ARCH-1, F-ARCH-6, F-SPEC-1 prerequisite — ACTUALIZED 2026-05-11) Update spike `docs/spikes/2026-05-05-server-rename.md`: (1) **line 27** atomicity claim → `Bounded to lm.Stop duration (up to ~9s for stdio, ~2s for HTTP/SSE)`; (2) **§3 SAP helper block (lines 257-270)** — DELETE the hand-rolled regex code, replace with reuse note pointing at `mcp-gateway/internal/sapname.IsSAP` (codegen from `docs/grammar/sap-server-name.yaml`, R-21); (3) record verify outcome — `lm-error-injection` helper present (`testStopHook`, `lifecycle/manager.go:55`), `MockSecretStorage` present (`src/test/mock-vscode.ts:242`); no estimate inflation
-- [ ] T1.0b: (NEW 2026-05-11) Cross-spike sanity-check before T1.3 — read `docs/spikes/2026-05-08-mcp-server-routing-bypasses.md` (RebuildTools is the single propagation channel post-F1-cleanup) + `docs/spikes/2026-05-09-reflector-coordination.md` (`~/.claude.json` propagation = TS-side `claude-config-sync.ts` reflector, no Go-side reflector exists); record one-paragraph-each summary in REVIEW
-- [ ] T1.1: Add `NewName *string \`json:"new_name,omitempty"\`` to `models.ServerPatch` in `internal/models/types.go`
-- [ ] T1.2: Confirm existing `models.ValidateServerName` invocation produces 400 with existing wording on `*patch.NewName`
-- [ ] T1.3: Implement `handlePatchServer` rename branch (Plan A: lm.AddServer → lm.RemoveServer → cfg-mutation → auto-start warn-only → RebuildTools + TriggerPluginRegen → 200 with `{status,old_name,new_name}`)
-- [ ] T1.4: (ACTUALIZED 2026-05-11 — call-site renamed) Add SAP refusal pre-check (only when `patch.NewName != nil`) using `sapname.IsSAP(name) || sapname.IsSAP(*patch.NewName)` → 400 with body `"renaming SAP-named servers is not supported"`
-- [ ] T1.5: (F-ARCH-7 — REWRITTEN 2026-05-11) Import `mcp-gateway/internal/sapname` in `internal/api/server.go` and use `sapname.IsSAP(name)` for the refusal check. **No new file.** No regex (CLAUDE.md "Regex Discipline (MANDATORY)"). Drift Go↔TS structurally impossible — both sides emitted from the same YAML grammar.
-- [ ] T1.6: Test 1 `TestPatchServer_Rename_Success` — name swap in cfg + lm; env/headers preserved; auto-start under new name
-- [ ] T1.7: Test 2 `TestPatchServer_Rename_NameCollision` — 409 if new_name exists in cfg
-- [ ] T1.8: Test 3 `TestPatchServer_Rename_InvalidName` — 400 if new_name fails ValidateServerName
-- [ ] T1.9: Test 4 `TestPatchServer_Rename_NotFound` — 404 if old name absent
-- [ ] T1.10: Test 5 + Test 6 `TestPatchServer_Rename_SAPRefused_Old/_New` — 400 SAP refusal both directions
-- [ ] T1.11: Test 6b `TestPatchServer_Rename_SAPBeatsBadEnv` — proves validation order step 2 short-circuits step 4
-- [ ] T1.12: Test 7 `TestPatchServer_Rename_RollbackOnRemoveFailure` — rollback fires; final lm has only `name`
-- [ ] T1.13: Test 7b `TestPatchServer_Rename_RollbackOfRollbackErrorLogged` — both errors logged; HTTP 500
-- [ ] T1.14: Test 7c `TestPatchServer_Rename_StartFailWarnsNotRollback` — 200 OK + warn log; no rollback (parity with handleAddServer)
-- [ ] T1.15: Test 7d `TestPatchServer_Rename_BadEnvShortCircuits` — 400 BEFORE state mutation
-- [ ] T1.16: Test 7e `TestPatchServer_Rename_PluginRegenFailureSwallowed` — 200 OK + captured logger has failure entry
-- [ ] T1.17: (F-ARCH-4) Test 7f `TestPatchServer_Rename_StopTimedOutSilentZombie` — handler treats `lm.RemoveServer=nil + Stop timeout` as success (regression guard for inherited LOW risk)
-- [ ] T1.18: Test 8 `TestPatchServer_Rename_PreservesEnv` — env values intact after rename
-- [ ] T1.19: Test 9 `TestPatchServer_Rename_CombinedWithEnvDelta` — combined rename+env atomic; both sub-cases (success + step-2-fail)
-- [ ] T1.20: Test 10 `TestPatchServer_Rename_DisabledFlag` — disabled server: no auto-start
-- [ ] T1.21: (F-ARCH-8) Test 11 `TestPatchServer_RenameNoOp_SameName` — response body == `{"status":"updated"}` when name == new_name
-- [ ] T1.22: Tests 12 + 12b + 12c — RebuildTools called; nil-gateway no panic; env-only PATCH does NOT call RebuildTools
-- [ ] T1.23: (REWRITTEN 2026-05-11; expanded by /check F-ARCH-A2 LOW) Test 13 `TestPatchServer_RenameRefusal_UsesSapnamePackage` — assert rename (a) refuses `vsp-DEV` (positive SAP), (b) PROCEEDS for `random-server` (negative), (c) PROCEEDS for `Vsp-DEV` capital-V (byte-strict prefix invariant), (d) PROCEEDS for `vsp-dev` lowercase-SID (byte-strict charset invariant per `grammar_gen.go:91`). Parser-level cases moved to existing `internal/sapname/grammar_gen_test.go` (no DRY duplication). The 2 case-sensitivity assertions are a regression flag against future ToUpper/trim normalization.
-- [ ] T1.24: Run `go test ./...` + `go vet ./...` + `go build ./...` — zero failures; quote test count into GATE evidence
-- [ ] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding)
+- [x] T1.0: (F-ARCH-1, F-ARCH-6, F-SPEC-1 prerequisite — ACTUALIZED 2026-05-11) Update spike `docs/spikes/2026-05-05-server-rename.md`: (1) **line 27** atomicity claim → `Bounded to lm.Stop duration (up to ~9s for stdio, ~2s for HTTP/SSE)`; (2) **§3 SAP helper block (lines 257-270)** — DELETE the hand-rolled regex code, replace with reuse note pointing at `mcp-gateway/internal/sapname.IsSAP` (codegen from `docs/grammar/sap-server-name.yaml`, R-21); (3) record verify outcome — `lm-error-injection` helper present (`testStopHook`, `lifecycle/manager.go:55`), `MockSecretStorage` present (`src/test/mock-vscode.ts:242`); no estimate inflation
+- [x] T1.0b: (NEW 2026-05-11) Cross-spike sanity-check before T1.3 — read `docs/spikes/2026-05-08-mcp-server-routing-bypasses.md` (RebuildTools is the single propagation channel post-F1-cleanup) + `docs/spikes/2026-05-09-reflector-coordination.md` (`~/.claude.json` propagation = TS-side `claude-config-sync.ts` reflector, no Go-side reflector exists); record one-paragraph-each summary in REVIEW
+- [x] T1.1: Add `NewName *string \`json:"new_name,omitempty"\`` to `models.ServerPatch` in `internal/models/types.go`
+- [x] T1.2: Confirm existing `models.ValidateServerName` invocation produces 400 with existing wording on `*patch.NewName`
+- [x] T1.3: Implement `handlePatchServer` rename branch (Plan A: lm.AddServer → lm.RemoveServer → cfg-mutation → auto-start warn-only → RebuildTools + TriggerPluginRegen → 200 with `{status,old_name,new_name}`)
+- [x] T1.4: (ACTUALIZED 2026-05-11 — call-site renamed) Add SAP refusal pre-check (only when `patch.NewName != nil`) using `sapname.IsSAP(name) || sapname.IsSAP(*patch.NewName)` → 400 with body `"renaming SAP-named servers is not supported"`
+- [x] T1.5: (F-ARCH-7 — REWRITTEN 2026-05-11) Import `mcp-gateway/internal/sapname` in `internal/api/server.go` and use `sapname.IsSAP(name)` for the refusal check. **No new file.** No regex (CLAUDE.md "Regex Discipline (MANDATORY)"). Drift Go↔TS structurally impossible — both sides emitted from the same YAML grammar.
+- [x] T1.6: Test 1 `TestPatchServer_Rename_Success` — name swap in cfg + lm; env/headers preserved; auto-start under new name
+- [x] T1.7: Test 2 `TestPatchServer_Rename_NameCollision` — 409 if new_name exists in cfg
+- [x] T1.8: Test 3 `TestPatchServer_Rename_InvalidName` — 400 if new_name fails ValidateServerName
+- [x] T1.9: Test 4 `TestPatchServer_Rename_NotFound` — 404 if old name absent
+- [x] T1.10: Test 5 + Test 6 `TestPatchServer_Rename_SAPRefused_Old/_New` — 400 SAP refusal both directions
+- [x] T1.11: Test 6b `TestPatchServer_Rename_SAPBeatsBadEnv` — proves validation order step 2 short-circuits step 4
+- [x] T1.12: Test 7 `TestPatchServer_Rename_RollbackOnRemoveFailure` — rollback fires; final lm has only `name`
+- [x] T1.13: Test 7b `TestPatchServer_Rename_RollbackOfRollbackErrorLogged` — both errors logged; HTTP 500
+- [x] T1.14: Test 7c `TestPatchServer_Rename_StartFailWarnsNotRollback` — 200 OK + warn log; no rollback (parity with handleAddServer)
+- [x] T1.15: Test 7d `TestPatchServer_Rename_BadEnvShortCircuits` — 400 BEFORE state mutation
+- [x] T1.16: Test 7e `TestPatchServer_Rename_PluginRegenFailureSwallowed` — 200 OK + captured logger has failure entry
+- [x] T1.17: (F-ARCH-4) Test 7f `TestPatchServer_Rename_StopTimedOutSilentZombie` — handler treats `lm.RemoveServer=nil + Stop timeout` as success (regression guard for inherited LOW risk)
+- [x] T1.18: Test 8 `TestPatchServer_Rename_PreservesEnv` — env values intact after rename
+- [x] T1.19: Test 9 `TestPatchServer_Rename_CombinedWithEnvDelta` — combined rename+env atomic; both sub-cases (success + step-2-fail)
+- [x] T1.20: Test 10 `TestPatchServer_Rename_DisabledFlag` — disabled server: no auto-start
+- [x] T1.21: (F-ARCH-8) Test 11 `TestPatchServer_RenameNoOp_SameName` — response body == `{"status":"updated"}` when name == new_name
+- [x] T1.22: Tests 12 + 12b + 12c — RebuildTools called; nil-gateway no panic; env-only PATCH does NOT call RebuildTools
+- [x] T1.23: (REWRITTEN 2026-05-11; expanded by /check F-ARCH-A2 LOW) Test 13 `TestPatchServer_RenameRefusal_UsesSapnamePackage` — assert rename (a) refuses `vsp-DEV` (positive SAP), (b) PROCEEDS for `random-server` (negative), (c) PROCEEDS for `Vsp-DEV` capital-V (byte-strict prefix invariant), (d) PROCEEDS for `vsp-dev` lowercase-SID (byte-strict charset invariant per `grammar_gen.go:91`). Parser-level cases moved to existing `internal/sapname/grammar_gen_test.go` (no DRY duplication). The 2 case-sensitivity assertions are a regression flag against future ToUpper/trim normalization.
+- [x] T1.24: Run `go test ./...` + `go vet ./...` + `go build ./...` — zero failures; quote test count into GATE evidence
+- [x] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding) — **PASSED 2026-05-12** PAL gpt-5.1-codex gate_mode=true
 
 ## Phase 2 — TS Extension Client
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -28,6 +29,7 @@ import (
 	"mcp-gateway/internal/patchstate"
 	"mcp-gateway/internal/plugin"
 	"mcp-gateway/internal/proxy"
+	"mcp-gateway/internal/sapname"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -1051,16 +1053,23 @@ func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	_, ok := s.lm.Entry(name)
-	if !ok {
-		writeError(w, http.StatusNotFound, "server not found")
-		return
-	}
 
 	var patch models.ServerPatch
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
+	}
+
+	// SAP refusal — only when a rename is requested (env/disabled patches on SAP servers still allowed).
+	if patch.NewName != nil {
+		if sapname.IsSAP(name) || sapname.IsSAP(*patch.NewName) {
+			writeError(w, http.StatusBadRequest, "renaming SAP-named servers is not supported")
+			return
+		}
+		if err := models.ValidateServerName(*patch.NewName); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	// Validate incoming env entries individually before merge.
@@ -1106,9 +1115,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	// Deep-copy headers map before mutation to preserve original on validation failure.
 	if len(patch.RemoveHeaders) > 0 || len(patch.AddHeaders) > 0 {
 		newHeaders := make(map[string]string, len(scCopy.Headers)+len(patch.AddHeaders))
-		for k, v := range scCopy.Headers {
-			newHeaders[k] = v
-		}
+		maps.Copy(newHeaders, scCopy.Headers)
 		scCopy.Headers = newHeaders
 	}
 	if len(patch.RemoveHeaders) > 0 {
@@ -1118,9 +1125,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		needsRestart = true
 	}
 	if len(patch.AddHeaders) > 0 {
-		for k, v := range patch.AddHeaders {
-			scCopy.Headers[k] = v
-		}
+		maps.Copy(scCopy.Headers, patch.AddHeaders)
 		needsRestart = true
 	}
 
@@ -1131,7 +1136,15 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Commit validated copy back to the live config.
+	// Rename branch: activates only when new_name differs from the current name.
+	if patch.NewName != nil && *patch.NewName != name {
+		newName := *patch.NewName
+		s.cfgMu.Unlock()
+		s.handleRename(w, r, name, newName, &scCopy)
+		return
+	}
+
+	// Commit validated copy back to the live config (in-place patch path).
 	*sc = scCopy
 	data := s.marshalConfig()
 	s.cfgMu.Unlock()
@@ -1169,6 +1182,71 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// handleRename implements the Plan A rename sequence:
+//  1. lm.AddServer(newName) — 409 on collision
+//  2. lm.RemoveServer(name) — rollback via lm.RemoveServer(newName) on error (F-ARCH-9: use
+//     context.Background() because the request context may already be cancelled, which is
+//     exactly why RemoveServer(name) failed)
+//  3. cfg map mutation + marshalConfig + flushConfig (single commit point)
+//  4. auto-start under newName — warn-only, no rollback (parity with handleAddServer:787-789)
+//  5. RebuildTools + TriggerPluginRegen
+//
+// scCopy is the already-validated merged config (env/header/disabled changes applied).
+// cfgMu must NOT be held by the caller — this function acquires it in step 3.
+func (s *Server) handleRename(w http.ResponseWriter, r *http.Request, name, newName string, scCopy *models.ServerConfig) {
+	// Step 1: register newName in lm — surfaces collision as 409.
+	if err := s.lm.AddServer(newName, scCopy); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+
+	// Step 2: remove old name from lm.
+	if _, err := s.lm.RemoveServer(r.Context(), name); err != nil {
+		// Rollback: remove the just-added newName entry.
+		// context.Background() because r.Context() may already be cancelled (F-ARCH-9 carry).
+		if _, rbErr := s.lm.RemoveServer(context.Background(), newName); rbErr != nil {
+			s.logger.Error("rename failed at remove stage: rollback also failed",
+				"old_name", name, "new_name", newName,
+				"remove_error", err, "rollback_error", rbErr)
+			writeError(w, http.StatusInternalServerError,
+				fmt.Sprintf("rename failed at remove stage (rolled back): %v; rollback error: %v", err, rbErr))
+			return
+		}
+		s.logger.Error("rename failed at remove stage (rolled back)",
+			"old_name", name, "new_name", newName, "error", err)
+		writeError(w, http.StatusInternalServerError,
+			fmt.Sprintf("rename failed at remove stage (rolled back): %v", err))
+		return
+	}
+
+	// Step 3: commit cfg map — single atomic point after which name→newName is durable.
+	s.cfgMu.Lock()
+	s.cfg.Servers[newName] = scCopy
+	delete(s.cfg.Servers, name)
+	data := s.marshalConfig()
+	s.cfgMu.Unlock()
+	s.flushConfig(data)
+
+	// Step 4: auto-start under newName — warn-only, consistent with handleAddServer behavior.
+	if !scCopy.Disabled {
+		if err := s.lm.Start(r.Context(), newName); err != nil {
+			s.logger.Warn("auto-start after rename failed", "server", newName, "error", err)
+		}
+	}
+
+	// Step 5: propagate to MCP clients and plugin index.
+	if s.gw != nil {
+		s.gw.RebuildTools()
+	}
+	s.TriggerPluginRegen()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "patched",
+		"old_name": name,
+		"new_name": newName,
+	})
 }
 
 // removeEnvKeys removes entries from env whose key matches any in keys.

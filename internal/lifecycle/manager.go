@@ -59,7 +59,8 @@ type Manager struct {
 	// Set only before the manager begins servicing concurrent requests; no
 	// concurrent writes in production (F-05 — write-once-before-traffic
 	// invariant; no atomic.Pointer needed).
-	testStopHook func(name string) error
+	testStopHook  func(name string) error
+	testRemoveHook func(name string) error // non-nil only in tests
 }
 
 // NewManager creates a lifecycle manager from the given config.
@@ -628,6 +629,20 @@ func (m *Manager) AddServer(name string, cfg *models.ServerConfig) error {
 	return nil
 }
 
+// SetTestStopHook installs a hook that replaces the real Stop sequence in tests.
+// Must be called before the manager begins servicing concurrent requests.
+// The hook is only consulted when non-nil; production code never sets it.
+func (m *Manager) SetTestStopHook(hook func(name string) error) {
+	m.testStopHook = hook
+}
+
+// SetTestRemoveHook installs a hook that makes RemoveServer return an error
+// without deleting the entry — used by rename tests to verify rollback behavior
+// when removal of the old entry fails. Must be called before concurrent traffic.
+func (m *Manager) SetTestRemoveHook(hook func(name string) error) {
+	m.testRemoveHook = hook
+}
+
 // RemoveResult carries the outcome of a RemoveServer call.
 // Orphan is true when Stop returned a non-nil error — the OS process may still
 // be running. The entry is still deleted from the manager regardless.
@@ -646,6 +661,14 @@ func (m *Manager) RemoveServer(ctx context.Context, name string) (RemoveResult, 
 	m.mu.RUnlock()
 	if !exists {
 		return RemoveResult{}, fmt.Errorf("server %q not found", name)
+	}
+
+	// testRemoveHook is set only in tests that need RemoveServer to fail without
+	// deleting the entry (e.g. rename rollback tests).
+	if m.testRemoveHook != nil {
+		if err := m.testRemoveHook(name); err != nil {
+			return RemoveResult{}, err
+		}
 	}
 
 	// Stop outside the lock — surface the error rather than swallowing it (R-28).

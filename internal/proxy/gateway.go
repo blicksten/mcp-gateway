@@ -145,6 +145,14 @@ func (g *Gateway) buildMCPServer() *mcp.Server {
 	g.aggregateImpl = impl
 	server := mcp.NewServer(impl, &mcp.ServerOptions{
 		Instructions: gatewayInstructions,
+		// KeepAlive enables periodic ping requests on long-lived GET notification
+		// streams. Without this, Claude Code's MCP client (5-minute idle timeout)
+		// disconnects every ~5 min on the aggregate /mcp endpoint with
+		// "SSE stream disconnected: TimeoutError" → 3 strikes → "Closing transport"
+		// → tabs that were awaiting MCP notifications hang for hours.
+		// Empirically verified 2026-05-12 by curl probe: GET /mcp produced zero
+		// bytes over 5 min before this fix. SDK doc: opt-in, default 0.
+		KeepAlive: 60 * time.Second,
 	})
 	return server
 }
@@ -452,7 +460,14 @@ func (g *Gateway) RebuildTools() {
 			g.perBackendServer[backend] = mcp.NewServer(&mcp.Implementation{
 				Name:    backend,
 				Version: g.version,
-			}, nil)
+			}, &mcp.ServerOptions{
+				// Symmetric with aggregate server keepalive (gateway.buildMCPServer).
+				// Defense in depth: if Claude Code ever opens long-lived GET streams
+				// to per-backend endpoints (currently does not — they go through
+				// per-call POST), they would suffer the same 5-min idle timeout
+				// without this. Cost: one ping/min per active per-backend session.
+				KeepAlive: 60 * time.Second,
+			})
 			g.backendRegistered[backend] = make(map[string]struct{})
 		}
 	}

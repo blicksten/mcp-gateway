@@ -375,6 +375,7 @@ func (c *Config) Validate() error {
 
 // ServerPatch defines the fields that can be updated via PATCH /api/v1/servers/{name}.
 type ServerPatch struct {
+	NewName       *string           `json:"new_name,omitempty"`
 	Disabled      *bool             `json:"disabled,omitempty"`
 	AddEnv        []string          `json:"add_env,omitempty"`
 	RemoveEnv     []string          `json:"remove_env,omitempty"`
