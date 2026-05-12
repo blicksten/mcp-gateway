@@ -566,9 +566,12 @@ func (s *Server) Handler() http.Handler {
 	clearWriteDeadlineForGET := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodGet {
-				if rc := http.NewResponseController(w); rc != nil {
-					_ = rc.SetWriteDeadline(time.Time{}) // zero = no deadline
-				}
+				// http.NewResponseController never returns nil (documented
+				// stdlib contract); SetWriteDeadline returns an error only
+				// when the underlying ResponseWriter chain does not implement
+				// the optional interface — safe to discard, behaviour falls
+				// back to the http.Server's configured WriteTimeout.
+				_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 			}
 			next.ServeHTTP(w, r)
 		})
@@ -1434,10 +1437,10 @@ func (s *Server) handleServerLogs(w http.ResponseWriter, r *http.Request) {
 
 	// F-8 fix: disable WriteTimeout for SSE connections. The server's default
 	// 60s WriteTimeout kills long-lived SSE streams that idle between events.
-	// http.ResponseController.SetWriteDeadline(time.Time{}) clears the deadline.
-	if rc := http.NewResponseController(w); rc != nil {
-		_ = rc.SetWriteDeadline(time.Time{}) // zero = no deadline
-	}
+	// http.NewResponseController is documented never to return nil, and the
+	// SetWriteDeadline error path only triggers when the underlying writer
+	// does not implement the optional interface — safe to discard.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
