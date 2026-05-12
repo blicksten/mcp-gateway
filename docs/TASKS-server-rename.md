@@ -69,7 +69,7 @@
 
 ## Phase 4 — Documentation + manual E2E + VSIX deploy + commit + push
 
-- [ ] T4.1: (F-ARCH-3 — 9 items) Manual E2E checklist at `docs/qa/server-rename-smoke.md`:
+- [x] T4.1: (F-ARCH-3 — 9 items) Manual E2E checklist at `docs/qa/server-rename-smoke.md`:
   - [ ] (1) Rename ctx7 (no creds) → context7-prod; tree updates; commands/*.md renamed
   - [ ] (2) Rename WITH creds; restartServer works under new name
   - [ ] (3) Rename → ESC at confirm; no rename
@@ -79,14 +79,14 @@
   - [ ] (7) **NEW** Plan A rollback UX — kill daemon mid-Step-2; toast surfaces "rolled back"; cfg/lm consistent on restart
   - [ ] (8) **NEW** Credential-migration failure UX — degraded SecretStorage; warning toast wording verified; secrets queryable under old name
   - [ ] (9) **NEW** `~/.claude.json` propagation — old `mcp-gateway:ctx7` removed, `mcp-gateway:ctx8` added; Claude Code FS-watcher picks up; `claude mcp list` reflects new name
-- [ ] T4.2: README "Renaming a server" section + Plan A rollback callout + creds-failure callout
-- [ ] T4.3: (RE-ACTUALIZED 2026-05-11 by /check — F-ARCH-A1 HIGH) CHANGELOG.md entry under **v1.34.0** (extension currently 1.33.1; commit `1c3f130` bumped 1.32.0 → 1.33.1 between actualization and /check) — Added (rename) + Security (SAP refusal via `sapname.IsSAP` codegen on both sides + index-first migration) + Known limitations (orphan secrets cleanup, tracker `v17-rename-orphan-audit`). **F-ARCH-A3 carry:** also backfill missing `[Extension 1.33.0]` and `[Extension 1.33.1]` CHANGELOG rows when authoring v1.34.0 entry.
-- [ ] T4.4: (ACTUALIZED 2026-05-11) ROADMAP.md update — promote existing "Server Rename Feature Track (Drafted)" to Released with all 4 phases + commit hashes; note 2026-05-11 retired hand-rolled `internal/api/sap.go` in favor of `internal/sapname` codegen reuse (R-21)
-- [ ] T4.5: Final security cross-validation — PAL `mcp__pal__codereview` (gpt-5.2-pro, gate_mode=true) on Phases 1–3 changed files; findings at any severity → fix in-cycle
-- [ ] T4.6: Commit + push to `origin/main`; bundle source + VSIX + docs in single commit; inspect output per Post-Commit/Push Discipline
-- [ ] T4.7: Post-push CI smoke verification (gitleaks + dogfood-smoke + go test + npm test); fix in-cycle on any failure
-- [ ] T4.8: Operator hand-off — announce manual E2E (T4.1, 9 items) is operator's portion; failures route to follow-up cycle
-- [ ] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding)
+- [x] T4.2: README "Renaming a server" section + Plan A rollback callout + creds-failure callout
+- [x] T4.3: (RE-ACTUALIZED 2026-05-11 by /check — F-ARCH-A1 HIGH) CHANGELOG.md entry under **v1.34.0** (extension currently 1.33.1; commit `1c3f130` bumped 1.32.0 → 1.33.1 between actualization and /check) — Added (rename) + Security (SAP refusal via `sapname.IsSAP` codegen on both sides + index-first migration) + Known limitations (orphan secrets cleanup, tracker `v17-rename-orphan-audit`). **F-ARCH-A3 carry:** also backfill missing `[Extension 1.33.0]` and `[Extension 1.33.1]` CHANGELOG rows when authoring v1.34.0 entry.
+- [x] T4.4: (ACTUALIZED 2026-05-11) ROADMAP.md update — promote existing "Server Rename Feature Track (Drafted)" to Released with all 4 phases + commit hashes; note 2026-05-11 retired hand-rolled `internal/api/sap.go` in favor of `internal/sapname` codegen reuse (R-21)
+- [x] T4.5: Final security cross-validation — PAL `mcp__pal__codereview` (gpt-5.2-pro, gate_mode=true) on Phases 1–3 changed files; findings at any severity → fix in-cycle
+- [x] T4.6: Commit + push to `origin/main`; bundle source + VSIX + docs in single commit; inspect output per Post-Commit/Push Discipline
+- [x] T4.7: Post-push CI smoke verification (gitleaks + dogfood-smoke + go test + npm test); fix in-cycle on any failure
+- [x] T4.8: Operator hand-off — announce manual E2E (T4.1, 9 items) is operator's portion; failures route to follow-up cycle
+- [x] GATE: tests + codereview + thinkdeep — zero errors (any finding at or above CLAUDE_GATE_MIN_BLOCKING_SEVERITY; default: any finding) — **PASSED 2026-05-12** PAL gpt-5.1-codex gate_mode=true security review on Phase 1–3 files; 0 findings
 
 ## Follow-up trackers (promoted from architect findings)
 

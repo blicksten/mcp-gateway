@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Extension 1.33.5] - 2026-05-12 — Server Rename Feature
+
+**Plan:** [docs/PLAN-server-rename.md](docs/PLAN-server-rename.md) — 4-phase plan (Go API → TS Extension Client → TS Extension UI → Documentation + manual E2E).
+
+### Added — Gateway daemon
+
+- **`PATCH /api/v1/servers/{name}` accepts `new_name`** — full rename support on the existing PATCH endpoint, transactional with env / header / disabled updates. `internal/models/types.go::ServerPatch.NewName *string` (pointer so empty string is distinguishable from "field absent"). Response on rename: `200 {"status":"patched","old_name":"{old}","new_name":"{new}"}`. No-op rename (`new_name == name`) preserves the existing `{"status":"updated"}` shape.
+- **Plan A ordering** in `handlePatchServer`: `lm.AddServer({new})` → `lm.RemoveServer(r.Context(), {old})` with `context.Background()` rollback on failure → `cfgMu`-protected map swap → auto-start under new name (warn-only) → `RebuildTools` + `TriggerPluginRegen` (R-26 + spike 2026-05-08 routing-bypasses F1: `RebuildTools` is the single propagation channel for clients).
+- **SAP refusal via `mcp-gateway/internal/sapname`** — the regex-free codegen package from `docs/grammar/sap-server-name.yaml` (R-21, sap-picker T-A.2) is imported by `internal/api/server.go`. `sapname.IsSAP(name) || sapname.IsSAP(*patch.NewName)` → 400 `"renaming SAP-named servers is not supported"`. No new file, no new regex (CLAUDE.md "Regex Discipline"). Existing env-only / disabled-only PATCHes against SAP-named servers continue to work (SAP non-goal is renaming, not all-mutation).
+- **`lifecycle.Manager` test-only hooks**: `SetTestStopHook` + `SetTestRemoveHook` for error injection from the `api` package's rename tests (write-once-before-traffic invariant — production never calls these).
+- **Bonus operator-approved fix**: `internal/proxy/gateway.go` adds `KeepAlive: 60 * time.Second` to both the aggregate `/mcp` server and per-backend `mcp.Server` instances. Mitigates Claude Code's 5-min idle MCP disconnect ("SSE stream disconnected: TimeoutError" → 3 strikes → "Closing transport"), empirically verified 2026-05-12 by curl probe (GET /mcp produced zero bytes over 5 min before this fix).
+
+### Added — VSCode extension
+
+- **`mcpGateway.renameServer` command** + `view/item/context` menu entry on the MCP Backends tree (`viewItem` regex whitelist of 7 lifecycle states `running|stopped|degraded|error|disabled|starting|restarting` — deliberately excludes SAP `contextValue`s).
+- **`extension.ts` handler** — input box with `validateInput` rejecting empty / unchanged / format-invalid (`SERVER_NAME_RE`) / SAP-shaped names via the exported `parseSapServerName` helper (NOT regex literals — drift Go↔TS structurally impossible because both sides come from the same YAML grammar). Confirm modal showing **preserves summary** {env count, header count, secret count} computed via `credentialStore.listServerCredentials`. On confirm: gateway `patchServer` → on success, `credentialStore.renameServerCredentials` wrapped in try/catch → on throw, **warning toast**: *"Server renamed to '{new}' but {N} credential(s) could not be migrated. They remain under '{old}' in the keychain. Re-import KeePass or re-enter them manually."* `cache.refresh()` always fires on gateway success.
+- **`credential-store.ts::renameServerCredentials(oldName, newName)`** — index-first ordering inside `_chainIndexMutation`: STEP 1 commit `newName` index entry FIRST → STEP 2 copy each secret from `mcpGateway/{old}/*` → `mcpGateway/{new}/*` → STEP 3 delete old secrets + remove `oldName` index entry. Crash-mid-rename leaves `{newName: entry-shape}` in the index — recoverable by `reconcile()`.
+- **`credential-store.ts::listServerCredentials(server)`** — read-only `{env, headers}` shallow-copy helper (returns `{env:[], headers:[]}` for unknown server).
+- **`gateway-client.ts::patchServer`** signature extended with `new_name?` + `add_env?` + `remove_env?` + `add_headers?` + `remove_headers?` (purely additive — existing callers compile + work unchanged).
+- **`MockSecretStorage::failAfterNStores(n, error)` + `failAfterNGets(n, error)`** failure-injection knobs (default no-ops; existing call sites byte-identical). Required by Test 16b crash-mid-rename + reconcile recovery.
+
+### Tests
+
+- **25 new Go tests** in `internal/api/server_rename_test.go` covering happy path / collision (409) / invalid name (400) / not-found (404) / SAP refusal both directions (400) / SAP-beats-bad-env validation order / rollback / rollback-of-rollback ERROR log / start-fail warn-only / bad-env short-circuit / plugin-regen failure swallowed / stop-timed-out silent zombie regression guard (F-ARCH-4) / preserves env / combined rename+env atomic / disabled flag / no-op rename returns `{"status":"updated"}` / RebuildTools called and env-only PATCH does NOT call RebuildTools / case-strict invariants (`vsp-DEV` SAP, `random-server` proceed, `Vsp-DEV` proceed, `vsp-dev` proceed) / response shape / rollback ERROR-level log assertion / ValidateServerName on `*new_name`.
+- **13 new TS tests** across `credential-store.test.ts`, `gateway-client.test.ts`, `commands.test.ts` covering migrate env+header / missing entry / patchServer with `new_name` / race + stranded-index (F-ARCH-2 option a) / crash-mid-rename + reconcile recoverable (uses `failAfterNStores(1)` knob) / `listServerCredentials` / UI happy path / SAP rejection / cancel input / cancel confirm / API failure / gateway success + creds failure / validateInput rejections.
+
+### Security
+
+- SAP-name detector source-of-truth lives in `docs/grammar/sap-server-name.yaml` (R-21). Both Go and TS sides are emitted from the same YAML — drift impossible. No new regex literals introduced.
+- `ValidateServerName` guards `new_name` against injection: 1-64 chars, `[A-Za-z0-9_-]+`, no `__` separator (would collide with tool-namespace token).
+- Index-first ordering in `renameServerCredentials` ensures secrets never live under an unindexed key — `reconcile()` can detect and prune partial-rename state on next extension activation.
+
+### Known limitations
+
+- **Orphan secrets after partial-migration failure** (LOW): if the gateway PATCH succeeds but the extension's credential migration throws mid-copy, secrets under `mcpGateway/{old}/*` remain in the keychain (the warning toast names them). Operator must re-import via KeePass or re-enter manually. Tracker: `v17-rename-orphan-audit` for a future `auditOrphanSecrets` command.
+- **Stranded index entry after concurrent storeEnvVar**: if `storeEnvVar({old}, K3, v)` lands after `renameServerCredentials({old}, {new})` completes, the old-name index entry is resurrected with the new K3 secret. `reconcile()` cannot prune (K3 secret is genuinely present). Documented in `docs/REVIEW-server-rename.md` Phase 2 §P2-DOC-01.
+
+### Operator action required
+
+After installing this extension version, run **VSCode → Developer: Reload Window** so the new `mcpGateway.renameServer` command + context menu are activated.
+
+---
+
 ## [Daemon 1.9.0 + Extension 1.32.0] - 2026-05-10 — Wave 2 (Import-from-Claude)
 
 **Plan:** [docs/PLAN-sap-picker-and-import-mcp.md](docs/PLAN-sap-picker-and-import-mcp.md) Wave 2 (Phases D + E + F).

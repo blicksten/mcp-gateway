@@ -67,7 +67,7 @@ Phases 1–16 implemented. Full history preserved locally in `full-history-backu
 
 ---
 
-## Server Rename Feature Track (Phase 1 LANDED 2026-05-12; Phases 2–4 remain)
+## Server Rename Feature Track (RELEASED 2026-05-12 — all 4 phases LANDED)
 
 Plan: `docs/PLAN-server-rename.md` (renamed from `PLAN-docs-spikes-2026.md` 2026-05-11; 2026-05-06 draft, **actualized 2026-05-11** — see PLAN §11 for diff: switched to `internal/sapname` codegen reuse per R-21, added Phase 2 `MockSecretStorage` failure-injection extension, version anchor pinned to v1.34.0 (initially v1.33.0; re-corrected same day via /check pipeline `checkpoint-check-e6e30eef` after commit `1c3f130` bumped extension to 1.33.1), cross-spike sanity-check task added). Sourced from `docs/spikes/2026-05-05-server-rename.md` v4. Audit history: 9 architect findings (F-ARCH-1..9) + 5 lead-audit findings (F-AUD-1..5) + 3 specialist-audit findings (F-SPEC-1..3) — **all 17 findings status=Fixed in-cycle** during planning pipeline `planning-19b7b15b`; F-ARCH-7 + F-SPEC-1 are *more thoroughly* addressed by the 2026-05-11 sapname-package reuse than by the 2026-05-06 draft.
 
@@ -76,14 +76,14 @@ Plan: `docs/PLAN-server-rename.md` (renamed from `PLAN-docs-spikes-2026.md` 2026
 - Implementation: `internal/models/types.go` (`NewName *string`), `internal/api/server.go` (rename branch + `sapname` import + `maps.Copy` polish at 1115-1133), `internal/lifecycle/manager.go` (exported `SetTestStopHook` + `SetTestRemoveHook` for test injection), `internal/api/server_rename_test.go` (25 test functions). Bonus: `internal/proxy/gateway.go` adds `KeepAlive: 60s` on aggregate + per-backend `mcp.Server` (operator-confirmed in-cycle keep — mitigates Claude Code 5-min idle MCP disconnect).
 - GATE evidence: `go test ./... -count=1` → 21/21 packages ok; `go test ./internal/api/... -run TestPatchServer_Rename` → 25 PASS / 0 FAIL; `go build ./...` exit=0; `go vet ./...` exit=0; PAL `mcp__pal__codereview` gpt-5.1-codex gate_mode=true → `gate_verdict=PASS 0 findings`; PAL `mcp__pal__thinkdeep` gpt-5.1-codex gate_mode=true → `gate_verdict=PASS 0 findings`. Real-boundary evidence (Inv-2 cancellation ownership: `context.Background()` rollback per F-ARCH-9) recorded in `docs/REVIEW-server-rename.md`. Pipeline `execute-29bd533a` cancelled at step 5 because spawn_token lease blocked complete_step after long-running PAL calls — pattern matches feedback memory `feedback_finish_avoid_infinite_audit.md`.
 
-**Status: Phase 1 LANDED; Phases 2 (TS Extension Client), 3 (TS Extension UI), 4 (Docs + manual E2E) remain — resume via `/run server-rename`**
+**Status: RELEASED 2026-05-12** — all 4 phases LANDED. Commits: `5d21509` (Phase 1 Go API), `a634b5c` (Phase 2 TS Extension Client), `d5d6157` (Phase 3 TS Extension UI + VSIX 1.33.5), pending Phase 4 commit (docs + manual E2E checklist + final security CV + push). Sub-feature `internal/api/sap.go` retired in favor of `mcp-gateway/internal/sapname` codegen reuse (R-21).
 
 | # | Phase | Description | Tests | LOC | Est. Duration |
 |---|-------|-------------|-------|-----|---|
 | 1 | Go API | **LANDED 2026-05-12.** `PATCH /api/v1/servers/{name}` rename branch (Plan A ordering), `sapname.IsSAP` import (no new sap.go), SAP-name refusal, 25 tests (planned 20, +7 bonus regression/shape) | 25 Go | ~490 | actual ~6 h |
 | 2 | TS Extension Client | **LANDED 2026-05-12.** `MockSecretStorage` failure-injection (T2.0), `gateway-client.patchServer` signature update, `credential-store.renameServerCredentials` (index-first ordering inside `_chainIndexMutation`), `listServerCredentials`, 6 tests | 6 TS | ~85 | actual ~1.5 h |
 | 3 | TS Extension UI | **LANDED 2026-05-12.** Package.json command + view/item/context menu (whitelist regex excludes SAP), extension.ts `mcpGateway.renameServer` handler (input box + validateInput + modal confirm + patchServer + renameServerCredentials + warning-toast partial-failure UX + cache.refresh), VSIX rebuilt + installed, 7 tests T3.3..T3.9 | 7 TS | ~125 | actual ~2 h |
-| 4 | Documentation + manual E2E | README + CHANGELOG + ROADMAP, 9-item manual E2E checklist (Plan A rollback UX + credential-failure UX + ~/.claude.json propagation), final security CV pass | 9 manual | — | ~2.0 h |
+| 4 | Documentation + manual E2E | **LANDED 2026-05-12.** README (new "Renaming a server" subsection under "VS Code Extension"), CHANGELOG (Extension 1.33.5 entry — Added/Tests/Security/Known limitations/Operator action), ROADMAP (this row), 9-item manual E2E checklist at `docs/qa/server-rename-smoke.md` (Plan A rollback UX + credential-failure UX + ~/.claude.json propagation), final security CV pass | 9 manual | — | actual ~1 h |
 
 **Total plan (post-actualization 2026-05-11, post-/check correction same day):** ~33 tests (20 Go + 13 TS), ~940 LOC, ~14.5 hours, 4 phases, all 4 phases with rollback subsection + GATE checkpoint. Target release: extension **v1.34.0** (currently 1.33.1; v1.33.x was consumed by audit-e7618c9c closeout commit `1c3f130`).
 

@@ -214,11 +214,38 @@ code --install-extension mcp-gateway-dashboard-1.0.0.vsix
 **Features:**
 - Activity Bar icon with "Backends" and "SAP Systems" tree views
 - Status bar showing running/total server counts
-- One-click server management: enable, disable, restart, remove
+- One-click server management: enable, disable, restart, remove, **rename**
 - Live SSE log streaming per server
 - Webview detail panels with server config and tools
 - Credential management via OS keychain
 - Auto-start daemon when VS Code opens
+
+### Renaming a server
+
+Right-click a non-SAP server in the **MCP Backends** tree view → **Rename Server**. Enter the new name in the input box (1–64 alphanumeric/hyphen/underscore chars; cannot collide with an existing server, cannot be SAP-shaped). Confirm the modal that summarises what gets carried over (env vars, headers, secrets). The rename then:
+
+1. Calls `PATCH /api/v1/servers/{old}` with `{"new_name":"{new}"}`. The gateway runs Plan A: lifecycle add under new name → lifecycle remove old name with `context.Background()` rollback on failure → atomic `cfgMu`-protected map swap → auto-start under new name (warn-only) → `RebuildTools` + `TriggerPluginRegen`. Returns `{"status":"patched","old_name":"{old}","new_name":"{new}"}`. The propagation channel for clients is `RebuildTools` (see [docs/spikes/2026-05-08-mcp-server-routing-bypasses.md](docs/spikes/2026-05-08-mcp-server-routing-bypasses.md) §F1).
+2. Migrates extension-side secrets: every entry under `mcpGateway/{old}/env/*` and `mcpGateway/{old}/headers/*` is copied to `mcpGateway/{new}/*` then deleted from the old key, with **index-first ordering** inside the credential-store mutex so a mid-rename crash leaves the new-name index entry pointing at partially-migrated secrets — recoverable by `reconcile()` on next extension activation.
+3. Refreshes the cache so `~/.claude.json::mcpServers` reflects the new namespaced name (`mcp-gateway:{new}`) via the TS-side reflector ([docs/spikes/2026-05-09-reflector-coordination.md](docs/spikes/2026-05-09-reflector-coordination.md)).
+
+**SAP servers** (names matching the YAML grammar `docs/grammar/sap-server-name.yaml` — `vsp-{SID}(-{Client})?` or `sap-gui-{SID}(-{Client})?`) are refused at API (400 `"renaming SAP-named servers is not supported"`) and in the UI (hidden from the context menu via the `viewItem` regex, and rejected by the input-box validator if invoked from the command palette). SAP names encode SID/client and renaming would break the SAP detector.
+
+**Plan A rollback semantics.** If the rename fails after the gateway has already registered the new name in lifecycle but before the cfg-map swap commits, the gateway invokes a rollback `lm.RemoveServer({new})` with `context.Background()` (not the request context — which may itself be cancelled, which is the reason the original `RemoveServer({old})` failed). On rollback success, returns HTTP 500 with `"rename failed at remove stage (rolled back): ..."` and the cfg-map plus on-disk config show the OLD name. If the rollback also fails, both errors are logged at ERROR level (operator must reconcile manually — extremely rare).
+
+**Credential-migration failure path.** If the gateway PATCH succeeds but `credentialStore.renameServerCredentials` throws (e.g. `SecretStorage unavailable` from a locked keychain), the extension shows a warning toast: *"Server renamed to '{new}' but {N} credential(s) could not be migrated. They remain under '{old}' in the keychain. Re-import KeePass or re-enter them manually."* — the gateway rename **is not rolled back** (it has already succeeded), and `cache.refresh()` still fires. The operator either re-imports from KeePass or re-enters secrets manually under the new name.
+
+**REST equivalents** (CLI / scripting):
+
+```bash
+# Rename a server (gateway-side only — credentials remain under old name in the keychain)
+curl -X PATCH http://localhost:8765/api/v1/servers/ctx7 \
+     -H "Content-Type: application/json" \
+     -d '{"new_name":"context7-prod"}'
+# Combined rename + env update (atomic)
+curl -X PATCH http://localhost:8765/api/v1/servers/ctx7 \
+     -H "Content-Type: application/json" \
+     -d '{"new_name":"context7-prod","add_env":["TIMEOUT=30s"]}'
+```
 
 **Settings:**
 
