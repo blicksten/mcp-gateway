@@ -129,6 +129,20 @@ type ProbeResult struct {
 	ReceivedAt time.Time `json:"received_at"`
 }
 
+// SessionPid records the claude.exe process associated with a Claude Code
+// session_id. Populated by the statusline hook (PLAN-unfreeze-button T5) so
+// the /unfreeze handler can target exactly one process when the operator
+// clicks the 🔄 button in the porfiry-taskbar webview.
+//
+// In-memory only. PIDs are transient — claude.exe exiting (clean or crash)
+// makes the entry stale within seconds. On daemon restart the statusline
+// hook re-registers automatically (idempotent via per-session marker file
+// on the client). No disk persistence by design.
+type SessionPid struct {
+	PID          uint32    `json:"pid"`
+	RegisteredAt time.Time `json:"registered_at"`
+}
+
 // State is the concurrent owner of heartbeats, pending actions, and probe
 // results. Construct via New.
 type State struct {
@@ -136,6 +150,7 @@ type State struct {
 	heartbeats        map[string]*Heartbeat
 	actions           []*PendingAction
 	probes            map[string]*ProbeResult
+	sessionPids       map[string]*SessionPid
 	lastActionEnqueue time.Time
 	lastPersist       map[string]time.Time
 
@@ -167,6 +182,7 @@ func New(persistPath string, logger *slog.Logger) *State {
 		heartbeats:  make(map[string]*Heartbeat),
 		actions:     make([]*PendingAction, 0, 32),
 		probes:      make(map[string]*ProbeResult),
+		sessionPids: make(map[string]*SessionPid),
 		lastPersist: make(map[string]time.Time),
 		persistPath: persistPath,
 		logger:      logger,
@@ -679,6 +695,60 @@ func newID() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
+}
+
+// RecordSessionPid stores the claude.exe PID for sessionID. Overwrites any
+// prior entry (last-write wins — claude.exe restart in the same VSCode tab
+// produces a new PID with the same session_id). Returns a copy of the
+// stored entry. The caller (HTTP handler) maps an error to 400.
+//
+// Validation: empty sessionID and pid < 5 (Windows kernel reserves 0-4:
+// System Idle, System, secure System) return an error. The handler also
+// rejects these to fail fast, but this internal guard ensures tests and
+// future internal callers can't accidentally store a poison PID.
+func (s *State) RecordSessionPid(sessionID string, pid uint32) (*SessionPid, error) {
+	if sessionID == "" {
+		return nil, errors.New("session_id is required")
+	}
+	if pid < 5 {
+		return nil, fmt.Errorf("pid %d is reserved (Windows kernel reserves 0-4)", pid)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry := &SessionPid{PID: pid, RegisteredAt: s.now()}
+	s.sessionPids[sessionID] = entry
+	clone := *entry
+	return &clone, nil
+}
+
+// GetSessionPid returns the PID registered for sessionID, or (nil, false)
+// when no PID is on record. The returned struct is a copy.
+func (s *State) GetSessionPid(sessionID string) (*SessionPid, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.sessionPids[sessionID]
+	if !ok {
+		return nil, false
+	}
+	clone := *entry
+	return &clone, true
+}
+
+// RemoveSessionPid drops the PID registration for sessionID. Returns true
+// when an entry was removed, false when sessionID was unknown. Idempotent.
+//
+// Called by the unfreeze handler after a successful Stop-Process AND after
+// a failed Stop-Process (the failure mode is usually "PID already exited
+// naturally" — the entry is stale either way). Subsequent unfreeze attempts
+// against the same session_id return 404 cleanly.
+func (s *State) RemoveSessionPid(sessionID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.sessionPids[sessionID]; !ok {
+		return false
+	}
+	delete(s.sessionPids, sessionID)
+	return true
 }
 
 // newNonce returns a 16-hex-char random nonce. Separate function for call-

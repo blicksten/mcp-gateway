@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Daemon 1.33.6] - 2026-05-13 — Unfreeze-Button Endpoints (Windows-only v1)
+
+**Plan:** [docs/PLAN-unfreeze-button.md](../claude-team-control/docs/PLAN-unfreeze-button.md) (claude-team-control repo) — single-phase, operator-locked v3.
+
+### Added — Gateway daemon
+
+- **`POST /api/v1/claude-code/register-pid`** — accepts `{session_id, pid}` from `hooks/statusline.mjs`, stores in `patchstate.State.sessionPids` (in-memory, no disk persistence). Per-session rate limit 5/min. Rejects PID < 5 (Windows kernel reserves 0-4: System Idle, System, secure System).
+- **`POST /api/v1/claude-code/unfreeze`** — accepts `{session_id}` from `patches/porfiry-taskbar.js` when the operator clicks the 🔄 button. Looks up the registered PID, runs `powershell.exe -NoProfile -NonInteractive -Command "Stop-Process -Id <pid> -Force"` with a 5 s timeout, drops the registration on both success and failure (stale PID after natural exit). Per-session rate limit 10/min. 404 when session is not registered.
+- **`patchstate.SessionPid` + `RecordSessionPid` / `GetSessionPid` / `RemoveSessionPid`** — three concurrent-safe methods on `patchstate.State` for in-memory PID storage, modeled after the existing heartbeat APIs but without disk persistence (PIDs are transient).
+- **`unfreezeExecFunc` injection point** — package-level function variable so tests override the real `Stop-Process` shell-out without spawning processes. Production default uses `exec.CommandContext` with PowerShell.
+
+### Tests
+
+- **8 new Go tests** in `internal/api/claude_code_handlers_test.go`: register happy path / PID=0 → 400 / PID=2 (kernel reserved) → 400 / unfreeze happy path with mocked exec / unfreeze unknown session → 404 / unfreeze exec failure → 500 with stale-registration drop / unfreeze rate limit at compressed-budget bucket / empty session_id → 400 on both endpoints.
+
+### Security
+
+- Webview cannot specify the target PID — daemon resolves session_id → pid via patchState lookup. Compromised webview can only kill its own claude.exe PID (the one registered for its session_id), not arbitrary system processes.
+- PID < 5 rejected at registration time to fail fast against kernel-reserved PIDs that Stop-Process cannot kill anyway.
+- Reuses existing `claudeCodeCORS` (vscode-webview:// origin echo) + Bearer auth chain; per-session rate limiter prevents budget exhaustion from one session affecting others.
+
 ## [Extension 1.33.5] - 2026-05-12 — Server Rename Feature
 
 **Plan:** [docs/PLAN-server-rename.md](docs/PLAN-server-rename.md) — 4-phase plan (Go API → TS Extension Client → TS Extension UI → Documentation + manual E2E).
