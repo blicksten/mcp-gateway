@@ -439,6 +439,23 @@ func mockUnfreezeExec(t *testing.T, fn func(ctx context.Context, pid uint32) err
 	t.Cleanup(func() { unfreezeExecFunc = orig })
 }
 
+// mockVerifyPid installs a fake image-name verifier for the duration of t.
+// The default test installation returns true for all PIDs so tests do not
+// need real claude.exe processes to register. Override selectively in tests
+// that want to exercise the rejection path.
+func mockVerifyPid(t *testing.T, fn func(pid uint32) bool) {
+	t.Helper()
+	orig := verifyClaudeExePidFunc
+	verifyClaudeExePidFunc = fn
+	t.Cleanup(func() { verifyClaudeExePidFunc = orig })
+}
+
+// init for tests — replace the real OpenProcess verifier with an always-true
+// stub so all register-pid tests pass without requiring actual claude.exe PIDs.
+func init() {
+	verifyClaudeExePidFunc = func(_ uint32) bool { return true }
+}
+
 // TestRegisterPidHappyPath verifies the (a) case from plan v3 T4.
 func TestRegisterPidHappyPath(t *testing.T) {
 	srv, ps := setupClaudeCodeServer(t)
@@ -608,6 +625,56 @@ func TestUnfreezeRequiresSessionID(t *testing.T) {
 type assertErr string
 
 func (e assertErr) Error() string { return string(e) }
+
+// TestRegisterPidRejectsNonClaude verifies that the image-name guard (E-1
+// thinkdeep finding) returns 400 when the claimed PID does not resolve to
+// claude.exe. The verifier is mocked to simulate a non-claude image.
+func TestRegisterPidRejectsNonClaude(t *testing.T) {
+	srv, _ := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	mockVerifyPid(t, func(_ uint32) bool { return false })
+
+	body := map[string]any{"session_id": "sess-nonclaude", "pid": uint32(9999)}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/register-pid", "", body, ccTestBearer)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "does not resolve to claude.exe")
+}
+
+// TestUnfreezeDoesNotDropFreshRegistrationOnConcurrentRegister verifies the
+// compare-and-swap fix for thinkdeep finding A-1: when a concurrent
+// register-pid POST overwrites the entry with a new PID during the 5-s exec
+// window, the CAS delete (RemoveSessionPidIfPid) leaves the new PID intact.
+func TestUnfreezeDoesNotDropFreshRegistrationOnConcurrentRegister(t *testing.T) {
+	srv, ps := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	// Register an initial PID.
+	_, err := ps.RecordSessionPid("sess-cas", 11111)
+	require.NoError(t, err)
+
+	// Mock exec that simulates a concurrent register-pid arriving midway:
+	// while "Stop-Process" is "in flight", the daemon receives a new
+	// register-pid for the same session with PID 22222.
+	mockUnfreezeExec(t, func(ctx context.Context, pid uint32) error {
+		// Simulate the concurrent overwrite.
+		_, _ = ps.RecordSessionPid("sess-cas", 22222)
+		return nil // exec succeeds
+	})
+
+	body := map[string]any{"session_id": "sess-cas"}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/unfreeze", "", body, ccTestBearer)
+	require.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
+
+	var resp unfreezeResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, uint32(11111), resp.Killed, "handler must report the original PID as killed")
+
+	// KEY: the fresh registration for PID 22222 must NOT have been wiped.
+	stored, ok := ps.GetSessionPid("sess-cas")
+	require.True(t, ok, "CAS delete must leave the freshly-registered PID 22222 intact")
+	assert.Equal(t, uint32(22222), stored.PID)
+}
 
 // TestUnfreezeExecTimeoutDropsRegistration verifies that a mock exec that
 // blocks until context deadline fires causes the handler to:

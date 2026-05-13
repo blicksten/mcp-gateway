@@ -71,6 +71,12 @@ const (
 // for an OS that is paging hard or a cold PowerShell engine.
 const unfreezeExecTimeout = 5 * time.Second
 
+// verifyClaudeExePidFunc is the function register-pid calls to confirm that
+// the claimed PID actually resolves to claude.exe. Tests override this to
+// avoid real Windows OpenProcess calls against arbitrary PID values.
+// Production default is verifyClaudeExePid (build-tag-selected).
+var verifyClaudeExePidFunc = verifyClaudeExePid
+
 // unfreezeExecFunc is the function the unfreeze handler invokes to kill a
 // PID. Tests override this variable to avoid spawning real processes; the
 // production default shells out to PowerShell Stop-Process.
@@ -562,6 +568,15 @@ func (s *Server) handleClaudeCodeRegisterPid(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "pid must be at least 5 (Windows kernel reserves 0-4)")
 		return
 	}
+	// Image-name guard (thinkdeep finding E-1): reject PIDs that do not
+	// resolve to claude.exe. Prevents an on-host attacker with the Bearer
+	// token from registering an arbitrary process PID so the next operator
+	// unfreeze click kills a non-claude process. Non-Windows builds always
+	// return true (feature is Windows-only v1; plan v3 §Out of scope).
+	if !verifyClaudeExePidFunc(req.PID) {
+		writeError(w, http.StatusBadRequest, "pid does not resolve to claude.exe")
+		return
+	}
 	if s.registerPidLimiter != nil {
 		if !s.registerPidLimiter.Allow(requestWithSession(r, req.SessionID)) {
 			w.Header().Set("Retry-After", "60")
@@ -628,11 +643,16 @@ func (s *Server) handleClaudeCodeUnfreeze(w http.ResponseWriter, r *http.Request
 	ctx, cancel := context.WithTimeout(r.Context(), unfreezeExecTimeout)
 	defer cancel()
 	if err := unfreezeExecFunc(ctx, entry.PID); err != nil {
-		s.patchState.RemoveSessionPid(req.SessionID)
+		// CAS delete: only wipe the registration if the PID we just tried
+		// to kill is still the one on record. A concurrent register-pid POST
+		// during the 5-s exec window may have written a fresh PID (from a
+		// claude.exe restart in the same tab); RemoveSessionPidIfPid leaves
+		// that new entry intact. (PLAN-unfreeze-button thinkdeep A-1.)
+		s.patchState.RemoveSessionPidIfPid(req.SessionID, entry.PID)
 		writeError(w, http.StatusInternalServerError,
 			fmt.Sprintf("unfreeze failed: %s", err.Error()))
 		return
 	}
-	s.patchState.RemoveSessionPid(req.SessionID)
+	s.patchState.RemoveSessionPidIfPid(req.SessionID, entry.PID)
 	writeJSON(w, http.StatusOK, unfreezeResponse{Killed: entry.PID})
 }

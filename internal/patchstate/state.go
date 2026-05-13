@@ -751,6 +751,30 @@ func (s *State) RemoveSessionPid(sessionID string) bool {
 	return true
 }
 
+// RemoveSessionPidIfPid removes the PID registration for sessionID only
+// when the currently stored PID equals expectedPID (compare-and-swap
+// delete). Returns true when the entry was removed, false otherwise
+// (not found, or found but with a different PID).
+//
+// Use this instead of RemoveSessionPid when you must not clobber a fresh
+// registration that arrived while a long-running exec was in flight —
+// specifically in handleClaudeCodeUnfreeze where Stop-Process takes up to
+// 5 s and a concurrent register-pid POST could overwrite the entry with
+// a new claude.exe PID. Without the PID check, RemoveSessionPid would
+// silently wipe the live registration, leaving the operator's next click
+// returning 404 until the statusline re-registers. (PLAN-unfreeze-button
+// thinkdeep finding A-1.)
+func (s *State) RemoveSessionPidIfPid(sessionID string, expectedPID uint32) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.sessionPids[sessionID]
+	if !ok || entry.PID != expectedPID {
+		return false
+	}
+	delete(s.sessionPids, sessionID)
+	return true
+}
+
 // newNonce returns a 16-hex-char random nonce. Separate function for call-
 // site clarity, even though the shape matches newID.
 func newNonce() string {
