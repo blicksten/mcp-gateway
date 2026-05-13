@@ -78,6 +78,12 @@ type Server struct {
 	// loop). Shared bucket → spec violation against docs/api/claude-code-
 	// endpoints.md "independent 60 req/min budgets" (PAL-CR2 fix).
 	patchStatusLimiter *rateLimiter
+	// registerPidLimiter and unfreezeLimiter guard the unfreeze-button
+	// endpoints (PLAN-unfreeze-button). Both are per-session buckets so a
+	// misbehaving hook or a malicious origin holding one session token
+	// cannot exhaust the budget for other sessions on the same host.
+	registerPidLimiter *rateLimiter
+	unfreezeLimiter    *rateLimiter
 
 	// listenerAddr records the bound listener address once ListenAndServe
 	// has successfully called net.Listen. Nil before that point. Used by
@@ -240,6 +246,8 @@ func (s *Server) InitClaudeCodeLimiters() {
 	s.heartbeatLimiter = newRateLimiter(patchHeartbeatRateLimit, sessionKey)
 	s.pendingActionsLimiter = newRateLimiter(pendingActionsRateLimit, ipKey)
 	s.patchStatusLimiter = newRateLimiter(pendingActionsRateLimit, ipKey)
+	s.registerPidLimiter = newRateLimiter(registerPidRateLimit, sessionKey)
+	s.unfreezeLimiter = newRateLimiter(unfreezeRateLimit, sessionKey)
 }
 
 // TriggerPluginRegen rebuilds the plugin's `.mcp.json` from the current
@@ -471,6 +479,14 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/probe-result", s.handleClaudeCodeProbeResult)
 			r.Post("/plugin-sync", s.handleClaudeCodePluginSync)
 			r.Get("/compat-matrix", s.handleClaudeCodeCompatMatrix)
+			// Unfreeze-button endpoints (PLAN-unfreeze-button v3).
+			// register-pid: hook→daemon (one-shot per session).
+			// unfreeze: webview→daemon (operator click on 🔄 button).
+			// Both reuse claudeCodeCORS + Bearer auth (no csrf) by virtue
+			// of being inside this Route group; per-session rate limiters
+			// are wired in InitClaudeCodeLimiters above.
+			r.Post("/register-pid", s.handleClaudeCodeRegisterPid)
+			r.Post("/unfreeze", s.handleClaudeCodeUnfreeze)
 
 			// Import-from-Claude routes (Phase D T-D.1). Additive
 			// under the FROZEN /api/v1/claude-code/* namespace per

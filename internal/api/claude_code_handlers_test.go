@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -425,4 +426,291 @@ func TestHandlersReturn503WhenPatchStateUnset(t *testing.T) {
 	hb := patchstate.Heartbeat{SessionID: "s"}
 	rr2 := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/patch-heartbeat", "", hb, ccTestBearer)
 	assert.Equal(t, http.StatusServiceUnavailable, rr2.Code)
+}
+
+// --- Unfreeze-button endpoints (PLAN-unfreeze-button v3 T4) ------------
+
+// mockUnfreezeExec installs a fake exec function for the duration of t.
+// Restores the original on cleanup so test order does not matter.
+func mockUnfreezeExec(t *testing.T, fn func(ctx context.Context, pid uint32) error) {
+	t.Helper()
+	orig := unfreezeExecFunc
+	unfreezeExecFunc = fn
+	t.Cleanup(func() { unfreezeExecFunc = orig })
+}
+
+// mockVerifyPid installs a fake image-name verifier for the duration of t.
+// The default test installation returns true for all PIDs so tests do not
+// need real claude.exe processes to register. Override selectively in tests
+// that want to exercise the rejection path.
+func mockVerifyPid(t *testing.T, fn func(pid uint32) bool) {
+	t.Helper()
+	orig := verifyClaudeExePidFunc
+	verifyClaudeExePidFunc = fn
+	t.Cleanup(func() { verifyClaudeExePidFunc = orig })
+}
+
+// init for tests — replace the real OpenProcess verifier with an always-true
+// stub so all register-pid tests pass without requiring actual claude.exe PIDs.
+func init() {
+	verifyClaudeExePidFunc = func(_ uint32) bool { return true }
+}
+
+// TestRegisterPidHappyPath verifies the (a) case from plan v3 T4.
+func TestRegisterPidHappyPath(t *testing.T) {
+	srv, ps := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	body := map[string]any{"session_id": "sess-reg-1", "pid": uint32(12345)}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/register-pid", "", body, ccTestBearer)
+	require.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
+
+	var resp registerPidResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.True(t, resp.Stored)
+
+	stored, ok := ps.GetSessionPid("sess-reg-1")
+	require.True(t, ok, "patchState must hold the registered PID")
+	assert.Equal(t, uint32(12345), stored.PID)
+	assert.False(t, stored.RegisteredAt.IsZero())
+}
+
+// TestRegisterPidRejectsZero verifies the (b) case: PID=0 is rejected.
+// Plan v3 T4(b): "register PID=0 → 400".
+func TestRegisterPidRejectsZero(t *testing.T) {
+	srv, _ := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	body := map[string]any{"session_id": "sess-pid0", "pid": uint32(0)}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/register-pid", "", body, ccTestBearer)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "pid must be at least 5")
+}
+
+// TestRegisterPidRejectsReserved verifies the (c) case: PID=2 (kernel
+// reserved on Windows) is rejected. Plan v3 T4(c).
+func TestRegisterPidRejectsReserved(t *testing.T) {
+	srv, _ := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	body := map[string]any{"session_id": "sess-pid2", "pid": uint32(2)}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/register-pid", "", body, ccTestBearer)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "pid must be at least 5")
+}
+
+// TestUnfreezeHappyPath verifies the (d) case: registered session, mocked
+// Stop-Process returns nil → 200 with killed PID. Plan v3 T4(d).
+func TestUnfreezeHappyPath(t *testing.T) {
+	srv, ps := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	_, err := ps.RecordSessionPid("sess-unf-1", 54321)
+	require.NoError(t, err)
+
+	var calledPID uint32
+	mockUnfreezeExec(t, func(ctx context.Context, pid uint32) error {
+		calledPID = pid
+		return nil
+	})
+
+	body := map[string]any{"session_id": "sess-unf-1"}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/unfreeze", "", body, ccTestBearer)
+	require.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
+
+	var resp unfreezeResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, uint32(54321), resp.Killed)
+	assert.Equal(t, uint32(54321), calledPID, "exec must be invoked with the registered PID")
+
+	// Registration is dropped on success — second unfreeze returns 404.
+	_, ok := ps.GetSessionPid("sess-unf-1")
+	assert.False(t, ok, "successful unfreeze must drop the PID registration")
+}
+
+// TestUnfreezeNotRegistered verifies the (e) case: session has no PID → 404.
+// Plan v3 T4(e).
+func TestUnfreezeNotRegistered(t *testing.T) {
+	srv, _ := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	// No RecordSessionPid call — registration is absent.
+	body := map[string]any{"session_id": "sess-unknown"}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/unfreeze", "", body, ccTestBearer)
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+	assert.Contains(t, rr.Body.String(), "session not registered")
+}
+
+// TestUnfreezeExecFailure verifies the (f) case: exec returns error → 500.
+// Plan v3 T4(f). The registration must also be dropped so the next attempt
+// returns 404 instead of retrying a dead PID.
+func TestUnfreezeExecFailure(t *testing.T) {
+	srv, ps := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	_, err := ps.RecordSessionPid("sess-exec-fail", 99999)
+	require.NoError(t, err)
+
+	mockUnfreezeExec(t, func(ctx context.Context, pid uint32) error {
+		return assertErr("Stop-Process: process already exited")
+	})
+
+	body := map[string]any{"session_id": "sess-exec-fail"}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/unfreeze", "", body, ccTestBearer)
+	assert.Equal(t, http.StatusInternalServerError, rr.Code)
+	assert.Contains(t, rr.Body.String(), "unfreeze failed")
+
+	// Stale registration is dropped on failure.
+	_, ok := ps.GetSessionPid("sess-exec-fail")
+	assert.False(t, ok, "failed unfreeze must also drop the stale PID registration")
+
+	// Second attempt now returns 404 cleanly.
+	rr2 := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/unfreeze", "", body, ccTestBearer)
+	assert.Equal(t, http.StatusNotFound, rr2.Code)
+}
+
+// TestUnfreezeRateLimit verifies the (g) case: 11th call within the minute
+// returns 429. Plan v3 T4(g). We compress the budget to 2 so the test runs
+// in milliseconds; the limiter semantics are identical to the production
+// 10/min bucket.
+func TestUnfreezeRateLimit(t *testing.T) {
+	srv, ps := setupClaudeCodeServer(t)
+	srv.unfreezeLimiter = newRateLimiter(2, sessionKey)
+	h := srv.Handler()
+
+	mockUnfreezeExec(t, func(ctx context.Context, pid uint32) error { return nil })
+
+	// Re-register before each successful kill since the handler drops the
+	// PID after success. The two-budget bucket allows the first two calls
+	// through; the third trips the limiter.
+	for i := range 2 {
+		_, err := ps.RecordSessionPid("sess-rl", uint32(1000+i))
+		require.NoError(t, err)
+		rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/unfreeze", "",
+			map[string]any{"session_id": "sess-rl"}, ccTestBearer)
+		require.Equal(t, http.StatusOK, rr.Code, "call %d body=%s", i, rr.Body.String())
+	}
+	// Third call within the window — limiter denies before exec runs.
+	_, err := ps.RecordSessionPid("sess-rl", 9999)
+	require.NoError(t, err)
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/unfreeze", "",
+		map[string]any{"session_id": "sess-rl"}, ccTestBearer)
+	assert.Equal(t, http.StatusTooManyRequests, rr.Code)
+	assert.Equal(t, "60", rr.Header().Get("Retry-After"))
+}
+
+// TestUnfreezeRequiresSessionID verifies the (h) case: empty session_id is
+// rejected with 400. Plan v3 T4(h). Same validation applies to the
+// register-pid handler — both branches are covered.
+func TestUnfreezeRequiresSessionID(t *testing.T) {
+	srv, _ := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	// Unfreeze with empty session_id.
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/unfreeze", "",
+		map[string]any{"session_id": ""}, ccTestBearer)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "session_id is required")
+
+	// Register-pid with empty session_id.
+	rr2 := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/register-pid", "",
+		map[string]any{"session_id": "", "pid": uint32(12345)}, ccTestBearer)
+	assert.Equal(t, http.StatusBadRequest, rr2.Code)
+	assert.Contains(t, rr2.Body.String(), "session_id is required")
+}
+
+// assertErr is a tiny test-local error helper. Avoids importing errors for
+// a single-line constructor — staying consistent with the rest of this
+// test file's minimal-imports style.
+type assertErr string
+
+func (e assertErr) Error() string { return string(e) }
+
+// TestRegisterPidRejectsNonClaude verifies that the image-name guard (E-1
+// thinkdeep finding) returns 400 when the claimed PID does not resolve to
+// claude.exe. The verifier is mocked to simulate a non-claude image.
+func TestRegisterPidRejectsNonClaude(t *testing.T) {
+	srv, _ := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	mockVerifyPid(t, func(_ uint32) bool { return false })
+
+	body := map[string]any{"session_id": "sess-nonclaude", "pid": uint32(9999)}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/register-pid", "", body, ccTestBearer)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "does not resolve to claude.exe")
+}
+
+// TestUnfreezeDoesNotDropFreshRegistrationOnConcurrentRegister verifies the
+// compare-and-swap fix for thinkdeep finding A-1: when a concurrent
+// register-pid POST overwrites the entry with a new PID during the 5-s exec
+// window, the CAS delete (RemoveSessionPidIfPid) leaves the new PID intact.
+func TestUnfreezeDoesNotDropFreshRegistrationOnConcurrentRegister(t *testing.T) {
+	srv, ps := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	// Register an initial PID.
+	_, err := ps.RecordSessionPid("sess-cas", 11111)
+	require.NoError(t, err)
+
+	// Mock exec that simulates a concurrent register-pid arriving midway:
+	// while "Stop-Process" is "in flight", the daemon receives a new
+	// register-pid for the same session with PID 22222.
+	mockUnfreezeExec(t, func(ctx context.Context, pid uint32) error {
+		// Simulate the concurrent overwrite.
+		_, _ = ps.RecordSessionPid("sess-cas", 22222)
+		return nil // exec succeeds
+	})
+
+	body := map[string]any{"session_id": "sess-cas"}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/unfreeze", "", body, ccTestBearer)
+	require.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
+
+	var resp unfreezeResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, uint32(11111), resp.Killed, "handler must report the original PID as killed")
+
+	// KEY: the fresh registration for PID 22222 must NOT have been wiped.
+	stored, ok := ps.GetSessionPid("sess-cas")
+	require.True(t, ok, "CAS delete must leave the freshly-registered PID 22222 intact")
+	assert.Equal(t, uint32(22222), stored.PID)
+}
+
+// TestUnfreezeExecTimeoutDropsRegistration verifies that a mock exec that
+// blocks until context deadline fires causes the handler to:
+//   (a) return 500 (exec failure propagates correctly through DeadlineExceeded)
+//   (b) drop the stale PID registration so the next click returns 404
+//
+// This exercises the context.WithTimeout + cancel defer wiring in
+// handleClaudeCodeUnfreeze. Without this test, a regression removing the
+// context.WithTimeout would be invisible — the handler would hang on Stop-
+// Process forever and the 5-second safety net would silently vanish.
+func TestUnfreezeExecTimeoutDropsRegistration(t *testing.T) {
+	srv, ps := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	_, err := ps.RecordSessionPid("sess-timeout", 77777)
+	require.NoError(t, err)
+
+	// Mock blocks until ctx is cancelled, then returns its Err — simulates
+	// powershell.exe hanging (e.g. OS paging hard, cold engine spin-up).
+	mockUnfreezeExec(t, func(ctx context.Context, pid uint32) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	body := map[string]any{"session_id": "sess-timeout"}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/unfreeze", "", body, ccTestBearer)
+	assert.Equal(t, http.StatusInternalServerError, rr.Code,
+		"deadline-exceeded exec must return 500; body=%s", rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "unfreeze failed",
+		"500 body must include 'unfreeze failed' prefix")
+
+	// Stale registration is dropped on deadline, same as on ordinary failure.
+	_, ok := ps.GetSessionPid("sess-timeout")
+	assert.False(t, ok, "timed-out exec must also drop the stale PID registration")
+
+	// Subsequent unfreeze attempt returns 404 cleanly.
+	rr2 := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/unfreeze", "", body, ccTestBearer)
+	assert.Equal(t, http.StatusNotFound, rr2.Code)
 }

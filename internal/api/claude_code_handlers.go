@@ -4,8 +4,10 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -54,7 +56,43 @@ const (
 	// /pending-actions: patch polls every 2 s = 30/min steady-state. 60/min
 	// per client IP is generous but bounds abuse.
 	pendingActionsRateLimit = 60
+	// /register-pid: statusline hook posts once per session (idempotency
+	// marker file on the client). 5/min per session is far above the natural
+	// rate and bounds a misbehaving hook.
+	registerPidRateLimit = 5
+	// /unfreeze: operator-driven button click. 10/min per session is
+	// generous for an operator hammering the button when claude.exe is
+	// stuck; production rate is closer to 0–2 per hour.
+	unfreezeRateLimit = 10
 )
+
+// unfreezeExecTimeout caps how long the Stop-Process call may run. The real
+// Stop-Process is a near-instant kernel call; the timeout is a safety net
+// for an OS that is paging hard or a cold PowerShell engine.
+const unfreezeExecTimeout = 5 * time.Second
+
+// verifyClaudeExePidFunc is the function register-pid calls to confirm that
+// the claimed PID actually resolves to claude.exe. Tests override this to
+// avoid real Windows OpenProcess calls against arbitrary PID values.
+// Production default is verifyClaudeExePid (build-tag-selected).
+var verifyClaudeExePidFunc = verifyClaudeExePid
+
+// unfreezeExecFunc is the function the unfreeze handler invokes to kill a
+// PID. Tests override this variable to avoid spawning real processes; the
+// production default shells out to PowerShell Stop-Process.
+//
+// Why PowerShell over taskkill.exe: Stop-Process produces the same WerFault
+// error-channel path that a natural claude.exe crash produces, which gives
+// the operator the empirically verified red-overlay UX (PLAN-unfreeze-button
+// v3 §1: dismissable `[x]`, "View output logs", tab stays alive). taskkill
+// /F maps to TerminateProcess and produces a different (less graceful) exit
+// signature.
+var unfreezeExecFunc = func(ctx context.Context, pid uint32) error {
+	cmd := exec.CommandContext(ctx, "powershell.exe",
+		"-NoProfile", "-NonInteractive",
+		"-Command", fmt.Sprintf("Stop-Process -Id %d -Force", pid))
+	return cmd.Run()
+}
 
 // PatchState integration — Server-side accessors. These mirror the
 // SetPluginRegen pattern so tests can wire/unwire the subsystem without
@@ -485,4 +523,136 @@ func (s *Server) handleClaudeCodeProbeResult(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
+}
+
+// registerPidRequest is the JSON body for POST /api/v1/claude-code/register-pid.
+// Sent by hooks/statusline.mjs once per session (idempotency marker file
+// `~/.claude/sessions/<sid>.pid-registered` prevents repeat posts on the
+// client side).
+type registerPidRequest struct {
+	SessionID string `json:"session_id"`
+	PID       uint32 `json:"pid"`
+}
+
+type registerPidResponse struct {
+	Stored bool `json:"stored"`
+}
+
+// handleClaudeCodeRegisterPid stores the (session_id → pid) mapping in
+// patchState so the /unfreeze handler can target the right process when
+// the operator clicks the porfiry-taskbar 🔄 button.
+//
+// Validation:
+//   - empty session_id → 400
+//   - pid < 5 → 400 (Windows kernel reserves PIDs 0-4: System Idle, System,
+//     secure System). Allowing these would silently miss-target Stop-Process.
+//   - per-session rate limit (5/min) → 429
+//
+// Stores last-write-wins. claude.exe restart in the same VSCode tab
+// produces a new PID under the same session_id; the new value overwrites.
+func (s *Server) handleClaudeCodeRegisterPid(w http.ResponseWriter, r *http.Request) {
+	if s.patchState == nil {
+		writeError(w, http.StatusServiceUnavailable, "patch state not initialized")
+		return
+	}
+	var req registerPidRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.SessionID == "" {
+		writeError(w, http.StatusBadRequest, "session_id is required")
+		return
+	}
+	if req.PID < 5 {
+		writeError(w, http.StatusBadRequest, "pid must be at least 5 (Windows kernel reserves 0-4)")
+		return
+	}
+	// Image-name guard (thinkdeep finding E-1): reject PIDs that do not
+	// resolve to claude.exe. Prevents an on-host attacker with the Bearer
+	// token from registering an arbitrary process PID so the next operator
+	// unfreeze click kills a non-claude process. Non-Windows builds always
+	// return true (feature is Windows-only v1; plan v3 §Out of scope).
+	if !verifyClaudeExePidFunc(req.PID) {
+		writeError(w, http.StatusBadRequest, "pid does not resolve to claude.exe")
+		return
+	}
+	if s.registerPidLimiter != nil {
+		if !s.registerPidLimiter.Allow(requestWithSession(r, req.SessionID)) {
+			w.Header().Set("Retry-After", "60")
+			writeError(w, http.StatusTooManyRequests, "rate limit exceeded for session")
+			return
+		}
+	}
+	if _, err := s.patchState.RecordSessionPid(req.SessionID, req.PID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, registerPidResponse{Stored: true})
+}
+
+// unfreezeRequest is the JSON body for POST /api/v1/claude-code/unfreeze.
+// Sent by patches/porfiry-taskbar.js when the operator clicks the 🔄
+// button. No PID in the body — server looks it up from patchState by
+// session_id to prevent the webview from killing arbitrary processes.
+type unfreezeRequest struct {
+	SessionID string `json:"session_id"`
+}
+
+type unfreezeResponse struct {
+	Killed uint32 `json:"killed"`
+}
+
+// handleClaudeCodeUnfreeze runs `Stop-Process -Id <pid> -Force` against the
+// claude.exe PID registered for session_id. On success the registration is
+// dropped (claude.exe is gone). On failure (usually the process already
+// exited naturally) the registration is also dropped so the next click
+// returns a clean 404 instead of retrying a dead PID.
+//
+// Validation:
+//   - empty session_id → 400
+//   - session_id has no PID registered → 404 "session not registered"
+//   - per-session rate limit (10/min) → 429
+//   - Stop-Process exec failed → 500 with the underlying error
+func (s *Server) handleClaudeCodeUnfreeze(w http.ResponseWriter, r *http.Request) {
+	if s.patchState == nil {
+		writeError(w, http.StatusServiceUnavailable, "patch state not initialized")
+		return
+	}
+	var req unfreezeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.SessionID == "" {
+		writeError(w, http.StatusBadRequest, "session_id is required")
+		return
+	}
+	if s.unfreezeLimiter != nil {
+		if !s.unfreezeLimiter.Allow(requestWithSession(r, req.SessionID)) {
+			w.Header().Set("Retry-After", "60")
+			writeError(w, http.StatusTooManyRequests, "rate limit exceeded for session")
+			return
+		}
+	}
+	entry, ok := s.patchState.GetSessionPid(req.SessionID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not registered")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), unfreezeExecTimeout)
+	defer cancel()
+	if err := unfreezeExecFunc(ctx, entry.PID); err != nil {
+		// CAS delete: only wipe the registration if the PID we just tried
+		// to kill is still the one on record. A concurrent register-pid POST
+		// during the 5-s exec window may have written a fresh PID (from a
+		// claude.exe restart in the same tab); RemoveSessionPidIfPid leaves
+		// that new entry intact. (PLAN-unfreeze-button thinkdeep A-1.)
+		s.patchState.RemoveSessionPidIfPid(req.SessionID, entry.PID)
+		writeError(w, http.StatusInternalServerError,
+			fmt.Sprintf("unfreeze failed: %s", err.Error()))
+		return
+	}
+	s.patchState.RemoveSessionPidIfPid(req.SessionID, entry.PID)
+	writeJSON(w, http.StatusOK, unfreezeResponse{Killed: entry.PID})
 }
