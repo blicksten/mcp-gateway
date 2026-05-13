@@ -406,7 +406,7 @@ func waitForFile(t *testing.T, path string, timeout time.Duration) {
 	t.Fatalf("file did not appear within %s: %s", timeout, path)
 }
 
-// --- SessionPid concurrent-safety + lifecycle (PLAN-unfreeze-button v3 T4) -
+// --- SessionPid lifecycle (PLAN-unfreeze-button v3 T4) --------------------
 
 // TestSessionPidLifecycle exercises RecordSessionPid / GetSessionPid /
 // RemoveSessionPid directly on the State type without an HTTP layer. The

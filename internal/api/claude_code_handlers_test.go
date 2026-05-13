@@ -608,3 +608,42 @@ func TestUnfreezeRequiresSessionID(t *testing.T) {
 type assertErr string
 
 func (e assertErr) Error() string { return string(e) }
+
+// TestUnfreezeExecTimeoutDropsRegistration verifies that a mock exec that
+// blocks until context deadline fires causes the handler to:
+//   (a) return 500 (exec failure propagates correctly through DeadlineExceeded)
+//   (b) drop the stale PID registration so the next click returns 404
+//
+// This exercises the context.WithTimeout + cancel defer wiring in
+// handleClaudeCodeUnfreeze. Without this test, a regression removing the
+// context.WithTimeout would be invisible — the handler would hang on Stop-
+// Process forever and the 5-second safety net would silently vanish.
+func TestUnfreezeExecTimeoutDropsRegistration(t *testing.T) {
+	srv, ps := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	_, err := ps.RecordSessionPid("sess-timeout", 77777)
+	require.NoError(t, err)
+
+	// Mock blocks until ctx is cancelled, then returns its Err — simulates
+	// powershell.exe hanging (e.g. OS paging hard, cold engine spin-up).
+	mockUnfreezeExec(t, func(ctx context.Context, pid uint32) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	body := map[string]any{"session_id": "sess-timeout"}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/unfreeze", "", body, ccTestBearer)
+	assert.Equal(t, http.StatusInternalServerError, rr.Code,
+		"deadline-exceeded exec must return 500; body=%s", rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "unfreeze failed",
+		"500 body must include 'unfreeze failed' prefix")
+
+	// Stale registration is dropped on deadline, same as on ordinary failure.
+	_, ok := ps.GetSessionPid("sess-timeout")
+	assert.False(t, ok, "timed-out exec must also drop the stale PID registration")
+
+	// Subsequent unfreeze attempt returns 404 cleanly.
+	rr2 := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/unfreeze", "", body, ccTestBearer)
+	assert.Equal(t, http.StatusNotFound, rr2.Code)
+}
