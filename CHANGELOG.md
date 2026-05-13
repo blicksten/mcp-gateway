@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — Stability: Claude Code reconnect storm + TCP fast-fail
+
+Two bugs caused Claude Code to disconnect from mcp-gateway every 44 seconds whenever any configured HTTP backend was unreachable (e.g., VPN-dependent `pdap-docs` while VPN is off):
+
+### Bug A — Empty backend stub keeps long-lived streams alive
+
+`RebuildTools()` deleted `perBackendServer["pdap-docs"]` when the backend had 0 tools (StatusError). This caused `GET /mcp/pdap-docs` to return HTTP 400 "no server available". Claude Code treats any HTTP 400 during MCP initialize as a trigger to reinitialize ALL transports (exponential backoff starting at 8s), creating cascading reconnect cycles every ~44s in all active Claude sessions simultaneously.
+
+**Fix** (`internal/proxy/gateway.go`): `RebuildTools()` now keeps an empty stub server for configured backends in error state. The empty stub returns HTTP 200 with 0 tools — Claude Code does not retry on 200. The stub is deleted only when the backend is removed from config entirely. A stale-tool cleanup pass clears any previously registered tools from the stub on error transition.
+
+### Bug B — TCP connect hangs block health monitor for 42 seconds
+
+`lifecycle/manager.go` `Start()` had no TCP connectivity check before calling `connectSafe()`. On Windows, an unreachable host blocked on `connectex` for ~42 seconds. With the health monitor retrying continuously (due to the CR-15 circuit-breaker reset-window bug), this accumulated hundreds of blocked goroutines per day.
+
+**Fix** (`internal/lifecycle/transport.go` + `manager.go`): New `checkTCPReachable(ctx, rawURL, 3s)` helper does a quick TCP dial before the full MCP initialize handshake. On failure: returns `"host unreachable <addr>: ..."` in under 4 seconds instead of 42 seconds.
+
+### Tests
+
+- `TestRebuildTools_ErrorStateBackendKeepsStub`
+- `TestStart_HTTPBackend_UnreachableHost_FastFail`
+- 6 `TestCheckTCPReachable_*` unit tests
+- `TestStart_StdioBackend_NoTCPCheck`
+- **Total: 10 new tests, 130/130 passing**
+
+---
+
+## [Unreleased] — Fix: SSE 11-minute disconnect (WriteTimeout generalisation)
+
+**Root cause:** `http.Server.WriteTimeout = 10 * time.Minute` fired on long-lived GET notification streams from Claude Code to the gateway (`/mcp`, `/mcp/*`, `/sse`, `/sse/*`). `ServerOptions.KeepAlive = 60s` pings do NOT reset Go's single-shot per-connection write deadline. Connections dropped after ~660s with "SSE stream disconnected: TimeoutError" → 2 retries → "HTTP connection closed after 692s with errors".
+
+The prior F-8 fix (`handleServerLogs`, lines 1417-1422) already applied `SetWriteDeadline(time.Time{})` for the `/api/v1/servers/{name}/logs` SSE endpoint but the same pattern was missing from the streamable/SSE handlers on the MCP transport routes.
+
+### Fixed
+
+- **Per-connection deadline cleared for GET** (`internal/api/server.go`): Added `clearWriteDeadlineForGET` middleware wrapping the four MCP routes: `/mcp`, `/mcp/*`, `/sse`, `/sse/*`. The middleware calls `http.NewResponseController(w).SetWriteDeadline(time.Time{})` on GET requests only — POST requests retain `WriteTimeout` for slow-write DoS protection (H-001 invariant).
+
+### Tests
+
+- `TestClearWriteDeadlineForGET` (4 unit subtests)
+- `TestMCPStreamWriteDeadlineCleared` (integration, WriteTimeout=2s + 4.5s hold)
+- `TestMCPPostWriteTimeoutRetained` (H-001 regression guard)
+- `TestMCPStreamWriteDeadline_LongRun` (`//go:build long` 720s real-server test)
+- **Total: 10+ new tests across both suites**
+
+---
+
 ## [Daemon 1.33.6] - 2026-05-13 — Unfreeze-Button Endpoints (Windows-only v1)
 
 **Plan:** [docs/PLAN-unfreeze-button.md](../claude-team-control/docs/PLAN-unfreeze-button.md) (claude-team-control repo) — single-phase, operator-locked v3.

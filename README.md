@@ -35,6 +35,8 @@ Without Gateway:                 With Gateway:
 | Check what's running | `cat ~/.claude.json`, guess | `GET /api/servers` — live status with health |
 | Too many tools in context | All tools always loaded | Namespace filtering, tool budgets, disable on the fly |
 | Debug failing MCP | Read logs manually | `GET /api/servers/name/logs` — streaming SSE |
+| **MCP reconnects every 44s** | Unreachable backend causes HTTP 400 → Claude Code retries all transports | Backend keeps empty stub → returns HTTP 200 → no retries |
+| **MCP disconnects every 11min** | WriteTimeout fires on long-lived SSE streams | Per-connection deadline cleared for GET — connections stay open indefinitely |
 
 ## Why It Matters at Scale
 
@@ -66,6 +68,8 @@ Operator pain with classical mode: **a crashed MCP server is gone until the VSCo
 Gateway runs an active health monitor (`internal/health/monitor.go`): periodic ping, 3 consecutive failures → auto-restart, 5 restarts in 300 s → circuit breaker opens, 60 s stuck-restart timeout. **Clients never see the backend go away** — the client's HTTP session to gateway stays alive across backend restarts; at most one in-flight tool call returns an error and the next call hits the fresh backend transparently. The circuit breaker is one-way — once it opens, the backend is marked `Disabled` and stays there until an operator resets it via `mcp-ctl servers reset-circuit <name>` or the dashboard Reset action (this is by design: a genuinely flapping backend should not silently self-reset into another burst of failures). On Windows a Job Object guarantees child-process reaping on daemon exit — no zombie subprocesses.
 
 Largest single operational win: **stateful infrastructure servers** — orchestrators, review/audit services, persistent session managers — become reliably available where classical stdio would flap under memory pressure.
+
+**When a backend is temporarily unreachable** (e.g., VPN-dependent server with VPN off): the gateway keeps an empty stub for the backend. Claude Code sees the endpoint as "available with no tools" rather than "failed" — preventing the 44-second reconnect storm that would otherwise affect all active sessions. Once the backend becomes reachable again, the gateway reconnects automatically on the next health-monitor cycle.
 
 ### Trade-offs
 
@@ -166,6 +170,8 @@ Extract and place the binaries in your PATH.
 go install ./cmd/mcp-gateway
 go install ./cmd/mcp-ctl
 ```
+
+**Important for operators who build from source:** `go build -o mcp-gateway.exe ./cmd/mcp-gateway` writes to the current directory but does NOT update your installed binary. To update the binary used by `mcp-ctl daemon restart`, run `go install ./cmd/mcp-gateway` or copy the workspace binary to `$GOPATH/bin`. The VS Code extension uses `mcpGateway.daemonPath` (VSCode settings) to locate the daemon — if set to the workspace path, it picks up local builds automatically.
 
 ## Verification
 
