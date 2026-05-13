@@ -405,3 +405,47 @@ func waitForFile(t *testing.T, path string, timeout time.Duration) {
 	}
 	t.Fatalf("file did not appear within %s: %s", timeout, path)
 }
+
+// --- SessionPid concurrent-safety + lifecycle (PLAN-unfreeze-button v3 T4) -
+
+// TestSessionPidLifecycle exercises RecordSessionPid / GetSessionPid /
+// RemoveSessionPid directly on the State type without an HTTP layer. The
+// API handler tests in internal/api cover the wire-shape paths; this test
+// covers internal-caller invariants (idempotent remove, last-write-wins
+// overwrite, validation guards) that the HTTP layer reflects but does not
+// own.
+func TestSessionPidLifecycle(t *testing.T) {
+	s := New("", nil) // nil logger defaults to slog.Default per New's contract
+
+	// Record happy path.
+	entry, err := s.RecordSessionPid("sess-A", 12345)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(12345), entry.PID)
+	assert.False(t, entry.RegisteredAt.IsZero())
+
+	// Get returns a copy.
+	got, ok := s.GetSessionPid("sess-A")
+	require.True(t, ok)
+	assert.Equal(t, uint32(12345), got.PID)
+
+	// Last-write-wins overwrite (claude.exe restart in same VSCode tab).
+	_, err = s.RecordSessionPid("sess-A", 54321)
+	require.NoError(t, err)
+	got2, ok := s.GetSessionPid("sess-A")
+	require.True(t, ok)
+	assert.Equal(t, uint32(54321), got2.PID)
+
+	// Remove is idempotent and reports true only when an entry existed.
+	assert.True(t, s.RemoveSessionPid("sess-A"))
+	assert.False(t, s.RemoveSessionPid("sess-A"))
+	_, ok = s.GetSessionPid("sess-A")
+	assert.False(t, ok)
+
+	// Validation guards: empty session_id, reserved PIDs.
+	_, err = s.RecordSessionPid("", 100)
+	assert.Error(t, err)
+	_, err = s.RecordSessionPid("sess-B", 0)
+	assert.Error(t, err)
+	_, err = s.RecordSessionPid("sess-B", 4)
+	assert.Error(t, err)
+}
