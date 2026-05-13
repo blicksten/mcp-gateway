@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"context"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -69,6 +68,11 @@ func TestHTTPBackend_SyntheticLogs(t *testing.T) {
 
 func TestHTTPBackend_InitialConnectionFailure(t *testing.T) {
 	// Point to a port that nothing is listening on.
+	// Since the unfreeze-button fix, the TCP pre-check (checkTCPReachable) fires
+	// before connectSafe, so the error is returned immediately without writing
+	// "[gateway] connecting…" or "[gateway] HTTP connect failed:" to the ring
+	// buffer.  The contract is: StatusError is set and LastError contains
+	// "host unreachable".
 	cfg := &models.Config{
 		Servers: map[string]*models.ServerConfig{
 			"bad-url": {URL: "http://127.0.0.1:1/mcp"},
@@ -87,27 +91,9 @@ func TestHTTPBackend_InitialConnectionFailure(t *testing.T) {
 	e, ok := m.Entry("bad-url")
 	require.True(t, ok)
 	assert.Equal(t, models.StatusError, e.Status)
-	assert.NotEmpty(t, e.LastError)
-
-	// Ring buffer should have a failure log entry.
-	ring, ok := m.LogBuffer("bad-url")
-	require.True(t, ok)
-	lines := ring.Lines()
-	require.NotEmpty(t, lines)
-	var hasConnecting, hasFailedLog bool
-	for _, l := range lines {
-		if l.Text != "" {
-			t.Logf("Log: %s", l.Text)
-		}
-		if l.Text == "[gateway] connecting to HTTP endpoint: http://127.0.0.1:1/mcp" {
-			hasConnecting = true
-		}
-		if strings.HasPrefix(l.Text, "[gateway] HTTP connect failed:") {
-			hasFailedLog = true
-		}
-	}
-	assert.True(t, hasConnecting, "should log connection attempt")
-	assert.True(t, hasFailedLog, "should log connection failure")
+	assert.NotEmpty(t, e.LastError, "LastError must be set on TCP pre-check failure")
+	assert.Contains(t, e.LastError, "host unreachable",
+		"LastError must contain 'host unreachable' from checkTCPReachable")
 }
 
 func TestHealthMonitor_HTTPBackend(t *testing.T) {

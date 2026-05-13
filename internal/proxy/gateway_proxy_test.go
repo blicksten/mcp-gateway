@@ -23,8 +23,8 @@ import (
 //
 //	TestRebuildTools_DualMode              — aggregate + per-backend produced
 //	TestPerBackendServer_ListChangedScoping — per-backend instances are
-//	                                          independent, teardown on
-//	                                          backend removal
+//	                                          independent; stub kept while
+//	                                          in config, torn down on removal
 //	TestPerBackendServer_ToolDescriptionNoBrackets — SDK round-trip asserts
 //	                                                 no "[<backend>] " prefix
 //	                                                 on per-backend tools
@@ -74,7 +74,13 @@ func TestRebuildTools_DualMode(t *testing.T) {
 
 // TestPerBackendServer_ListChangedScoping verifies that (a) per-backend
 // servers are independent *mcp.Server instances with independent tool
-// registries, and (b) teardown happens when a backend stops producing tools.
+// registries, and (b) teardown happens only when a backend is removed from
+// config (not merely when it stops producing tools).
+//
+// Since the unfreeze-button fix, a backend whose stub was created while running
+// keeps that stub after stopping/erroring as long as it remains in config.
+// Teardown only occurs when the backend is removed from g.cfg.Servers.
+//
 // The SDK's list_changed notifications are scoped to the *mcp.Server that
 // received AddTool / RemoveTools by construction (one subscriber channel per
 // server instance), so asserting instance independence + registry
@@ -110,12 +116,26 @@ func TestPerBackendServer_ListChangedScoping(t *testing.T) {
 	assert.Same(t, alphaSrv, gw.ServerFor("alpha"), "alpha per-backend server pointer must be stable across RebuildTools")
 	assert.Same(t, betaSrv, gw.ServerFor("beta"), "beta per-backend server pointer must be stable across RebuildTools")
 
-	// Tear down beta: stop its backend in lifecycle. RebuildTools should
-	// drop beta's per-backend server entry.
+	// Stop beta in lifecycle (status=stopped, tools still held by manager).
+	// Since beta is still in config, its stub must be KEPT (unfreeze-button fix).
 	lm.SetStatus("beta", models.StatusStopped, "")
 	gw.RebuildTools()
-	assert.Nil(t, gw.ServerFor("beta"), "beta per-backend server must be torn down after its backend stopped")
-	assert.NotNil(t, gw.ServerFor("alpha"), "alpha per-backend server must persist when beta is removed")
+	assert.NotNil(t, gw.ServerFor("beta"),
+		"beta per-backend stub must be kept while beta is still in config (even if stopped)")
+	assert.NotNil(t, gw.ServerFor("alpha"), "alpha per-backend server must be unaffected")
+
+	// Remove beta from config — now the stub must be torn down.
+	alphaCfg := &models.Config{
+		Servers: map[string]*models.ServerConfig{
+			"alpha": {Command: "echo"},
+		},
+	}
+	alphaCfg.ApplyDefaults()
+	gw.UpdateConfig(alphaCfg)
+	gw.RebuildTools()
+	assert.Nil(t, gw.ServerFor("beta"),
+		"beta per-backend server must be torn down once beta is removed from config")
+	assert.NotNil(t, gw.ServerFor("alpha"), "alpha per-backend server must persist when beta is removed from config")
 }
 
 // TestPerBackendServer_ToolDescriptionNoBrackets wires the per-backend MCP

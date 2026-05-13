@@ -181,6 +181,21 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 	cfg := e.Config // copy for use outside lock
 	m.mu.Unlock()
 
+	// TCP reachability pre-check for HTTP/SSE backends. Avoids a 42-second
+	// Windows connectex timeout when the backend host is unreachable.
+	if cfg.URL != "" {
+		if err := checkTCPReachable(ctx, cfg.URL, 3*time.Second); err != nil {
+			m.mu.Lock()
+			if e2, ok := m.entries[name]; ok {
+				e2.starting = false
+				e2.Status = models.StatusError
+				e2.LastError = err.Error()
+			}
+			m.mu.Unlock()
+			return fmt.Errorf("start %q: %w", name, err)
+		}
+	}
+
 	session, client, transport, cmd, err := m.connectSafe(ctx, name, &cfg)
 
 	m.mu.Lock()
