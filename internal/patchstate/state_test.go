@@ -406,6 +406,143 @@ func waitForFile(t *testing.T, path string, timeout time.Duration) {
 	t.Fatalf("file did not appear within %s: %s", timeout, path)
 }
 
+// --- sweepStaleTmps (Phase 3 — PLAN refactor-9a7ff95b) -------------------
+
+// TestLoad_SweepsStaleTmps verifies that Load removes patch-state.*.tmp files
+// older than StaleTmpThreshold and leaves younger ones plus unrelated files.
+func TestLoad_SweepsStaleTmps(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "patch-state.json")
+
+	// Write a valid state file so Load completes the rehydrate path.
+	snap := persisted{
+		Heartbeats: map[string]*Heartbeat{},
+		Actions:    []*PendingAction{},
+	}
+	data, err := json.Marshal(snap)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+
+	s, fc := newTestState(t, path)
+
+	// Create a stale tmp (6 minutes old — older than StaleTmpThreshold).
+	staleTmp := filepath.Join(dir, "patch-state.stale.tmp")
+	require.NoError(t, os.WriteFile(staleTmp, []byte("stale"), 0o600))
+	staleTime := fc.now().Add(-6 * time.Minute)
+	require.NoError(t, os.Chtimes(staleTmp, staleTime, staleTime))
+
+	// Create a young tmp (1 minute old — younger than StaleTmpThreshold).
+	youngTmp := filepath.Join(dir, "patch-state.young.tmp")
+	require.NoError(t, os.WriteFile(youngTmp, []byte("young"), 0o600))
+	youngTime := fc.now().Add(-1 * time.Minute)
+	require.NoError(t, os.Chtimes(youngTmp, youngTime, youngTime))
+
+	require.NoError(t, s.Load())
+
+	_, staleErr := os.Stat(staleTmp)
+	assert.True(t, os.IsNotExist(staleErr), "stale tmp must be removed")
+
+	_, youngErr := os.Stat(youngTmp)
+	assert.NoError(t, youngErr, "young tmp must remain")
+
+	_, stateErr := os.Stat(path)
+	assert.NoError(t, stateErr, "state file must remain")
+}
+
+// TestLoad_SweepDoesNotTouchUnrelatedFiles verifies that sweep only removes
+// files matching the "patch-state.*.tmp" pattern — .bak and unrelated .tmp
+// files are left untouched even when they are older than StaleTmpThreshold.
+func TestLoad_SweepDoesNotTouchUnrelatedFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "patch-state.json")
+
+	snap := persisted{
+		Heartbeats: map[string]*Heartbeat{},
+		Actions:    []*PendingAction{},
+	}
+	data, err := json.Marshal(snap)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+
+	s, fc := newTestState(t, path)
+	oldTime := fc.now().Add(-10 * time.Minute)
+
+	// Unrelated .tmp (no "patch-state." prefix) — must not be removed.
+	unrelated := filepath.Join(dir, "other.tmp")
+	require.NoError(t, os.WriteFile(unrelated, []byte("x"), 0o600))
+	require.NoError(t, os.Chtimes(unrelated, oldTime, oldTime))
+
+	// Backup file — must not be removed.
+	backup := filepath.Join(dir, "patch-state.bak")
+	require.NoError(t, os.WriteFile(backup, []byte("x"), 0o600))
+	require.NoError(t, os.Chtimes(backup, oldTime, oldTime))
+
+	require.NoError(t, s.Load())
+
+	_, err = os.Stat(unrelated)
+	assert.NoError(t, err, "unrelated .tmp must not be removed")
+
+	_, err = os.Stat(backup)
+	assert.NoError(t, err, ".bak file must not be removed")
+}
+
+// TestLoad_MissingFileIsNotAnError verifies that Load on a non-existent
+// persistPath returns nil without entering the rehydrate path (and therefore
+// without calling sweepStaleTmps).
+func TestLoad_MissingFileIsNotAnError(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ghost-subdir")
+	path := filepath.Join(dir, "patch-state.json")
+
+	s, _ := newTestState(t, path)
+	// os.ReadFile returns ErrNotExist — Load exits early with nil.
+	err := s.Load()
+	assert.NoError(t, err)
+}
+
+// TestLoad_SweepFailureDoesNotFailLoad verifies that when a valid state file
+// exists but sweepStaleTmps cannot read the parent directory (e.g. a ReadDir
+// error), Load still succeeds and the error is only logged.
+//
+// On Windows, marking a directory as unreadable via chmod is unreliable, so
+// we synthesise the failure by pointing persistPath at a nested path whose
+// parent is itself inside a non-existent grandparent — after writing the
+// state file to the actual dir and then renaming the dir to simulate the
+// scenario. Instead we use a simpler approach: write the state file to one
+// temp dir but set persistPath to a different temp dir that has been removed
+// so ReadDir on it will fail. The state is written to a helper path; Load
+// will succeed reading it but sweep will fail on the unrelated dir.
+//
+// Simpler portable approach: create a valid state file, let Load succeed,
+// and replace the dir with a file so ReadDir fails. We call sweepStaleTmps
+// directly to avoid platform chmod complications.
+func TestLoad_SweepFailureDoesNotFailLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "patch-state.json")
+
+	snap := persisted{
+		Heartbeats: map[string]*Heartbeat{},
+		Actions:    []*PendingAction{},
+	}
+	data, err := json.Marshal(snap)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+
+	s, _ := newTestState(t, path)
+	// Load rehydrates successfully.
+	require.NoError(t, s.Load())
+
+	// Now call sweepStaleTmps with a state pointing at a non-existent dir
+	// to exercise the ReadDir-failure branch. Replace persistPath with a
+	// path inside a removed directory so ReadDir returns an error.
+	s.persistPath = filepath.Join(t.TempDir(), "gone", "patch-state.json")
+	// Call sweepStaleTmps directly (without holding s.mu) — intentional
+	// single-threaded test bypass. Production Load() calls sweepStaleTmps
+	// after releasing s.mu (see loadLocked). The direct call here exercises
+	// the ReadDir-failure branch without platform-specific chmod tricks.
+	// This must not panic or return an error — it only logs.
+	s.sweepStaleTmps()
+}
+
 // --- SessionPid lifecycle (PLAN-unfreeze-button v3 T4) --------------------
 
 // TestSessionPidLifecycle exercises RecordSessionPid / GetSessionPid /
@@ -448,4 +585,34 @@ func TestSessionPidLifecycle(t *testing.T) {
 	assert.Error(t, err)
 	_, err = s.RecordSessionPid("sess-B", 4)
 	assert.Error(t, err)
+}
+
+// TestRemoveSessionPidIfPid_CASSemantics verifies the compare-and-swap delete
+// semantics of RemoveSessionPidIfPid: it only removes when the stored PID
+// matches expectedPID, protecting against clobbering a freshly-registered PID
+// that arrived while a long-running operation (e.g. Stop-Process) was in
+// flight.
+func TestRemoveSessionPidIfPid_CASSemantics(t *testing.T) {
+	s := New("", nil)
+
+	// Register initial PID.
+	_, err := s.RecordSessionPid("sess-C", 1000)
+	require.NoError(t, err)
+
+	// Wrong PID: must not remove.
+	removed := s.RemoveSessionPidIfPid("sess-C", 9999)
+	assert.False(t, removed, "wrong PID must not remove entry")
+	got, ok := s.GetSessionPid("sess-C")
+	require.True(t, ok, "entry must still exist")
+	assert.Equal(t, uint32(1000), got.PID)
+
+	// Correct PID: must remove.
+	removed = s.RemoveSessionPidIfPid("sess-C", 1000)
+	assert.True(t, removed, "correct PID must remove entry")
+	_, ok = s.GetSessionPid("sess-C")
+	assert.False(t, ok, "entry must be gone after CAS remove")
+
+	// Unknown session: must return false.
+	removed = s.RemoveSessionPidIfPid("unknown", 1000)
+	assert.False(t, removed, "unknown session must return false")
 }

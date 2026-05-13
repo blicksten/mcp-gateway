@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"mcp-gateway/internal/config"
 	"mcp-gateway/internal/ctlclient"
 	"mcp-gateway/internal/pidfile"
 
@@ -44,6 +46,44 @@ func setSpawnFunc(fn func(*exec.Cmd) error) func() {
 		spawnFuncMu.Lock()
 		spawnFunc = prev
 		spawnFuncMu.Unlock()
+	}
+}
+
+// openDaemonLog is the log-file opener used in production and overridden in
+// tests. Access goes through getOpenDaemonLog / setOpenDaemonLog following
+// the same pattern as spawnFunc.
+var (
+	openDaemonLogMu sync.RWMutex
+	openDaemonLog   = func() (*os.File, error) {
+		dir, err := config.DefaultConfigDir()
+		if err != nil {
+			return nil, fmt.Errorf("resolve config dir: %w", err)
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+		path := filepath.Join(dir, "daemon.log")
+		return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) // #nosec G304
+	}
+)
+
+func getOpenDaemonLog() func() (*os.File, error) {
+	openDaemonLogMu.RLock()
+	defer openDaemonLogMu.RUnlock()
+	return openDaemonLog
+}
+
+// setOpenDaemonLog replaces the log-opener hook and returns a restore
+// function suitable for t.Cleanup.
+func setOpenDaemonLog(fn func() (*os.File, error)) func() {
+	openDaemonLogMu.Lock()
+	prev := openDaemonLog
+	openDaemonLog = fn
+	openDaemonLogMu.Unlock()
+	return func() {
+		openDaemonLogMu.Lock()
+		openDaemonLog = prev
+		openDaemonLogMu.Unlock()
 	}
 }
 
@@ -87,10 +127,32 @@ func runDaemonStart(ctx context.Context, cmd *cobra.Command, apiURL, daemonPath 
 		return err
 	}
 
-	// Spawn detached.
+	// Spawn detached. Redirect stdout/stderr to daemon.log when available
+	// so startup failures (config error, port conflict, TLS missing) leave
+	// diagnostics on disk rather than being silently discarded under
+	// DETACHED_PROCESS. On Windows, Go's exec sets STARTF_USESTDHANDLES
+	// automatically when Stdout/Stderr are *os.File, so the handle inherits
+	// through CreateProcess even under DETACHED_PROCESS.
 	child := exec.Command(bin) // #nosec G204 — path resolved + validated by caller
+	var logFile *os.File
+	if lf, err := getOpenDaemonLog()(); err == nil {
+		logFile = lf
+		child.Stdout = lf
+		child.Stderr = lf
+	} else {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"warning: cannot open daemon log file: %v (stderr will be discarded)\n", err)
+	}
 	if err := getSpawnFunc()(child); err != nil {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
 		return fmt.Errorf("spawn daemon: %w", err)
+	}
+	// Close the parent's handle. The daemon process has its own inherited
+	// copy and will continue writing to the log file.
+	if logFile != nil {
+		_ = logFile.Close()
 	}
 
 	// Poll until /health is reachable.

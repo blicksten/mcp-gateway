@@ -35,6 +35,12 @@ import (
 // §no-auth-escape-hatch.
 const envNoAuthUnderstood = "MCP_GATEWAY_I_UNDERSTAND_NO_AUTH"
 
+// pluginReannounceDelay is the fixed delay before firing TriggerPluginReannounce
+// after daemon startup. Decoupled from StartAll so Claude Code receives the
+// reconnect signal predictably, not after the slowest backend cold-start
+// (playwright can take ~15s).
+const pluginReannounceDelay = 3 * time.Second
+
 // version / commit / date can be set in three ways, resolved in this order:
 //
 //  1. Linker (`go build -ldflags "-X main.version=v1.29.0 -X main.commit=... -X main.date=..."`)
@@ -273,25 +279,33 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 
 	g, ctx := errgroup.WithContext(ctx)
 
-	// Start all backends.
+	// Backends. RebuildTools after they're all up.
+	// Phase 16.2 (PAL-TD-GAP2): bootstrap plugin .mcp.json on startup.
+	// Without this, a fresh daemon whose backends are managed only via
+	// config.json (never POSTed through REST) leaves the plugin with
+	// the empty checked-in stub until the first REST mutation — which
+	// may never happen.
 	g.Go(func() error {
 		if err := lm.StartAll(ctx); err != nil {
 			logger.Warn("some backends failed to start", "error", err)
 		}
 		gw.RebuildTools()
-		// Phase 16.2 (PAL-TD-GAP2): bootstrap plugin .mcp.json on startup.
-		// Without this, a fresh daemon whose backends are managed only via
-		// config.json (never POSTed through REST) leaves the plugin with
-		// the empty checked-in stub until the first REST mutation — which
-		// may never happen.
-		//
-		// Phase MCPR.4 (2026-05-08): use TriggerPluginReannounce instead of
-		// TriggerPluginRegen so the .mcp.json mtime is bumped even on a
-		// steady-state respawn where the regenerated content is byte-
-		// identical to the existing file. This fires Claude Code's plugin-
-		// manager fs-watcher and pairs with the existing patch-flow signal
-		// (EnqueueReconnectAction) to provide two-layer recovery —
-		// docs/PLAN-mcp-resilience.md Phase MCPR.4.
+		return nil
+	})
+
+	// Reannounce plugin to Claude Code independently of StartAll.
+	// StartAll blocks on the slowest backend (up to ~15s for playwright);
+	// firing reannounce after a fixed 3s delay instead makes the Claude Code
+	// reconnect signal arrive predictably, not at the mercy of backend
+	// cold-start. Phase MCPR.4 (2026-05-08): TriggerPluginReannounce bumps
+	// .mcp.json mtime even when content is byte-identical, firing Claude
+	// Code's plugin-manager fs-watcher for two-layer recovery.
+	g.Go(func() error {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(pluginReannounceDelay):
+		}
 		apiServer.TriggerPluginReannounce()
 		return nil
 	})

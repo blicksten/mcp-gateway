@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -74,6 +75,14 @@ const (
 	MaxProbesCached = 128
 	// MaxHeartbeatsCached is a hard cap on per-session heartbeats.
 	MaxHeartbeatsCached = 64
+	// MaxSessionPidsCached is a hard cap on the in-memory session→PID map.
+	// Each entry is ~40 bytes; 256 entries = ~10 KB ceiling regardless of
+	// how many short-lived VSCode windows have registered.
+	MaxSessionPidsCached = 256
+
+	// StaleTmpThreshold is the age cutoff for orphaned writeAtomic tmp files
+	// swept by Load. Set generously above worst-case in-flight persist duration.
+	StaleTmpThreshold = 5 * time.Minute
 )
 
 // Heartbeat is the JSON payload the patch sends on POST
@@ -199,29 +208,49 @@ type persisted struct {
 
 // Load reads persistPath (if set) and rehydrates state. Missing file is not
 // an error. Expired entries are dropped by TTL at load time.
+// After a successful rehydrate, sweepStaleTmps removes any orphaned
+// patch-state.*.tmp files left by a prior crash.
 func (s *State) Load() error {
 	if s.persistPath == "" {
 		return nil
 	}
+
+	// Rehydrate under the write lock, then release before the sweep.
+	// sweepStaleTmps does disk I/O (ReadDir, Remove) that must not run
+	// while s.mu is held — holding a mutex across I/O violates the
+	// codebase convention and degrades latency unnecessarily.
+	doSweep, err := s.loadLocked()
+	if err != nil {
+		return err
+	}
+	if doSweep {
+		s.sweepStaleTmps()
+	}
+	return nil
+}
+
+// loadLocked is the lock-held body of Load. Returns (doSweep, error):
+// doSweep is true when rehydration succeeded and the caller should sweep.
+func (s *State) loadLocked() (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	data, err := os.ReadFile(s.persistPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("read patch state: %w", err)
+		return false, fmt.Errorf("read patch state: %w", err)
 	}
 	if len(data) == 0 {
-		return nil
+		return false, nil
 	}
 	var p persisted
 	if err := json.Unmarshal(data, &p); err != nil {
 		// Corrupt file: log, discard, and start fresh. Stale state is
 		// strictly better than a boot loop.
 		s.logger.Warn("patch-state file corrupt — starting fresh", "path", s.persistPath, "error", err)
-		return nil
+		return false, nil
 	}
 
 	now := s.now()
@@ -241,7 +270,51 @@ func (s *State) Load() error {
 		s.actions = append(s.actions, act)
 	}
 	s.logger.Info("patch-state loaded", "heartbeats", len(s.heartbeats), "actions", len(s.actions))
-	return nil
+	return true, nil
+}
+
+// sweepStaleTmps removes patch-state.*.tmp files older than StaleTmpThreshold
+// from the directory containing persistPath. These orphans are left behind
+// when the daemon crashes between os.CreateTemp and os.Rename in writeAtomic.
+// Called from Load after a successful rehydrate so a corrupt-file abort path
+// does NOT trigger a sweep.
+func (s *State) sweepStaleTmps() {
+	if s.persistPath == "" {
+		return
+	}
+	dir := filepath.Dir(s.persistPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		s.logger.Warn("patch-state tmp sweep: readdir failed", "dir", dir, "error", err)
+		return
+	}
+	cutoff := s.now().Add(-StaleTmpThreshold)
+	removed := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, "patch-state.") || !strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if !info.ModTime().Before(cutoff) {
+			continue
+		}
+		full := filepath.Join(dir, name)
+		if err := os.Remove(full); err != nil {
+			s.logger.Warn("patch-state tmp sweep: remove failed", "path", full, "error", err)
+			continue
+		}
+		removed++
+	}
+	if removed > 0 {
+		s.logger.Info("patch-state tmp sweep: removed orphans", "count", removed, "dir", dir)
+	}
 }
 
 // RecordHeartbeat stores (or overwrites) the heartbeat for hb.SessionID and
@@ -717,6 +790,22 @@ func (s *State) RecordSessionPid(sessionID string, pid uint32) (*SessionPid, err
 	defer s.mu.Unlock()
 	entry := &SessionPid{PID: pid, RegisteredAt: s.now()}
 	s.sessionPids[sessionID] = entry
+
+	// Evict oldest entry if above cap. Mirrors the heartbeat eviction pattern.
+	if len(s.sessionPids) > MaxSessionPidsCached {
+		var oldestSID string
+		var oldestAt time.Time
+		for sid, existing := range s.sessionPids {
+			if oldestSID == "" || existing.RegisteredAt.Before(oldestAt) {
+				oldestSID = sid
+				oldestAt = existing.RegisteredAt
+			}
+		}
+		if oldestSID != "" && oldestSID != sessionID {
+			delete(s.sessionPids, oldestSID)
+		}
+	}
+
 	clone := *entry
 	return &clone, nil
 }
