@@ -1066,3 +1066,114 @@ func TestMetaToolHandler_NilArguments(t *testing.T) {
 	assert.True(t, result.IsError)
 	assert.Contains(t, result.Content[0].(*mcp.TextContent).Text, "tool_name argument is required")
 }
+
+// --- Fix 1 regression guard: RebuildTools error-state backend keeps stub ---
+
+// TestRebuildTools_ErrorStateBackendKeepsStub verifies that a configured backend
+// that previously had tools (stub created while running) keeps that stub after
+// transitioning to StatusError so that /mcp/<backend> stays mounted and returns
+// HTTP 200 + empty tools instead of HTTP 400/404.
+//
+// The fix (unfreeze-button): RebuildTools reads g.cfg.Servers inside serverMu.Lock
+// and only deletes perBackendServer[backend] when the backend is absent from BOTH
+// byBackend (has tools) AND configuredServers (is in config). Without the fix the
+// stub was deleted whenever the backend had 0 tools, regardless of config presence.
+func TestRebuildTools_ErrorStateBackendKeepsStub(t *testing.T) {
+	t.Run("stub kept when backend transitions from running to error", func(t *testing.T) {
+		cfg := &models.Config{
+			Servers: map[string]*models.ServerConfig{
+				"test-backend": {Command: "echo"},
+			},
+		}
+		cfg.ApplyDefaults()
+
+		lm := lifecycle.NewManager(cfg, "test", testLogger())
+		gw := New(cfg, lm, "test", testLogger())
+
+		// Step 1: backend running with tools — stub is lazy-created.
+		lm.SetStatus("test-backend", models.StatusRunning, "")
+		lm.SetTools("test-backend", []models.ToolInfo{
+			{Name: "ping", Description: "Ping"},
+		})
+		gw.RebuildTools()
+		require.NotNil(t, gw.ServerFor("test-backend"), "precondition: stub must exist while running")
+
+		// Step 2: backend crashes — tools cleared, status Error.
+		// Stub must be KEPT because backend is still in config.
+		lm.SetStatus("test-backend", models.StatusError, "process exited")
+		lm.SetTools("test-backend", []models.ToolInfo{})
+		gw.RebuildTools()
+
+		srv := gw.ServerFor("test-backend")
+		assert.NotNil(t, srv,
+			"stub must survive RebuildTools when backend is in error but still in config")
+	})
+
+	t.Run("stub deleted when backend removed from config", func(t *testing.T) {
+		cfg := &models.Config{
+			Servers: map[string]*models.ServerConfig{
+				"test-backend": {Command: "echo"},
+			},
+		}
+		cfg.ApplyDefaults()
+
+		lm := lifecycle.NewManager(cfg, "test", testLogger())
+		gw := New(cfg, lm, "test", testLogger())
+
+		// Create stub via running-with-tools phase.
+		lm.SetStatus("test-backend", models.StatusRunning, "")
+		lm.SetTools("test-backend", []models.ToolInfo{{Name: "ping", Description: "Ping"}})
+		gw.RebuildTools()
+		require.NotNil(t, gw.ServerFor("test-backend"), "stub must exist while in config")
+
+		// Transition to error, verify stub survives.
+		lm.SetTools("test-backend", []models.ToolInfo{})
+		lm.SetStatus("test-backend", models.StatusError, "gone")
+		gw.RebuildTools()
+		require.NotNil(t, gw.ServerFor("test-backend"), "stub must survive error while in config")
+
+		// Remove from config — stub must be deleted on next RebuildTools.
+		emptyCfg := &models.Config{Servers: make(map[string]*models.ServerConfig)}
+		emptyCfg.ApplyDefaults()
+		gw.UpdateConfig(emptyCfg)
+		gw.RebuildTools()
+
+		srv := gw.ServerFor("test-backend")
+		assert.Nil(t, srv, "stub must be deleted once backend is removed from config")
+	})
+}
+
+// TestRebuildTools_RunningBackendToolsVisible verifies that running backends
+// (StatusRunning, tools registered) still expose their tools normally after
+// RebuildTools — i.e. the fix does not regress the happy path.
+func TestRebuildTools_RunningBackendToolsVisible(t *testing.T) {
+	cfg := &models.Config{
+		Servers: map[string]*models.ServerConfig{
+			"healthy": {Command: "echo"},
+		},
+	}
+	cfg.ApplyDefaults()
+
+	lm := lifecycle.NewManager(cfg, "test", testLogger())
+	gw := New(cfg, lm, "test", testLogger())
+
+	lm.SetStatus("healthy", models.StatusRunning, "")
+	lm.SetTools("healthy", []models.ToolInfo{
+		{Name: "read", Description: "Read a file"},
+		{Name: "write", Description: "Write a file"},
+	})
+
+	gw.RebuildTools()
+
+	// Per-backend server must exist and the aggregate view must include the tools.
+	srv := gw.ServerFor("healthy")
+	require.NotNil(t, srv, "running backend must have a per-backend server")
+
+	tools := gw.ListTools()
+	toolNames := make([]string, len(tools))
+	for i, ti := range tools {
+		toolNames[i] = ti.Name
+	}
+	assert.Contains(t, toolNames, "healthy__read", "running backend tools must be visible after RebuildTools")
+	assert.Contains(t, toolNames, "healthy__write", "running backend tools must be visible after RebuildTools")
+}

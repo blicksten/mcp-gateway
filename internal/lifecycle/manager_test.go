@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -415,4 +416,88 @@ func TestScanStderr_AcceptsLineOver64KB(t *testing.T) {
 	lines := ring.Lines()
 	require.Len(t, lines, 1, "250KB+ line must reach the ring buffer in one piece (old 64KB cap would drop it entirely via bufio.ErrTooLong)")
 	assert.NotEmpty(t, lines[0].Text, "scanner must deliver the line content")
+}
+
+// --- Fix 2 regression guard: TCP pre-check fast-fail for unreachable HTTP backends ---
+
+// closedPort returns a localhost port that was just closed (so the OS refuses
+// connections on it). The listen + close approach avoids using a hard-coded
+// port that might be occupied, and produces a reliably refused address.
+func closedPort(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+	return addr
+}
+
+// TestStart_HTTPBackend_UnreachableHost_FastFail verifies that Manager.Start
+// returns quickly (within 6 seconds) with an error containing "host unreachable"
+// when the HTTP backend URL is not reachable — instead of the previous 42-second
+// Windows connectex timeout.  This is the regression guard for the
+// checkTCPReachable pre-check added in the unfreeze-button fix.
+func TestStart_HTTPBackend_UnreachableHost_FastFail(t *testing.T) {
+	addr := closedPort(t)
+	backendURL := "http://" + addr + "/mcp"
+
+	cfg := &models.Config{
+		Servers: map[string]*models.ServerConfig{
+			"unreachable": {URL: backendURL},
+		},
+	}
+	cfg.ApplyDefaults()
+
+	m := NewManager(cfg, "test", testLogger())
+
+	// 10-second context — must complete well before that; old code took ~42s on Windows.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err := m.Start(ctx, "unreachable")
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "Start must fail for unreachable host")
+	assert.Less(t, elapsed, 6*time.Second,
+		"Start must fast-fail within 6s (TCP pre-check), not block for ~42s (old Windows connectex timeout); elapsed=%s", elapsed)
+	assert.Contains(t, err.Error(), "host unreachable",
+		"error must contain 'host unreachable' from checkTCPReachable")
+
+	// Backend status must be StatusError, not stuck in StatusStarting.
+	e, ok := m.Entry("unreachable")
+	require.True(t, ok)
+	assert.Equal(t, models.StatusError, e.Status,
+		"backend must be in StatusError after TCP pre-check failure")
+}
+
+// TestStart_StdioBackend_NoTCPCheck verifies that stdio backends (cfg.URL == "",
+// cfg.Command set) do NOT go through the TCP pre-check.  The pre-check is only
+// applicable to HTTP/SSE backends.  A stdio backend with a valid binary should
+// start successfully without any TCP dial attempt.
+func TestStart_StdioBackend_NoTCPCheck(t *testing.T) {
+	binary := buildMockServer(t)
+
+	cfg := &models.Config{
+		Servers: map[string]*models.ServerConfig{
+			// URL is empty — stdio transport; Command is set.
+			"stdio-only": {Command: binary},
+		},
+	}
+	cfg.ApplyDefaults()
+
+	m := NewManager(cfg, "test", testLogger())
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Must start successfully — no TCP pre-check should block it.
+	err := m.Start(ctx, "stdio-only")
+	require.NoError(t, err, "stdio backend must start without TCP pre-check interference")
+
+	e, ok := m.Entry("stdio-only")
+	require.True(t, ok)
+	assert.Equal(t, models.StatusRunning, e.Status,
+		"stdio backend must reach StatusRunning — URL-based pre-check must not apply")
+
+	require.NoError(t, m.Stop(ctx, "stdio-only"))
 }

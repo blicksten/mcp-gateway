@@ -446,12 +446,39 @@ func (g *Gateway) RebuildTools() {
 		byBackend[nt.server] = append(byBackend[nt.server], nt)
 	}
 
-	// Tear down per-backend servers for backends no longer present.
+	// Tear down per-backend servers only for backends removed from config.
+	// Backends that are in config but have no tools (error/down state) keep their
+	// empty stub so /mcp/<backend> returns HTTP 200 + empty tools instead of 404/400,
+	// preventing Claude Code from triggering a full transport reinitialize on every
+	// backend restart attempt.
 	g.serverMu.Lock()
+	g.cfgMu.RLock()
+	configuredServers := make(map[string]struct{}, len(g.cfg.Servers))
+	for name := range g.cfg.Servers {
+		configuredServers[name] = struct{}{}
+	}
+	g.cfgMu.RUnlock()
 	for backend := range g.perBackendServer {
 		if _, stillPresent := byBackend[backend]; !stillPresent {
-			delete(g.perBackendServer, backend)
-			delete(g.backendRegistered, backend)
+			if _, inConfig := configuredServers[backend]; !inConfig {
+				delete(g.perBackendServer, backend)
+				delete(g.backendRegistered, backend)
+			} else {
+				// Backend is still in config but has no tools (error/down state).
+				// Clear any stale tools from the per-backend stub so the endpoint
+				// returns HTTP 200 with a genuinely empty tool list, not ghost tools
+				// from the last time the backend was healthy.
+				if reg := g.backendRegistered[backend]; len(reg) > 0 {
+					staleNames := make([]string, 0, len(reg))
+					for name := range reg {
+						staleNames = append(staleNames, name)
+					}
+					if srv := g.perBackendServer[backend]; srv != nil {
+						srv.RemoveTools(staleNames...)
+					}
+					g.backendRegistered[backend] = make(map[string]struct{})
+				}
+			}
 		}
 	}
 	// Lazy-create per-backend servers for new backends (keyed by name).
