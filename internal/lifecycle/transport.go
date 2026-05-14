@@ -10,6 +10,35 @@ import (
 	"time"
 )
 
+// backendInitTimeout is applied as ResponseHeaderTimeout on the shared
+// backend transport. It bounds the MCP initialize handshake (header phase
+// only) so a cloud backend that accepts TCP but never sends response headers
+// does not block StartAll indefinitely.
+//
+// ResponseHeaderTimeout covers only the time between the end of the outgoing
+// request and the arrival of response headers — it does NOT cut streaming
+// response bodies, so long-running SSE streams and large tool responses are
+// unaffected.
+const backendInitTimeout = 30 * time.Second
+
+// backendSharedTransport is the singleton RoundTripper used by all HTTP/SSE
+// backend clients. Sharing one transport avoids per-cycle goroutine growth
+// from idle connection pool goroutines (goroutine-leak guard). It mirrors
+// http.DefaultTransport's settings and adds ResponseHeaderTimeout.
+var backendSharedTransport = &http.Transport{ //nolint:gochecknoglobals — intentional shared transport; see comment
+	Proxy: http.ProxyFromEnvironment,
+	DialContext: (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ResponseHeaderTimeout: backendInitTimeout,
+	ExpectContinueTimeout: 1 * time.Second,
+	MaxIdleConns:          100,
+	IdleConnTimeout:       90 * time.Second,
+	ForceAttemptHTTP2:     true,
+}
+
 // headerTransport is an http.RoundTripper that injects custom headers
 // into every outgoing request. Used to pass auth tokens and API keys
 // to HTTP/SSE MCP backends.
@@ -28,19 +57,18 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.base.RoundTrip(r2)
 }
 
-// httpClientWithHeaders returns an *http.Client that injects the given
-// headers into every request. Returns nil if headers is empty.
+// httpClientWithHeaders returns an *http.Client for MCP backend connections.
+// When headers is non-empty, every request carries those headers (e.g. API
+// keys). Always returns a non-nil client backed by backendSharedTransport so
+// ResponseHeaderTimeout applies to every backend regardless of header config.
 func httpClientWithHeaders(headers map[string]string) *http.Client {
 	if len(headers) == 0 {
-		return nil
+		return &http.Client{Transport: backendSharedTransport}
 	}
 	h := make(map[string]string, len(headers))
 	maps.Copy(h, headers)
 	return &http.Client{
-		Transport: &headerTransport{
-			base:    http.DefaultTransport,
-			headers: h,
-		},
+		Transport: &headerTransport{base: backendSharedTransport, headers: h},
 	}
 }
 
