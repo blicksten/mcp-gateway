@@ -34,6 +34,46 @@ let _tokenCache: TokenFileCache | null = null;
 let _adminTokenCache: TokenFileCache | null = null;
 
 /**
+ * Maximum time (ms) to wait for a single `fs.promises.stat` call before
+ * giving up. On corporate Windows (domain user, encrypted profile, antivirus)
+ * `stat` can hang for minutes when multiple extension-host processes call it
+ * concurrently at VSCode startup, saturating libuv's 4-thread pool. A 2 s cap
+ * means: cache-hit path returns cached content immediately; cache-miss path
+ * falls back to readFileSync (bypasses the pool).
+ */
+const STAT_TIMEOUT_MS = 2000;
+
+/**
+ * Race `fs.promises.stat(p)` against a 2 s timeout.
+ * Returns `null` on timeout or any FS error (ENOENT, EPERM, EMFILE, etc.) so
+ * callers can fall back gracefully instead of hanging.
+ *
+ * Trade-off accepted: a genuine FS error (not just a timeout) is also mapped
+ * to `null`, which causes the cache-hit path to serve the last-known-good
+ * token rather than evicting and re-reading.  For the error cases:
+ *   - ENOENT (file deleted after first read): cache serves the stale token
+ *     until the gateway rejects it with 401.
+ *   - EPERM / EMFILE: transient lock / fd exhaustion — stale token is safe
+ *     for one poll cycle; the next call will succeed when the condition clears.
+ * These are deliberate trade-offs: serving a briefly stale 128-byte token is
+ * far less disruptive than showing the gateway as "offline" for minutes.
+ *
+ * Timer cleanup: the timeout handle is always cancelled after the race settles
+ * so it does not prevent Node's event loop from draining between test runs.
+ */
+async function statOrNull(p: string): Promise<fs.Stats | null> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<null>((resolve) => {
+		timer = setTimeout(() => resolve(null), STAT_TIMEOUT_MS);
+	});
+	try {
+		return await Promise.race([fs.promises.stat(p).catch(() => null), timeout]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
  * Reset the module-level token caches. Exported for tests only — not part of
  * the public API. Allows deterministic test isolation without module reload.
  */
@@ -135,10 +175,15 @@ export function buildAuthHeader(tokenPath: string): string {
  * blocking the extension host event loop on every REST call.
  *
  * Env-var path (MCP_GATEWAY_AUTH_TOKEN): unchanged — process.env is in-memory,
- * no IO. File path: `fs.promises.stat` per call to compare mtime against the
- * cache (stat is cheap: no content transfer). File content is re-read only
- * when mtime changes (e.g. operator runs `mcp-ctl install-claude-code --refresh-token`).
+ * no IO. File path: `statOrNull` per call to compare mtime against the cache
+ * (stat is cheap: no content transfer). File content is re-read only when mtime
+ * changes (e.g. operator runs `mcp-ctl install-claude-code --refresh-token`).
  * On the hot path (token unchanged) the only async work is one stat syscall.
+ *
+ * Hang-resilience (fix for corporate Windows domain hang):
+ *   - Cache-hit  : if stat times out, return cached content (assume unchanged).
+ *   - Cache-miss : use readFileSync to bypass libuv thread pool saturation;
+ *                  stat is attempted after the read for mtime population only.
  *
  * AUDIT B-NEW-29 (Phase 11).
  */
@@ -157,25 +202,31 @@ export async function resolveTokenAsync(tokenPath: string): Promise<string> {
 	// Check the cache: if we have a valid entry for this path, stat the file
 	// and re-read only when mtime changed.
 	if (_tokenCache && _tokenCache.tokenPath === tokenPath) {
-		try {
-			const st = await fs.promises.stat(tokenPath);
-			if (st.mtimeMs === _tokenCache.mtimeMs) {
-				return _tokenCache.content; // cache hit — no re-read
-			}
-		} catch {
-			// File removed or inaccessible — fall through to full read/throw.
-			_tokenCache = null;
+		const st = await statOrNull(tokenPath);
+		if (st === null) {
+			// stat timed out (FS hang) — assume token unchanged, serve from cache.
+			return _tokenCache.content;
 		}
+		if (st.mtimeMs === _tokenCache.mtimeMs) {
+			return _tokenCache.content; // cache hit — no re-read
+		}
+		// mtime changed — fall through to re-read.
+		_tokenCache = null;
 	}
 
 	// Cache miss or stale — read the file.
+	// Use readFileSync to bypass libuv thread-pool saturation: on domain Windows
+	// fs.promises.stat can block all 4 threads for minutes at startup, so async
+	// readFile would queue behind them.  The token file is tiny (≤ 128 bytes);
+	// a synchronous read blocks the event loop for < 1 ms on any local disk.
 	try {
-		const st = await fs.promises.stat(tokenPath);
-		const raw = await fs.promises.readFile(tokenPath, 'utf8');
-		const trimmed = raw.trim();
-		if (looksLikeToken(trimmed)) {
-			_tokenCache = { tokenPath, content: trimmed, mtimeMs: st.mtimeMs };
-			return trimmed;
+		const raw = fs.readFileSync(tokenPath, 'utf8').trim();
+		if (looksLikeToken(raw)) {
+			// Best-effort mtime — used only for future cache invalidation.
+			// statOrNull timeout here just means mtimeMs=0 (re-read next call).
+			const st = await statOrNull(tokenPath);
+			_tokenCache = { tokenPath, content: raw, mtimeMs: st ? st.mtimeMs : 0 };
+			return raw;
 		}
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException).code;
@@ -283,7 +334,8 @@ export function resolveAdminToken(tokenPath: string): string {
 /**
  * MCPR.3: async admin-token resolution with a dedicated mtime cache so
  * regular-path caching is not invalidated by admin lookups. Mirror of
- * `resolveTokenAsync` for the admin scope.
+ * `resolveTokenAsync` for the admin scope. Applies the same hang-resilience
+ * strategy (statOrNull + readFileSync on cache-miss) as resolveTokenAsync.
  */
 export async function resolveAdminTokenAsync(tokenPath: string): Promise<string> {
 	const env = process.env[ENV_VAR_NAME_ADMIN];
@@ -298,23 +350,22 @@ export async function resolveAdminTokenAsync(tokenPath: string): Promise<string>
 	}
 
 	if (_adminTokenCache && _adminTokenCache.tokenPath === tokenPath) {
-		try {
-			const st = await fs.promises.stat(tokenPath);
-			if (st.mtimeMs === _adminTokenCache.mtimeMs) {
-				return _adminTokenCache.content;
-			}
-		} catch {
-			_adminTokenCache = null;
+		const st = await statOrNull(tokenPath);
+		if (st === null) {
+			return _adminTokenCache.content;
 		}
+		if (st.mtimeMs === _adminTokenCache.mtimeMs) {
+			return _adminTokenCache.content;
+		}
+		_adminTokenCache = null;
 	}
 
 	try {
-		const st = await fs.promises.stat(tokenPath);
-		const raw = await fs.promises.readFile(tokenPath, 'utf8');
-		const trimmed = raw.trim();
-		if (looksLikeToken(trimmed)) {
-			_adminTokenCache = { tokenPath, content: trimmed, mtimeMs: st.mtimeMs };
-			return trimmed;
+		const raw = fs.readFileSync(tokenPath, 'utf8').trim();
+		if (looksLikeToken(raw)) {
+			const st = await statOrNull(tokenPath);
+			_adminTokenCache = { tokenPath, content: raw, mtimeMs: st ? st.mtimeMs : 0 };
+			return raw;
 		}
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException).code;

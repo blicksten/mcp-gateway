@@ -251,6 +251,152 @@ describe('auth-header', () => {
 		});
 	});
 
+	// Hang-resilience regression tests for the statOrNull 2-second timeout.
+	// Tests that stub stat with a never-resolving promise must allow up to 5s
+	// for the internal STAT_TIMEOUT_MS (2s) race to fire inside statOrNull.
+	describe('hang-resilience (statOrNull timeout)', function() {
+		// Each test clears the env so file-path/cache logic is exercised,
+		// then restores whatever setup.ts seeded.
+		let savedEnv: string | undefined;
+
+		beforeEach(() => {
+			savedEnv = process.env[ENV_VAR_NAME];
+			delete process.env[ENV_VAR_NAME];
+			_clearTokenCacheForTests();
+		});
+
+		afterEach(() => {
+			if (savedEnv === undefined) {
+				delete process.env[ENV_VAR_NAME];
+			} else {
+				process.env[ENV_VAR_NAME] = savedEnv;
+			}
+		});
+
+		// eslint-disable-next-line @typescript-eslint/no-invalid-this
+		it('cache-hit with hanging stat → returns cached content without waiting', async function() {
+			// Allow 5s: the statOrNull race fires after STAT_TIMEOUT_MS (2s).
+			this.timeout(5000); // eslint-disable-line @typescript-eslint/no-invalid-this
+			const p = freshTokenPath();
+			const realStat = fs.promises.stat.bind(fs.promises);
+			try {
+				fs.writeFileSync(p, BASE64URL);
+
+				// Prime the cache with a real first call.
+				const first = await resolveTokenAsync(p);
+				assert.equal(first, BASE64URL, 'first call must return the token');
+
+				// Replace stat with a never-resolving promise to simulate FS hang.
+				(fs.promises as any).stat = (_path: string) => new Promise(() => { /* hangs forever */ });
+
+				// Cache-hit path: statOrNull races the hanging stat against its
+				// 2s timeout, resolves to null, then returns cached content.
+				const second = await resolveTokenAsync(p);
+				assert.equal(second, BASE64URL,
+					'cache-hit with hanging stat must return cached content after timeout');
+			} finally {
+				(fs.promises as any).stat = realStat;
+				cleanupTokenPath(p);
+			}
+		});
+
+		// eslint-disable-next-line @typescript-eslint/no-invalid-this
+		it('cache-miss with hanging stat → still reads file via readFileSync', async function() {
+			// Allow 5s: statOrNull races the hanging stat and resolves to null after 2s.
+			this.timeout(5000); // eslint-disable-line @typescript-eslint/no-invalid-this
+			const p = freshTokenPath();
+			const realStat = fs.promises.stat.bind(fs.promises);
+			try {
+				fs.writeFileSync(p, BASE64URL);
+
+				// Replace stat before first call (cache is empty = cache-miss path).
+				(fs.promises as any).stat = (_path: string) => new Promise(() => { /* hangs forever */ });
+
+				// Cache-miss uses readFileSync (bypasses libuv thread pool), so
+				// the token is returned even when stat hangs.  After readFileSync
+				// succeeds, statOrNull is called for mtime — it will timeout (2s)
+				// and return null, so mtimeMs is stored as 0.
+				const tok = await resolveTokenAsync(p);
+				assert.equal(tok, BASE64URL,
+					'cache-miss with hanging stat must still return token via readFileSync');
+			} finally {
+				(fs.promises as any).stat = realStat;
+				cleanupTokenPath(p);
+			}
+		});
+
+		// eslint-disable-next-line @typescript-eslint/no-invalid-this
+		it('admin cache-hit with hanging stat → returns cached admin content', async function() {
+			// Allow 5s: statOrNull races the hanging stat and resolves to null after 2s.
+			this.timeout(5000); // eslint-disable-line @typescript-eslint/no-invalid-this
+			const p = freshTokenPath();
+			const realStat = fs.promises.stat.bind(fs.promises);
+			let savedAdminEnv: string | undefined;
+			try {
+				savedAdminEnv = process.env[ENV_VAR_NAME_ADMIN];
+				delete process.env[ENV_VAR_NAME_ADMIN];
+
+				fs.writeFileSync(p, BASE64URL);
+
+				// Prime the admin cache with a real first call.
+				const first = await resolveAdminTokenAsync(p);
+				assert.equal(first, BASE64URL, 'first admin call must return the token');
+
+				// Now simulate a stat hang.
+				(fs.promises as any).stat = (_path: string) => new Promise(() => { /* hangs forever */ });
+
+				// Admin cache-hit path must serve cached content after the 2s timeout.
+				const second = await resolveAdminTokenAsync(p);
+				assert.equal(second, BASE64URL,
+					'admin cache-hit with hanging stat must return cached admin content');
+			} finally {
+				(fs.promises as any).stat = realStat;
+				if (savedAdminEnv === undefined) {
+					delete process.env[ENV_VAR_NAME_ADMIN];
+				} else {
+					process.env[ENV_VAR_NAME_ADMIN] = savedAdminEnv;
+				}
+				cleanupTokenPath(p);
+			}
+		});
+
+		it('cache-miss with stat returning null sets mtimeMs=0 → re-read on next call when file changes', async () => {
+			// This test uses an immediately-resolving null stub (no timeout wait needed).
+			// It verifies that mtimeMs=0 in the cache does NOT permanently suppress
+			// re-reads: when the file rotates, the next call sees 0 !== real_mtime
+			// and returns the new token.
+			const p = freshTokenPath();
+			const realStat = fs.promises.stat.bind(fs.promises);
+			try {
+				const tokenV1 = BASE64URL;
+				const tokenV2 = 'B'.repeat(MIN_TOKEN_LEN);
+				fs.writeFileSync(p, tokenV1);
+
+				// Stub stat to return null immediately (simulates statOrNull timeout).
+				// The cache-miss path calls readFileSync (succeeds) then statOrNull
+				// for mtime — with the null stub, mtimeMs is stored as 0.
+				(fs.promises as any).stat = (_path: string) => Promise.resolve(null);
+				const first = await resolveTokenAsync(p);
+				assert.equal(first, tokenV1, 'first call must return tokenV1');
+
+				// Restore real stat and rotate the file.
+				(fs.promises as any).stat = realStat;
+				const futureMs = Date.now() + 1000;
+				fs.writeFileSync(p, tokenV2);
+				fs.utimesSync(p, futureMs / 1000, futureMs / 1000);
+
+				// Second call: cache has mtimeMs=0, real stat returns a positive mtime,
+				// so 0 !== positive → cache cleared → file re-read → new token returned.
+				const second = await resolveTokenAsync(p);
+				assert.equal(second, tokenV2,
+					'mtimeMs=0 cache entry must be invalidated when real mtime is non-zero');
+			} finally {
+				(fs.promises as any).stat = realStat;
+				cleanupTokenPath(p);
+			}
+		});
+	});
+
 	// MCPR.3: admin-token resolution mirrors the regular path.
 	describe('admin token (MCPR.3)', () => {
 		let prevAdminEnv: string | undefined;
