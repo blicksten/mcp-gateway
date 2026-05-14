@@ -290,6 +290,13 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 			logger.Warn("some backends failed to start", "error", err)
 		}
 		gw.RebuildTools()
+		// Second reannounce fires after all per-backend servers are registered.
+		// The 3s goroutine below fires early (for fast aggregate-server reconnect),
+		// but per-backend endpoints (/mcp/<name>) return 400 until RebuildTools
+		// completes. This call ensures Claude Code reconnects again when every
+		// backend is actually ready, preventing the 60-second initialization
+		// timeout on /mcp/<backend> endpoints.
+		apiServer.TriggerPluginReannounce()
 		return nil
 	})
 
