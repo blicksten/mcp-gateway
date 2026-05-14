@@ -45,7 +45,8 @@ function fakeSibling(pid: number, createdAtMs: number, parentPid = 6688): Siblin
 }
 
 class CannedSiblingDetector implements SiblingDetector {
-    constructor(private readonly siblings: SiblingClaudeProcess[]) {}
+    private readonly siblings: SiblingClaudeProcess[];
+    constructor(siblings: SiblingClaudeProcess[]) { this.siblings = siblings; }
     async enumerate(): Promise<SiblingClaudeProcess[]> {
         return [...this.siblings];
     }

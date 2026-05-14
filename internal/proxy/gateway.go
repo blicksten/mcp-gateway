@@ -481,6 +481,21 @@ func (g *Gateway) RebuildTools() {
 			}
 		}
 	}
+	// Eagerly create empty stubs for ALL configured backends, even those with
+	// no tools (error/starting state). Without this, /mcp/<backend> returns 404
+	// during the startup window before RebuildTools runs, causing Claude Code to
+	// trigger a full transport reinitialization on its first plugin-reannounce.
+	for name := range configuredServers {
+		if _, exists := g.perBackendServer[name]; !exists {
+			g.perBackendServer[name] = mcp.NewServer(&mcp.Implementation{
+				Name:    name,
+				Version: g.version,
+			}, &mcp.ServerOptions{
+				KeepAlive: 60 * time.Second,
+			})
+			g.backendRegistered[name] = make(map[string]struct{})
+		}
+	}
 	// Lazy-create per-backend servers for new backends (keyed by name).
 	for backend := range byBackend {
 		if _, exists := g.perBackendServer[backend]; !exists {

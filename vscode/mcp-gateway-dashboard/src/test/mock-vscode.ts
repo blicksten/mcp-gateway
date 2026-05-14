@@ -72,11 +72,14 @@ class MockEventEmitter<T> {
 }
 
 class MockThemeIcon {
-	constructor(public readonly id: string, public readonly color?: MockThemeColor) {}
+	readonly id: string;
+	readonly color: MockThemeColor | undefined;
+	constructor(id: string, color?: MockThemeColor) { this.id = id; this.color = color; }
 }
 
 class MockThemeColor {
-	constructor(public readonly id: string) {}
+	readonly id: string;
+	constructor(id: string) { this.id = id; }
 }
 
 const TreeItemCollapsibleState = { None: 0, Collapsed: 1, Expanded: 2 };

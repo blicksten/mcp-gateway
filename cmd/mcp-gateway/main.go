@@ -279,6 +279,12 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 
 	g, ctx := errgroup.WithContext(ctx)
 
+	// Bootstrap empty per-backend stubs for all configured backends immediately.
+	// The 3-second goroutine below fires before StartAll+RebuildTools completes;
+	// without this call, /mcp/<backend> returns 404 at t=3s and Claude Code
+	// triggers a full transport reinitialization storm on every gateway start.
+	gw.RebuildTools()
+
 	// Backends. RebuildTools after they're all up.
 	// Phase 16.2 (PAL-TD-GAP2): bootstrap plugin .mcp.json on startup.
 	// Without this, a fresh daemon whose backends are managed only via
