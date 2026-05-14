@@ -12,6 +12,7 @@
  *   - filterStaleSiblings strict-less-than boundary.
  */
 
+import './mock-vscode'; // must be imported first to intercept 'vscode' require
 import * as assert from 'assert';
 import {
     type SiblingClaudeProcess,
