@@ -27,6 +27,12 @@ const (
 	DefaultRESTHealthTimeout     = 5 * time.Second
 	DefaultMaxConcurrentChecks   = 20
 	DefaultRestartStuckTimeout   = 60 * time.Second
+	// DefaultConsecutiveFailedStarts trips the circuit breaker when a server
+	// fails to start this many times in a row, regardless of the time window.
+	// Guards against the window-reset escape: with 90s restart intervals and
+	// a 300s window, 5 restarts take 450s and always reset the window before
+	// the threshold is reached, so the time-window circuit never opens.
+	DefaultConsecutiveFailedStarts = 5
 )
 
 // LifecycleManager is the interface the monitor uses to interact with
@@ -47,6 +53,11 @@ type serverState struct {
 	lastCrashAt         time.Time     // set in attemptRestart before each restart
 	uptimeStart         time.Time     // set on first successful health check after (re)start
 	cumulativeUptime    time.Duration // total operational time across all uptime windows
+	// consecutiveFailedStarts counts how many restart attempts in a row
+	// ended with Start() returning an error. Reset to 0 on a successful
+	// start. When it reaches DefaultConsecutiveFailedStarts the circuit
+	// opens regardless of the time window (time-window escape hatch fix).
+	consecutiveFailedStarts int
 }
 
 // Monitor periodically checks backend server health and manages
@@ -62,9 +73,10 @@ type Monitor struct {
 	states map[string]*serverState
 
 	// Configurable thresholds (exported for testing).
-	ConsecutiveFailureThreshold int
-	CircuitBreakerThreshold     int
-	CircuitBreakerWindow        time.Duration
+	ConsecutiveFailureThreshold    int
+	CircuitBreakerThreshold        int
+	CircuitBreakerWindow           time.Duration
+	ConsecutiveFailedStartsThreshold int
 }
 
 // NewMonitor creates a health monitor.
@@ -84,9 +96,10 @@ func NewMonitor(lm LifecycleManager, interval time.Duration, logger *slog.Logger
 			},
 		},
 		states: make(map[string]*serverState),
-		ConsecutiveFailureThreshold: DefaultConsecutiveFailures,
-		CircuitBreakerThreshold:     DefaultCircuitBreakerThresh,
-		CircuitBreakerWindow:        DefaultCircuitBreakerWindow,
+		ConsecutiveFailureThreshold:      DefaultConsecutiveFailures,
+		CircuitBreakerThreshold:          DefaultCircuitBreakerThresh,
+		CircuitBreakerWindow:             DefaultCircuitBreakerWindow,
+		ConsecutiveFailedStartsThreshold: DefaultConsecutiveFailedStarts,
 	}
 }
 
@@ -224,8 +237,28 @@ func (m *Monitor) attemptRestart(ctx context.Context, name string) {
 
 	if err := m.lm.Restart(ctx, name); err != nil {
 		m.logger.Error("auto-restart failed", "server", name, "error", err)
+
+		m.mu.Lock()
+		state := m.getOrCreateState(name)
+		state.consecutiveFailedStarts++
+		failedStarts := state.consecutiveFailedStarts
+		m.mu.Unlock()
+
+		if failedStarts >= m.ConsecutiveFailedStartsThreshold {
+			m.logger.Error("circuit breaker opened: consecutive startup failures",
+				"server", name, "consecutive_failed_starts", failedStarts)
+			m.lm.SetStatus(name, models.StatusDisabled, fmt.Sprintf(
+				"circuit breaker: %d consecutive startup failures", failedStarts))
+			return
+		}
 		m.lm.SetStatus(name, models.StatusError, err.Error())
+		return
 	}
+
+	// Successful restart — reset the consecutive-failed-starts counter.
+	m.mu.Lock()
+	m.getOrCreateState(name).consecutiveFailedStarts = 0
+	m.mu.Unlock()
 }
 
 // shouldOpenCircuit checks if the restart count exceeds the threshold

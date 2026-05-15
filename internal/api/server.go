@@ -36,6 +36,11 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// ErrAlreadyRunning is returned by ListenAndServe when the port is already
+// held by another healthy gateway instance. main() treats this as a clean
+// exit (os.Exit(0)) so the supervisor does not restart the losing process.
+var ErrAlreadyRunning = errors.New("another gateway instance is already serving")
+
 // Server holds all dependencies for the HTTP server.
 type Server struct {
 	lm         *lifecycle.Manager
@@ -803,6 +808,20 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	addr := net.JoinHostPort(bindAddr, strconv.Itoa(port))
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
+		// When the port is already in use, check whether another gateway
+		// instance is already healthy at that address. This happens when
+		// multiple VSCode windows race to spawn the daemon simultaneously:
+		// the first instance wins the bind, the losers should yield cleanly
+		// so the supervisor does NOT schedule a restart loop.
+		// On Windows the error contains "bind:"; on Linux "address already in use".
+		errStr := err.Error()
+		if strings.Contains(errStr, "bind:") || strings.Contains(errStr, "address already in use") {
+			if conn, dialErr := net.DialTimeout("tcp", addr, 2*time.Second); dialErr == nil {
+				conn.Close()
+				s.logger.Info("another gateway instance is already serving — yielding cleanly", "addr", addr)
+				return ErrAlreadyRunning
+			}
+		}
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 

@@ -148,6 +148,12 @@ func main() {
 	}))
 
 	if err := run(configPath, envFile, logger, noAuth); err != nil {
+		if errors.Is(err, api.ErrAlreadyRunning) {
+			// Another gateway instance already owns the port and is healthy.
+			// Exit cleanly so the extension supervisor does not restart us.
+			logger.Info("yielding to existing gateway instance — exiting cleanly")
+			os.Exit(0)
+		}
 		logger.Error("fatal", "error", err)
 		os.Exit(1)
 	}

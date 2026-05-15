@@ -147,9 +147,14 @@ export class DaemonManager {
 						logger.warn('daemon', `getHealth pre-spawn failed (kind=${e.kind}) — assuming gateway is alive, skipping spawn`, e);
 						return false;
 					}
-					// Belt-and-suspenders: re-probe to close the race window where two
-					// simultaneous slow probes both decide "offline". Skip if disposed
-					// during the first probe — manager is shutting down.
+					// Belt-and-suspenders re-probe with a delay so that a concurrent
+					// window that won the spawn race has time to bind the port and
+					// start serving before we check again. Without the delay all
+					// windows do the re-probe in the same millisecond window,
+					// see "still down", and all spawn — causing port-bind crashes
+					// (exit code 1) and a visible offline blip on every window reload.
+					if (this.disposed) { return false; }
+					await new Promise(resolve => setTimeout(resolve, 2500));
 					if (this.disposed) { return false; }
 					try {
 						await this.client.getHealth();
