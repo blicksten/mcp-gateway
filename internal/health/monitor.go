@@ -20,20 +20,56 @@ import (
 
 // Default thresholds.
 const (
-	DefaultPingTimeout           = 5 * time.Second
-	DefaultConsecutiveFailures   = 3
-	DefaultCircuitBreakerThresh  = 5
-	DefaultCircuitBreakerWindow  = 300 * time.Second
-	DefaultRESTHealthTimeout     = 5 * time.Second
-	DefaultMaxConcurrentChecks   = 20
-	DefaultRestartStuckTimeout   = 60 * time.Second
+	DefaultPingTimeout          = 5 * time.Second
+	DefaultConsecutiveFailures  = 3
+	DefaultCircuitBreakerThresh = 5
+	DefaultCircuitBreakerWindow = 300 * time.Second
+	DefaultRESTHealthTimeout    = 5 * time.Second
+	DefaultMaxConcurrentChecks  = 20
+	DefaultRestartStuckTimeout  = 60 * time.Second
 	// DefaultConsecutiveFailedStarts trips the circuit breaker when a server
 	// fails to start this many times in a row, regardless of the time window.
 	// Guards against the window-reset escape: with 90s restart intervals and
 	// a 300s window, 5 restarts take 450s and always reset the window before
 	// the threshold is reached, so the time-window circuit never opens.
 	DefaultConsecutiveFailedStarts = 5
+	// RestartBackoffBase / RestartBackoffMax bound the exponential delay
+	// between restart attempts (P0: previously 0ms, which let a
+	// spawn-OK-but-unreachable backend restart-storm the daemon to death).
+	RestartBackoffBase = 5 * time.Second
+	RestartBackoffMax  = 300 * time.Second
 )
+
+// restartBackoff returns the minimum wait before the next restart attempt.
+// restartCount 1 → base (no growth yet); each subsequent restart doubles
+// the wait, capped at RestartBackoffMax. restartCount is >= 1 at every call
+// site (incremented before use). A base of 0 disables backoff entirely
+// (used by unit tests that drive many restart cycles with no real time
+// elapsing).
+func (m *Monitor) restartBackoff(restartCount int) time.Duration {
+	base := m.RestartBackoffBase
+	if base <= 0 {
+		return 0
+	}
+	maxD := m.RestartBackoffMax
+	if maxD <= 0 {
+		maxD = RestartBackoffMax
+	}
+	if restartCount < 1 {
+		restartCount = 1
+	}
+	d := base
+	for i := 1; i < restartCount; i++ {
+		d *= 2
+		if d >= maxD {
+			return maxD
+		}
+	}
+	if d > maxD {
+		return maxD
+	}
+	return d
+}
 
 // LifecycleManager is the interface the monitor uses to interact with
 // the lifecycle manager. Avoids a circular dependency.
@@ -58,25 +94,44 @@ type serverState struct {
 	// start. When it reaches DefaultConsecutiveFailedStarts the circuit
 	// opens regardless of the time window (time-window escape hatch fix).
 	consecutiveFailedStarts int
+	// lastHealthyAt is the wall-clock time of the most recent successful
+	// MCP health check. The sticky-circuit gate uses
+	// lastHealthyAt.After(firstRestartAt) to distinguish a backend that
+	// genuinely recovered (allow window reset) from one that spawns OK but
+	// never becomes reachable (must accumulate toward the threshold and
+	// open). Zeroed by the CR-15 window reset and by ResetCircuit.
+	lastHealthyAt time.Time
+	// nextRestartAllowedAt gates the exponential restart backoff: an
+	// attemptRestart before this instant is skipped. Cleared on a proven
+	// healthy check and by ResetCircuit.
+	nextRestartAllowedAt time.Time
 }
 
 // Monitor periodically checks backend server health and manages
 // state transitions including auto-restart and circuit breaking.
 type Monitor struct {
-	lm           LifecycleManager
-	logger       *slog.Logger
-	interval     time.Duration
-	httpClient   *http.Client
-	startedAt    time.Time // written once at construction, never mutated — read without lock is safe
+	lm         LifecycleManager
+	logger     *slog.Logger
+	interval   time.Duration
+	httpClient *http.Client
+	startedAt  time.Time // written once at construction, never mutated — read without lock is safe
 
 	mu     sync.Mutex
 	states map[string]*serverState
 
-	// Configurable thresholds (exported for testing).
-	ConsecutiveFailureThreshold    int
-	CircuitBreakerThreshold        int
-	CircuitBreakerWindow           time.Duration
+	// Configurable thresholds (exported for testing). These MUST be set
+	// only before NewMonitor's caller starts the monitor (Run/CheckOnce)
+	// and treated as read-only afterwards — they are read without the
+	// mutex on the health-check path (review MED-1).
+	ConsecutiveFailureThreshold      int
+	CircuitBreakerThreshold          int
+	CircuitBreakerWindow             time.Duration
 	ConsecutiveFailedStartsThreshold int
+	// RestartBackoffBase/Max bound the exponential restart backoff.
+	// A base of 0 disables backoff (unit tests set this to drive many
+	// restart cycles without real time elapsing).
+	RestartBackoffBase time.Duration
+	RestartBackoffMax  time.Duration
 }
 
 // NewMonitor creates a health monitor.
@@ -95,11 +150,13 @@ func NewMonitor(lm LifecycleManager, interval time.Duration, logger *slog.Logger
 				return http.ErrUseLastResponse // never follow redirects
 			},
 		},
-		states: make(map[string]*serverState),
+		states:                           make(map[string]*serverState),
 		ConsecutiveFailureThreshold:      DefaultConsecutiveFailures,
 		CircuitBreakerThreshold:          DefaultCircuitBreakerThresh,
 		CircuitBreakerWindow:             DefaultCircuitBreakerWindow,
 		ConsecutiveFailedStartsThreshold: DefaultConsecutiveFailedStarts,
+		RestartBackoffBase:               RestartBackoffBase,
+		RestartBackoffMax:                RestartBackoffMax,
 	}
 }
 
@@ -137,6 +194,31 @@ func (m *Monitor) checkAll(ctx context.Context) {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
+				// Panic isolation (R2 — "the heart fails last"): a panic in
+				// one backend's health check must never take down the
+				// monitor loop. Registered LAST so on unwind it runs FIRST
+				// (recovers), then <-sem, then wg.Done() — no leaked
+				// semaphore slot, no wg.Wait() deadlock.
+				defer func() {
+					if r := recover(); r != nil {
+						m.logger.Error("panic in health check recovered",
+							"server", e.Name, "panic", r)
+						// Review HIGH-1: SetStatus must not be able to
+						// re-panic out of this defer — a re-panic would
+						// bypass the <-sem and wg.Done() defers (semaphore
+						// leak + wg.Wait deadlock). Contain it.
+						func() {
+							defer func() {
+								if r2 := recover(); r2 != nil {
+									m.logger.Error("panic while reporting health-check panic",
+										"server", e.Name, "panic", r2)
+								}
+							}()
+							m.lm.SetStatus(e.Name, models.StatusError,
+								fmt.Sprintf("panic in health check: %v", r))
+						}()
+					}
+				}()
 				m.checkOne(ctx, e)
 			}(entry)
 		case models.StatusRestarting:
@@ -172,6 +254,11 @@ func (m *Monitor) checkOne(ctx context.Context, entry models.ServerEntry) {
 
 	if mcpOK {
 		state.consecutiveFailures = 0
+		// Proven healthy: record the timestamp (sticky-circuit gate) and
+		// clear the restart backoff so a recovered backend restarts
+		// promptly if it fails again.
+		state.lastHealthyAt = time.Now()
+		state.nextRestartAllowedAt = time.Time{}
 		// Track uptime start on first successful health check.
 		if state.uptimeStart.IsZero() {
 			state.uptimeStart = time.Now()
@@ -210,9 +297,26 @@ func (m *Monitor) attemptRestart(ctx context.Context, name string) {
 	m.mu.Lock()
 	state := m.getOrCreateState(name)
 
+	// Backoff gate: if a prior attempt scheduled a cooldown that has not
+	// elapsed, skip this restart. consecutiveFailures MUST be reset here
+	// (HIGH-1) — otherwise the next checkOne sees failures still at/over
+	// threshold and re-enters attemptRestart immediately, bypassing the
+	// backoff entirely.
+	if !state.nextRestartAllowedAt.IsZero() && time.Now().Before(state.nextRestartAllowedAt) {
+		retryIn := time.Until(state.nextRestartAllowedAt).Round(time.Second)
+		state.consecutiveFailures = 0
+		m.mu.Unlock()
+		m.lm.SetStatus(name, models.StatusError,
+			fmt.Sprintf("restart backoff: retry in %s", retryIn))
+		return
+	}
+
 	state.restartCount++
 	state.consecutiveFailures = 0 // reset to avoid double-restart on transient post-restart failure
 	state.lastCrashAt = time.Now()
+	// Schedule the next allowed restart (exponential, capped). Applied to
+	// every attempt so a spawn-OK-but-unreachable backend cannot storm.
+	state.nextRestartAllowedAt = time.Now().Add(m.restartBackoff(state.restartCount))
 	// Accumulate the current uptime window before resetting.
 	if !state.uptimeStart.IsZero() {
 		state.cumulativeUptime += time.Since(state.uptimeStart)
@@ -245,6 +349,12 @@ func (m *Monitor) attemptRestart(ctx context.Context, name string) {
 		m.mu.Unlock()
 
 		if failedStarts >= m.ConsecutiveFailedStartsThreshold {
+			// Review HIGH-2: clear the pending backoff so a disabled
+			// server has no stale cooldown lingering if its status is
+			// later flipped without going through ResetCircuit.
+			m.mu.Lock()
+			m.getOrCreateState(name).nextRestartAllowedAt = time.Time{}
+			m.mu.Unlock()
 			m.logger.Error("circuit breaker opened: consecutive startup failures",
 				"server", name, "consecutive_failed_starts", failedStarts)
 			m.lm.SetStatus(name, models.StatusDisabled, fmt.Sprintf(
@@ -261,19 +371,44 @@ func (m *Monitor) attemptRestart(ctx context.Context, name string) {
 	m.mu.Unlock()
 }
 
-// shouldOpenCircuit checks if the restart count exceeds the threshold
-// within the circuit breaker window.
+// shouldOpenCircuit decides whether the circuit breaker should open.
+//
+// P0 sticky gate: the original time-window-only logic let a backend that
+// spawns successfully but never becomes reachable storm forever — every
+// window simply reset the counter (the CR-15 escape). The fix keys
+// stickiness on whether the backend was ever PROVEN healthy since the
+// current restart window began (lastHealthyAt vs firstRestartAt):
+//
+//   - never healthy this window  → open, regardless of the time window
+//     (covers spawn-error AND spawn-OK-but-unreachable, since restartCount
+//     is incremented before Restart() is even attempted).
+//   - genuinely recovered this window → keep the original CR-15 window
+//     behaviour (a flapper that exceeds threshold inside the window still
+//     opens; once the window elapses it gets a fresh window).
+//
+// CRIT-1: when the window resets, lastHealthyAt MUST be zeroed too —
+// otherwise a recovered-then-failed backend's stale lastHealthyAt is older
+// than the new firstRestartAt and the sticky gate would falsely disable it
+// permanently on the next threshold breach.
 func (m *Monitor) shouldOpenCircuit(state *serverState) bool {
 	if state.restartCount < m.CircuitBreakerThreshold { //nolint:intrange — threshold comparison not a range
 		return false
 	}
-	// Check if restarts happened within the window.
+	// Never proven healthy since this restart window began → sticky open,
+	// independent of the time window.
+	if !state.lastHealthyAt.After(state.firstRestartAt) {
+		return true
+	}
+	// Genuinely recovered this window: original CR-15 window logic.
 	if time.Since(state.firstRestartAt) <= m.CircuitBreakerWindow {
 		return true
 	}
-	// CR-15 fix: window elapsed — start new window with current restart counted.
+	// Window elapsed — start a new window with the current restart counted.
+	// Zero lastHealthyAt so the sticky gate is evaluated against the NEW
+	// window's start, not stale prior-window health (CRIT-1).
 	state.restartCount = 1
 	state.firstRestartAt = time.Now()
+	state.lastHealthyAt = time.Time{}
 	return false
 }
 
@@ -284,9 +419,12 @@ func (m *Monitor) ResetCircuit(ctx context.Context, name string) error {
 	state.restartCount = 0
 	state.consecutiveFailures = 0
 	state.firstRestartAt = time.Time{}
-	state.lastCrashAt = time.Time{}   // clear crash history on circuit reset
-	state.uptimeStart = time.Time{}   // uptime resets with circuit
-	state.cumulativeUptime = 0        // clear accumulated uptime
+	state.lastCrashAt = time.Time{}          // clear crash history on circuit reset
+	state.uptimeStart = time.Time{}          // uptime resets with circuit
+	state.cumulativeUptime = 0               // clear accumulated uptime
+	state.consecutiveFailedStarts = 0        // MED-1: stale count would re-disable
+	state.lastHealthyAt = time.Time{}        // MED-1: stale health would skew gate
+	state.nextRestartAllowedAt = time.Time{} // MED-1: clear pending backoff
 	m.mu.Unlock()
 
 	m.lm.SetStatus(name, models.StatusStopped, "")

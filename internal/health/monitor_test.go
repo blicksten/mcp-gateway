@@ -128,6 +128,14 @@ func (m *mockLM) getRestarts() int {
 	return m.restarts
 }
 
+// getEntry returns a copy of the named entry under lock (review MED-2:
+// avoids unsynchronised map reads in tests).
+func (m *mockLM) getEntry(name string) models.ServerEntry {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.entries[name]
+}
+
 // testMonitor creates a monitor with a mock lifecycle manager.
 // It overrides the MCP ping to use the mock's pingOK flag.
 type testableMonitor struct {
@@ -140,6 +148,10 @@ func newTestableMonitor(mock *mockLM) *testableMonitor {
 	mon.ConsecutiveFailureThreshold = 3
 	mon.CircuitBreakerThreshold = 5
 	mon.CircuitBreakerWindow = 300 * time.Second
+	// Disable restart backoff by default: most tests drive many restart
+	// cycles synchronously with no real time elapsing. Tests that
+	// specifically exercise backoff set RestartBackoffBase explicitly.
+	mon.RestartBackoffBase = 0
 	return &testableMonitor{Monitor: mon, mock: mock}
 }
 
@@ -157,6 +169,11 @@ func (tm *testableMonitor) checkOneWithMockPing(ctx context.Context, entry model
 
 	if mcpOK {
 		state.consecutiveFailures = 0
+		// Mirror production checkOne: proven-healthy bookkeeping for the
+		// sticky-circuit gate and backoff reset (kept in sync with
+		// monitor.go checkOne mcpOK branch).
+		state.lastHealthyAt = time.Now()
+		state.nextRestartAllowedAt = time.Time{}
 		if state.uptimeStart.IsZero() {
 			state.uptimeStart = time.Now()
 		}
