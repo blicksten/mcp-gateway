@@ -67,6 +67,41 @@ Phases 1–16 implemented. Full history preserved locally in `full-history-backu
 
 ---
 
+## Stabilization Track (2026-05-19 → 2026-05-20 — partial, see deferred scope)
+
+Plan: `docs/PLAN-stabilization.md` (gitignored, local-only). Driven by FM-3 (gateway crash-stop + post-restart "session not found" cascade in Claude Code) and the reliability "heart fails last" invariant from PLAN §2.6.
+
+| # | Phase | Commits | Status |
+|---|-------|---------|--------|
+| P0 | Gateway crash-stop — sticky circuit + restart backoff + panic isolation | `8dea302` | ✅ RELEASED 2026-05-19 (live in `~/go/bin/mcp-gateway.exe`) |
+| T1.5.6 | CI macOS matrix coverage (§2.5 cross-platform invariant) | `ea3fc61` | ✅ LANDED 2026-05-19 |
+| P0.7 spike | D-5 viability — `SessionStateRegistry` + `ResurrectSession` foundation primitives | `fcc47cd` | ✅ LANDED 2026-05-19 |
+| **T0.7.1** | **Full `ResumableStreamableHTTPHandler` wired through `Server.sessionRegistry`** | `dfc4d60` | ✅ LANDED 2026-05-20 |
+| **P1.5 step 1** | **`suture/v4` + `failsafe-go` library adoption** — bulkhead, KeepAlive seam, supervisor primitives | `7854c12` | ✅ LANDED 2026-05-20 |
+| **/check fix-in-cycle** | **`SessionTimeout=24h` default + supervisor done-drain + capture-err propagation** | `5b2d385` | ✅ LANDED 2026-05-20 |
+| P1.5 step 2 | Wire `Manager.Start` through `NewBackendSupervisorTree` (currently dead code) | — | ⬜ next |
+| T1.5.4 | Per-OS liveness-driven-kill tests (Windows Job Object ↔ POSIX) | — | ⬜ next |
+| T0.7.1 post-MVP | File-backed `SessionStateRegistry` for cross-process-restart persistence | — | ⬜ optional |
+| Upstream #57642 | Claude Code TS-client SSE GET stream auto-reconnect | — | ⛔ external |
+
+**Audit posture (per-phase gate, zero-errors policy):** PAL MCP unavailable in the 2026-05-19/20 sessions (FM-3 made it physically unreachable); cross-tier CV via Sonnet `code-reviewer` sub-agents was the documented fallback. Each commit landed APPROVE-WITH-FINDINGS with all HIGH/MEDIUM findings closed in-cycle:
+
+- `dfc4d60`: HIGH-1 (registry leak on idle eviction) + MEDIUM-1 (timer/close race) — both fixed before commit.
+- `7854c12`: HIGH-1 (stale `<-sem` comment) + LOW-1 (dead `keepaliveInterval` field) + MEDIUM-1 (misnamed cancel test) + MEDIUM-2 (root spec implicit zero values) — all fixed before commit. HIGH-2 (clean-stop race) is *transparently deferred* to P1.5 step 2; supervisor tree is dead code today so the race window is not yet reachable.
+- `5b2d385` (`/check` audit): MEDIUM (unbounded `SessionStateRegistry` growth — production mount had `SessionTimeout=0`) + 2 LOW — all closed.
+
+**P0 invariant preservation:** sticky `lastHealthyAt` gate, exponential `nextRestartAllowedAt` backoff, and `defer recover()` panic isolation from `8dea302` are structurally untouched. All 5 P0 fault-injection tests in `monitor_p0_test.go` still green after every commit.
+
+**Real-boundary evidence (§2.6 R-rules):**
+- `internal/api/resumable_streamable_test.go::TestResumable_HandlerRestartSharedRegistry` — constructs two handler instances against a shared registry and a real `*mcp.Server`, proves `tools/list` survives handler re-creation without re-init.
+- `internal/health/monitor_bulkhead_test.go::TestBulkhead_HealthyNotStarvedBySlowBackends` — 25 healthy + 5 slow backends through real `Monitor.checkAll` + real `failsafe-go` bulkhead; per-backend call-count proves non-starvation.
+
+**Test parity at /finish:** `go build ./...` clean; `internal/api` 46s PASS, `internal/health` 0.6s PASS, `internal/lifecycle` 88s PASS; all 9 TestResumable_* + all 5 P0 fault-injection + all 7 BackendSupervisor + new TestBulkhead — green.
+
+**Partial-fix scope (documented in the T0.7.1 commit and handler doc comment):** POST tool-call path resumes after daemon restart without `/clear`; SSE GET notification stream (`tools/list_changed`) still requires upstream Claude Code TS-client auto-reconnect — issue **#57642**.
+
+---
+
 ## Server Rename Feature Track (RELEASED 2026-05-12 — all 4 phases LANDED)
 
 Plan: `docs/PLAN-server-rename.md` (renamed from `PLAN-docs-spikes-2026.md` 2026-05-11; 2026-05-06 draft, **actualized 2026-05-11** — see PLAN §11 for diff: switched to `internal/sapname` codegen reuse per R-21, added Phase 2 `MockSecretStorage` failure-injection extension, version anchor pinned to v1.34.0 (initially v1.33.0; re-corrected same day via /check pipeline `checkpoint-check-e6e30eef` after commit `1c3f130` bumped extension to 1.33.1), cross-spike sanity-check task added). Sourced from `docs/spikes/2026-05-05-server-rename.md` v4. Audit history: 9 architect findings (F-ARCH-1..9) + 5 lead-audit findings (F-AUD-1..5) + 3 specialist-audit findings (F-SPEC-1..3) — **all 17 findings status=Fixed in-cycle** during planning pipeline `planning-19b7b15b`; F-ARCH-7 + F-SPEC-1 are *more thoroughly* addressed by the 2026-05-11 sapname-package reuse than by the 2026-05-06 draft.
