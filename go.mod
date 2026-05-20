@@ -3,12 +3,14 @@ module mcp-gateway
 go 1.25.6
 
 require (
+	github.com/failsafe-go/failsafe-go v0.9.6
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/joho/godotenv v1.5.1
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
+	github.com/thejerf/suture/v4 v4.0.6
 	github.com/tobischo/gokeepasslib/v3 v3.6.2
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.42.0
@@ -17,6 +19,7 @@ require (
 )
 
 require (
+	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

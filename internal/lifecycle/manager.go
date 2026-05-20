@@ -267,13 +267,16 @@ func (m *Manager) connectSafe(ctx context.Context, name string, cfg *models.Serv
 }
 
 // connect creates an MCP client and connects to the backend.
+// T1.5.2: KeepAlive is injected into ClientOptions so that a missed ping
+// causes the SDK to call session.Close(), which unblocks session.Wait() in
+// BackendSupervisor.Serve() and triggers a suture restart.
 func (m *Manager) connect(ctx context.Context, name string, cfg *models.ServerConfig) (
 	*mcp.ClientSession, *mcp.Client, mcp.Transport, *exec.Cmd, error,
 ) {
 	client := mcp.NewClient(&mcp.Implementation{
 		Name:    fmt.Sprintf("mcp-gateway/%s", name),
 		Version: m.impl.Version,
-	}, nil)
+	}, &mcp.ClientOptions{KeepAlive: BackendKeepaliveInterval})
 
 	switch cfg.TransportType() {
 	case "stdio":
@@ -770,6 +773,18 @@ func (m *Manager) SetStatus(name string, status models.ServerStatus, lastErr str
 			e.LastPing = time.Now()
 		}
 	}
+}
+
+// BackendStatus returns the current status of a named backend.
+// Implements lifecycle.StatusChecker for use by BackendSupervisor.
+func (m *Manager) BackendStatus(name string) models.ServerStatus {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	e, ok := m.entries[name]
+	if !ok {
+		return models.StatusDisabled
+	}
+	return e.Status
 }
 
 // SetTools replaces the tool list for a managed server entry.

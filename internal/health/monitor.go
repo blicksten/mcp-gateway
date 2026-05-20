@@ -15,6 +15,7 @@ import (
 
 	"mcp-gateway/internal/models"
 
+	"github.com/failsafe-go/failsafe-go/bulkhead"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -181,9 +182,11 @@ func (m *Monitor) CheckOnce(ctx context.Context) {
 }
 
 // checkAll checks all running/degraded servers concurrently with bounded parallelism.
+// T1.5.1: replaced channel semaphore with failsafe-go bulkhead for structured
+// concurrency budget enforcement across the health-check goroutine fan-out.
 func (m *Monitor) checkAll(ctx context.Context) {
 	entries := m.lm.Entries()
-	sem := make(chan struct{}, DefaultMaxConcurrentChecks)
+	bh := bulkhead.New[any](uint(DefaultMaxConcurrentChecks))
 
 	var wg sync.WaitGroup
 	for _, entry := range entries {
@@ -192,21 +195,25 @@ func (m *Monitor) checkAll(ctx context.Context) {
 			wg.Add(1)
 			go func(e models.ServerEntry) {
 				defer wg.Done()
-				sem <- struct{}{}
-				defer func() { <-sem }()
+				if err := bh.AcquirePermit(ctx); err != nil {
+					return // context cancelled — skip this check
+				}
+				defer bh.ReleasePermit()
 				// Panic isolation (R2 — "the heart fails last"): a panic in
 				// one backend's health check must never take down the
-				// monitor loop. Registered LAST so on unwind it runs FIRST
-				// (recovers), then <-sem, then wg.Done() — no leaked
-				// semaphore slot, no wg.Wait() deadlock.
+				// monitor loop. Defer order matters: on unwind this defer
+				// runs FIRST (recovers), then bh.ReleasePermit() returns the
+				// bulkhead permit, then wg.Done() unblocks the outer Wait().
+				// The nested double-recover guard prevents a re-panic from
+				// SetStatus from skipping ReleasePermit.
 				defer func() {
 					if r := recover(); r != nil {
 						m.logger.Error("panic in health check recovered",
 							"server", e.Name, "panic", r)
 						// Review HIGH-1: SetStatus must not be able to
 						// re-panic out of this defer — a re-panic would
-						// bypass the <-sem and wg.Done() defers (semaphore
-						// leak + wg.Wait deadlock). Contain it.
+						// bypass the ReleasePermit and wg.Done defers
+						// (bulkhead leak + wg.Wait deadlock). Contain it.
 						func() {
 							defer func() {
 								if r2 := recover(); r2 != nil {
