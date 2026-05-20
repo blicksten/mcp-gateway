@@ -101,6 +101,15 @@ func (b *BackendSupervisor) Serve(ctx context.Context) error {
 		if stopErr != nil && !errors.Is(stopErr, context.Canceled) {
 			b.logger.Warn("suture: stop error on context cancel", "backend", b.name, "err", stopErr)
 		}
+		// CV /check LOW: drain the session.Wait() goroutine bounded by a short
+		// deadline so it does not outlive Serve() return. Stop() closes the
+		// session which should unblock Wait() immediately; the timeout caps
+		// the leak window if the SDK ever fails to close cleanly.
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			b.logger.Warn("suture: session.Wait() did not return after Stop", "backend", b.name)
+		}
 		return nil
 
 	case sessionErr := <-done:

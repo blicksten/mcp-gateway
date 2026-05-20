@@ -587,6 +587,13 @@ func (s *Server) Handler() http.Handler {
 	streamableHandler := NewResumableStreamableHTTPHandler(
 		s.mcpServerForRequest, s.sessionRegistry,
 	)
+	// CV /check MEDIUM: cap idle session lifetime so the in-memory
+	// SessionStateRegistry cannot grow without bound when a client disconnects
+	// without DELETE. 24h is well above any realistic interactive session yet
+	// short enough to bound memory growth from forgotten / hijacked session
+	// IDs. The eviction timer also calls registry.Delete (see handler), so
+	// both the live sessions map and the registry are pruned together.
+	streamableHandler.SessionTimeout = 24 * time.Hour
 	sseHandler := mcp.NewSSEHandler(
 		func(r *http.Request) *mcp.Server { return s.gw.Server() }, nil,
 	)

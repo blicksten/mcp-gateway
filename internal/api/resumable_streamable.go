@@ -344,7 +344,13 @@ func (h *ResumableStreamableHTTPHandler) createSession(
 	}
 
 	// Capture InitializeParams before the body is consumed by the transport.
-	initParams, _ := CaptureInitializeFromRequest(req)
+	// CV /check LOW: surface the read-body error to the SDK as a 400 rather
+	// than silently producing a request with an empty body — the transport
+	// would otherwise fail with a confusing decode error downstream.
+	initParams, captureErr := CaptureInitializeFromRequest(req)
+	if captureErr != nil {
+		return nil, fmt.Errorf("read initialize body: %w", captureErr)
+	}
 
 	// Generate session ID when the client did not provide one (first POST).
 	// Mirrors SDK streamable.go:412-416 which calls server.opts.GetSessionID()
