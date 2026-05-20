@@ -113,9 +113,32 @@ func (b *BackendSupervisor) Serve(ctx context.Context) error {
 		return nil
 
 	case sessionErr := <-done:
+		// HIGH-2 (P1.5 step 2): distinguish intentional stop from unexpected
+		// session loss. Manager.Stop writes StatusStopped before session.Close
+		// (manager.go ~line 472), so by the time Wait() unblocks here the status
+		// is Stopped for a plain Stop. For a Restart the sequence is:
+		//   1. Restart sets StatusRestarting under m.mu.Lock (manager.go ~561).
+		//   2. Restart calls Stop. Stop sees StatusRestarting and PRESERVES it
+		//      (manager.go ~480 — conditional write).
+		//   3. Stop closes the session; Wait() unblocks here.
+		//   4. We read BackendStatus -> see Restarting -> fall through to the
+		//      "session ended unexpectedly" error so suture's FailureBackoff
+		//      retries. Restart's own m.Start runs concurrently; the Manager's
+		//      `starting` guard serialises the two paths.
+		// Returning ErrDoNotRestart on Stopped/Disabled prevents a phantom
+		// restart after a deliberate Manager.Stop call.
+		// Tested by: TestBackendSupervisor_CleanStopNoRestart_HIGH2,
+		//   TestBackendSupervisor_DisabledBottomBranch_HIGH2,
+		//   TestBackendSupervisor_RestartWithRealSession_NoErrDoNotRestart.
+		status := b.checker.BackendStatus(b.name)
+		if status == models.StatusStopped || status == models.StatusDisabled {
+			b.logger.Info("suture: deliberate stop detected, not restarting",
+				"backend", b.name, "status", status)
+			return suture.ErrDoNotRestart
+		}
 		if sessionErr == nil || errors.Is(sessionErr, context.Canceled) {
-			// Session ended cleanly — allow suture to restart.
-			return fmt.Errorf("backend %s: session ended", b.name)
+			// Session ended cleanly but backend is not stopped — allow suture to restart.
+			return fmt.Errorf("backend %s: session ended unexpectedly", b.name)
 		}
 		b.logger.Warn("suture: session terminated with error", "backend", b.name, "err", sessionErr)
 		return fmt.Errorf("backend %s session: %w", b.name, sessionErr)

@@ -283,6 +283,13 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 	// POST /api/v1/shutdown triggers the same clean exit path as SIGTERM.
 	apiServer.SetShutdownFn(stop)
 
+	// P1.5 step 2: activate the suture supervisor tree. The supervisor is
+	// bound to the OUTER signal-context, NOT the errgroup-derived context,
+	// because the errgroup cancels on the first worker error and we want the
+	// supervisor to keep restarting failed backends across worker failures.
+	// Shutdown is driven explicitly by stopSupervisor() further down.
+	lm.SetupSupervisor(logger)
+	stopSupervisor := lm.ServeBackgroundSupervisor(ctx)
 	g, ctx := errgroup.WithContext(ctx)
 
 	// Bootstrap empty per-backend stubs for all configured backends immediately.
@@ -396,6 +403,9 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 	// any action enqueued between the last mutation and SIGTERM arrival
 	// reaches disk before we return. Stop() then terminates the cleaner.
 	ps.FlushPersists()
+	// P1.5 step 2 (HIGH-2): stop the supervisor tree before StopAll so suture
+	// stops dispatching Serve() calls before Manager.Stop runs concurrently.
+	stopSupervisor()
 	lm.StopAll(drainCtx)
 	logger.Info("mcp-gateway stopped")
 	return nil

@@ -67,7 +67,7 @@ Phases 1–16 implemented. Full history preserved locally in `full-history-backu
 
 ---
 
-## Stabilization Track (2026-05-19 → 2026-05-20 — partial, see deferred scope)
+## Stabilization Track (2026-05-19 → 2026-05-21 — partial, see deferred scope)
 
 Plan: `docs/PLAN-stabilization.md` (gitignored, local-only). Driven by FM-3 (gateway crash-stop + post-restart "session not found" cascade in Claude Code) and the reliability "heart fails last" invariant from PLAN §2.6.
 
@@ -79,8 +79,8 @@ Plan: `docs/PLAN-stabilization.md` (gitignored, local-only). Driven by FM-3 (gat
 | **T0.7.1** | **Full `ResumableStreamableHTTPHandler` wired through `Server.sessionRegistry`** | `dfc4d60` | ✅ LANDED 2026-05-20 |
 | **P1.5 step 1** | **`suture/v4` + `failsafe-go` library adoption** — bulkhead, KeepAlive seam, supervisor primitives | `7854c12` | ✅ LANDED 2026-05-20 |
 | **/check fix-in-cycle** | **`SessionTimeout=24h` default + supervisor done-drain + capture-err propagation** | `5b2d385` | ✅ LANDED 2026-05-20 |
-| P1.5 step 2 | Wire `Manager.Start` through `NewBackendSupervisorTree` (currently dead code) | — | ⬜ next |
-| T1.5.4 | Per-OS liveness-driven-kill tests (Windows Job Object ↔ POSIX) | — | ⬜ next |
+| **T1.5.4** | **Per-OS liveness-driven-kill tests (Windows Job Object ↔ POSIX)** | `f1f4718` | ✅ LANDED 2026-05-20 |
+| **P1.5 step 2** | **Wire `Manager.Start` through `NewBackendSupervisorTree` (was dead code)** | (this commit) | ✅ LANDED 2026-05-21 |
 | T0.7.1 post-MVP | File-backed `SessionStateRegistry` for cross-process-restart persistence | — | ⬜ optional |
 | Upstream #57642 | Claude Code TS-client SSE GET stream auto-reconnect | — | ⛔ external |
 
@@ -89,6 +89,7 @@ Plan: `docs/PLAN-stabilization.md` (gitignored, local-only). Driven by FM-3 (gat
 - `dfc4d60`: HIGH-1 (registry leak on idle eviction) + MEDIUM-1 (timer/close race) — both fixed before commit.
 - `7854c12`: HIGH-1 (stale `<-sem` comment) + LOW-1 (dead `keepaliveInterval` field) + MEDIUM-1 (misnamed cancel test) + MEDIUM-2 (root spec implicit zero values) — all fixed before commit. HIGH-2 (clean-stop race) is *transparently deferred* to P1.5 step 2; supervisor tree is dead code today so the race window is not yet reachable.
 - `5b2d385` (`/check` audit): MEDIUM (unbounded `SessionStateRegistry` growth — production mount had `SessionTimeout=0`) + 2 LOW — all closed.
+- P1.5 step 2 (this commit): Sonnet cross-tier CV round 1 HALT (R-01 CRITICAL — `Stop` overwrote `StatusRestarting` with `StatusStopped` at `manager.go:480`, defeating the Restart ordering "fix" and silently removing the backend from the suture tree on every managed restart; R-02/R-03 HIGH — false-positive tests using `testStopHook` and nil-Session that never reached the production code path). Round 2 APPROVE_WITH_FINDINGS after in-cycle fixes: R-01 conditional write (`if e.Status != StatusRestarting { e.Status = StatusStopped }`); R-02/R-03 replaced with `TestStop_PreservesStatusRestarting` + `TestStop_OverwritesToStoppedWhenNotRestarting` + `TestBackendSupervisor_RestartWithRealSession_NoErrDoNotRestart` (real Stop body + real in-process MCP sessions); R-05/R-06/R-07 cosmetics (comment accuracy, godoc field ordering, main.go ctx-isolation rationale); NEW-01 MEDIUM `StopAll` cross-reference comment. NEW-02 LOW (~2s transient `StatusRestarting` window during PATCH-disable mid-Restart) accepted in REVIEW — no user-observable impact per Sonnet analysis.
 
 **P0 invariant preservation:** sticky `lastHealthyAt` gate, exponential `nextRestartAllowedAt` backoff, and `defer recover()` panic isolation from `8dea302` are structurally untouched. All 5 P0 fault-injection tests in `monitor_p0_test.go` still green after every commit.
 

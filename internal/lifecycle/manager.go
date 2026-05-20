@@ -19,6 +19,7 @@ import (
 	"mcp-gateway/internal/models"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/thejerf/suture/v4"
 )
 
 // entry holds runtime state for one backend server.
@@ -52,6 +53,13 @@ type Manager struct {
 	// open failed at NewManager time — degrades to "no FM 1 reaping",
 	// never blocks normal operation.
 	registry *Registry
+
+	// supervisorTree is the suture supervisor tree wired in P1.5 step 2.
+	// Nil when the tree has not been set up (legacy path used by tests that
+	// construct a Manager directly and never call SetupSupervisor).
+	// When non-nil, ServeBackgroundSupervisor drives backend restarts and
+	// StartAll becomes a no-op so the two paths do not fight each other.
+	supervisorTree *suture.Supervisor
 
 	// testStopHook is non-nil only in tests. When set, Stop calls this
 	// function instead of performing the real stop sequence. Allows tests
@@ -469,7 +477,16 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 	e.client = nil
 	e.transport = nil
 	e.cmd = nil
-	e.Status = models.StatusStopped
+	// HIGH-2 (P1.5 step 2) — preserve StatusRestarting when called from
+	// Restart. The supervisor's status-gated bottom branch reads BackendStatus
+	// after session.Wait() unblocks; if Stop unconditionally overwrote
+	// Restarting with Stopped here, the supervisor would observe Stopped and
+	// return suture.ErrDoNotRestart on every managed restart, silently
+	// removing the backend from the suture tree. Tested by:
+	// TestBackendSupervisor_RestartWithRealSession_NoErrDoNotRestart.
+	if e.Status != models.StatusRestarting {
+		e.Status = models.StatusStopped
+	}
 	e.PID = 0
 	e.Tools = nil
 	m.mu.Unlock()
@@ -534,11 +551,15 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 }
 
 // Restart stops then starts a server. Increments restart count.
+//
+// HIGH-2 (P1.5 step 2): StatusRestarting is set BEFORE Stop() is called so
+// that BackendSupervisor.Serve() — which reads the status when session.Wait()
+// returns inside Stop() — sees StatusRestarting rather than StatusStopped.
+// Without this ordering the supervisor would call ErrDoNotRestart on a
+// legitimate restart, silencing the suture tree for that backend permanently.
 func (m *Manager) Restart(ctx context.Context, name string) error {
-	if err := m.Stop(ctx, name); err != nil {
-		m.logger.Warn("stop during restart failed", "server", name, "error", err)
-	}
-
+	// HIGH-2: mark restarting BEFORE Stop so the supervisor's status-gate
+	// sees Restarting (not Stopped) when session.Wait() unblocks.
 	m.mu.Lock()
 	e, ok := m.entries[name]
 	if !ok {
@@ -549,11 +570,62 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 	e.Status = models.StatusRestarting
 	m.mu.Unlock()
 
+	if err := m.Stop(ctx, name); err != nil {
+		m.logger.Warn("stop during restart failed", "server", name, "error", err)
+	}
+
 	return m.Start(ctx, name)
 }
 
+// SetupSupervisor builds the suture supervisor tree from the current entry
+// map and stores it on the Manager. Call ServeBackgroundSupervisor(ctx) to
+// start it. SetupSupervisor must be called before any concurrent traffic;
+// it is not goroutine-safe with respect to concurrent entry mutation.
+//
+// Manager satisfies both BackendManager and StatusChecker, so it passes
+// itself for both arguments of NewBackendSupervisorTree.
+func (m *Manager) SetupSupervisor(logger *slog.Logger) {
+	m.mu.RLock()
+	names := make([]string, 0, len(m.entries))
+	for name := range m.entries {
+		names = append(names, name)
+	}
+	m.mu.RUnlock()
+	m.supervisorTree = NewBackendSupervisorTree(m, m, names, logger)
+}
+
+// ServeBackgroundSupervisor starts the supervisor tree in the background and
+// returns a stop function that, when called, stops the tree and waits for all
+// child services to terminate. The caller must invoke the stop function before
+// StopAll so suture does not fight concurrent Stop calls.
+//
+// Panics if SetupSupervisor was not called first.
+func (m *Manager) ServeBackgroundSupervisor(ctx context.Context) func() {
+	if m.supervisorTree == nil {
+		panic("lifecycle.Manager.ServeBackgroundSupervisor: SetupSupervisor was not called")
+	}
+	treeCtx, treeCancel := context.WithCancel(ctx)
+	done := m.supervisorTree.ServeBackground(treeCtx)
+	return func() {
+		treeCancel()
+		<-done
+	}
+}
+
 // StartAll starts all non-disabled servers concurrently.
+//
+// When the supervisor tree has been set up via SetupSupervisor, this method
+// is a no-op: the supervisor drives backend starts through BackendSupervisor.Serve.
+// Tests that bypass the supervisor continue to use StartAll directly.
 func (m *Manager) StartAll(ctx context.Context) error {
+	if m.supervisorTree != nil {
+		// Supervisor tree is active — it drives all backend starts.
+		// Returning nil here is intentional; main.go calls
+		// ServeBackgroundSupervisor before the errgroup, so backends are
+		// already starting by the time this call would execute.
+		return nil
+	}
+
 	m.mu.RLock()
 	names := make([]string, 0, len(m.entries))
 	for name, e := range m.entries {
@@ -585,6 +657,15 @@ func (m *Manager) StartAll(ctx context.Context) error {
 }
 
 // StopAll stops all running servers concurrently (CR-13/AR-7 fix).
+//
+// HIGH-2 NEW-01 (P1.5 step 2): when the supervisor tree is active, callers
+// MUST invoke the stop function returned by ServeBackgroundSupervisor BEFORE
+// StopAll so suture-driven restarts do not race with these Stop calls. The
+// production path in cmd/mcp-gateway/main.go does this explicitly. Stop's
+// conditional-write (manager.go ~line 480) preserves StatusRestarting when a
+// Restart is mid-flight, which is required for the supervisor's bottom-branch
+// gating but means StopAll alone cannot interrupt an in-flight Restart —
+// always cancel the supervisor and the errgroup (Monitor) first.
 func (m *Manager) StopAll(ctx context.Context) {
 	m.mu.RLock()
 	names := make([]string, 0, len(m.entries))
