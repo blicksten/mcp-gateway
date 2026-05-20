@@ -80,7 +80,7 @@ Plan: `docs/PLAN-stabilization.md` (gitignored, local-only). Driven by FM-3 (gat
 | **P1.5 step 1** | **`suture/v4` + `failsafe-go` library adoption** — bulkhead, KeepAlive seam, supervisor primitives | `7854c12` | ✅ LANDED 2026-05-20 |
 | **/check fix-in-cycle** | **`SessionTimeout=24h` default + supervisor done-drain + capture-err propagation** | `5b2d385` | ✅ LANDED 2026-05-20 |
 | **T1.5.4** | **Per-OS liveness-driven-kill tests (Windows Job Object ↔ POSIX)** | `f1f4718` | ✅ LANDED 2026-05-20 |
-| **P1.5 step 2** | **Wire `Manager.Start` through `NewBackendSupervisorTree` (was dead code)** | (this commit) | ✅ LANDED 2026-05-21 |
+| **P1.5 step 2** | **Wire `Manager.Start` through `NewBackendSupervisorTree` (was dead code)** | `22a81c0` | ✅ LANDED 2026-05-21 |
 | T0.7.1 post-MVP | File-backed `SessionStateRegistry` for cross-process-restart persistence | — | ⬜ optional |
 | Upstream #57642 | Claude Code TS-client SSE GET stream auto-reconnect | — | ⛔ external |
 
