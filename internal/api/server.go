@@ -125,6 +125,12 @@ type Server struct {
 	// Set only before ListenAndServe; no concurrent writes in production
 	// (F-05 — write-once-before-traffic invariant; no atomic.Pointer needed).
 	testRegenFn func()
+
+	// sessionRegistry holds InitializeParams + InitializedParams keyed by
+	// Mcp-Session-Id across daemon restarts (T0.7.1). Shared with the
+	// ResumableStreamableHTTPHandler so a re-created handler can resurrect a
+	// session whose live SDK transport was lost.
+	sessionRegistry *SessionStateRegistry
 }
 
 // Addr returns the bound listener address, or nil if ListenAndServe has
@@ -165,17 +171,18 @@ func NewServer(
 		logger = slog.Default()
 	}
 	return &Server{
-		lm:          lm,
-		gw:          gw,
-		monitor:     monitor,
-		cfg:         cfg,
-		configPath:   configPath,
-		logger:       logger,
-		authToken:    authCfg.Token,
-		authEnabled:  authCfg.Enabled,
-		adminToken:   authCfg.AdminToken,
-		adminEnabled: authCfg.AdminEnabled,
-		version:      version,
+		lm:              lm,
+		gw:              gw,
+		monitor:         monitor,
+		cfg:             cfg,
+		configPath:      configPath,
+		logger:          logger,
+		authToken:       authCfg.Token,
+		authEnabled:     authCfg.Enabled,
+		adminToken:      authCfg.AdminToken,
+		adminEnabled:    authCfg.AdminEnabled,
+		version:         version,
+		sessionRegistry: NewSessionStateRegistry(),
 	}
 }
 
@@ -568,8 +575,17 @@ func (s *Server) Handler() http.Handler {
 	//
 	// SSE surface remains aggregate-only in Phase 16.1 — per-backend SSE
 	// adds no plugin-integration value (Claude Code uses HTTP streamable).
-	streamableHandler := mcp.NewStreamableHTTPHandler(
-		s.mcpServerForRequest, nil,
+	// T0.7.1: replace SDK StreamableHTTPHandler with the resumable variant.
+	// On daemon restart the in-memory SDK session table is empty, but if the
+	// SessionStateRegistry has cached InitializeParams for an incoming
+	// Mcp-Session-Id the handler resurrects the session in-place rather than
+	// returning HTTP 404 "session not found".  The registry is constructed in
+	// NewServer and lives on the Server struct so it survives handler
+	// re-creation in tests.  See docs/PLAN-stabilization.md §P0.7 for the
+	// REJECT of Stateless: true and the partial-fix scope (POST tool-call
+	// path; SSE GET stream still requires upstream issue #57642).
+	streamableHandler := NewResumableStreamableHTTPHandler(
+		s.mcpServerForRequest, s.sessionRegistry,
 	)
 	sseHandler := mcp.NewSSEHandler(
 		func(r *http.Request) *mcp.Server { return s.gw.Server() }, nil,
