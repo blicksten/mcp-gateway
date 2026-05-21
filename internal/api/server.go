@@ -138,6 +138,15 @@ type Server struct {
 	// abort an in-flight operation. nil before ListenAndServe is called;
 	// lifecycleCtx() is nil-safe and falls back to context.Background().
 	daemonCtx context.Context
+
+	// bgStartWG tracks goroutines launched by addServerInProcess for async
+	// backend Start. Drained on graceful daemon stop so a Start that races
+	// the stop completes (or is properly cancelled by daemon ctx).
+	//
+	// F4 fix: async POST /servers returns 202 immediately and runs Start
+	// in a goroutine — the WaitGroup ensures we don't return from
+	// ListenAndServe before those goroutines finish.
+	bgStartWG sync.WaitGroup
 }
 
 // Addr returns the bound listener address, or nil if ListenAndServe has
@@ -926,12 +935,19 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		if err := s.httpServer.ServeTLS(listener, tlsCertPath, tlsKeyPath); err != nil && err != http.ErrServerClosed {
 			return err
 		}
-		return nil
+	} else {
+		s.logger.Info("HTTP server listening", "addr", addr)
+		if err := s.httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
+			return err
+		}
 	}
-	s.logger.Info("HTTP server listening", "addr", addr)
-	if err := s.httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
-		return err
-	}
+
+	// F4: drain async-start goroutines. HTTP server has stopped accepting new
+	// connections; now wait for in-flight Start goroutines to finish (they are
+	// bounded by the 60 s lifecycleCtx timeout or daemon ctx cancellation).
+	s.logger.Info("draining async backend starts")
+	s.bgStartWG.Wait()
+	s.logger.Info("async backend starts drained")
 	return nil
 }
 
@@ -1058,9 +1074,23 @@ type AddOpts struct {
 }
 
 // addServerInProcess adds the server to the lifecycle manager, persists the
-// config change, optionally auto-starts, and triggers plugin regen unless
-// suppressed. It is the extracted core of handleAddServer.
+// config change, and schedules auto-start asynchronously when applicable.
+// It is the extracted core of handleAddServer.
+//
+// Sync phase: AddServer (in-memory registration) + config persist. These are
+// fast and must complete before the caller returns so the new entry is visible
+// immediately via GET /api/v1/servers.
+//
+// Async phase (F4 fix): Start + RebuildTools + TriggerPluginRegen run in a
+// goroutine when auto-start is enabled. The caller returns before Start
+// completes, allowing POST /servers to respond with 202 Accepted instead of
+// blocking for the full cold-start duration (~15s for playwright).
+// Clients poll GET /api/v1/servers/{name} to observe status transitions.
+//
+// When auto-start is disabled (Disabled=true or SkipAutoStart), regen runs
+// synchronously because there is no slow operation to defer.
 func (s *Server) addServerInProcess(_ context.Context, name string, sc *models.ServerConfig, opts AddOpts) error {
+	// ----- Synchronous phase -----
 	if err := s.lm.AddServer(name, sc); err != nil {
 		return err
 	}
@@ -1072,24 +1102,37 @@ func (s *Server) addServerInProcess(_ context.Context, name string, sc *models.S
 	s.cfgMu.Unlock()
 	s.flushConfig(data)
 
-	// AR-5 fix: auto-start unless disabled or suppressed.
-	// F3 fix: use daemon-scoped context so a client disconnect does not abort
-	// the backend Start (tools/list cancellation → half-started state).
-	if !sc.Disabled && !opts.SkipAutoStart {
+	// When auto-start is disabled or suppressed, regen runs synchronously
+	// because there is no slow Start to defer.
+	if sc.Disabled || opts.SkipAutoStart {
+		if !opts.SuppressPluginRegen && !s.sapBatchActive() {
+			if s.gw != nil {
+				s.gw.RebuildTools()
+			}
+			s.TriggerPluginRegen()
+		}
+		return nil
+	}
+
+	// ----- Async phase: Start + regen run in background goroutine -----
+	// F4 fix: caller returns immediately while backend cold-start happens in
+	// the background. bgStartWG is drained on graceful daemon stop so in-flight
+	// goroutines finish (or are cancelled via lifecycleCtx timeout) before exit.
+	s.bgStartWG.Add(1)
+	go func() {
+		defer s.bgStartWG.Done()
 		lctx, lcancel := s.lifecycleCtx()
 		defer lcancel()
 		if err := s.lm.Start(lctx, name); err != nil {
-			s.logger.Warn("auto-start after add failed", "server", name, "error", err)
+			s.logger.Warn("async auto-start after add failed", "server", name, "error", err)
 		}
-	}
-
-	// Regen unless inside a SAP batch (which fires a single end-of-batch regen).
-	if !opts.SuppressPluginRegen && !s.sapBatchActive() {
-		if s.gw != nil && !sc.Disabled {
-			s.gw.RebuildTools()
+		if !opts.SuppressPluginRegen && !s.sapBatchActive() {
+			if s.gw != nil {
+				s.gw.RebuildTools()
+			}
+			s.TriggerPluginRegen()
 		}
-		s.TriggerPluginRegen()
-	}
+	}()
 	return nil
 }
 
@@ -1115,7 +1158,24 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]string{"status": "added"})
+
+	// F4: return 202 Accepted when the backend will auto-start asynchronously
+	// so clients are not blocked for the cold-start duration. Clients should
+	// poll GET /api/v1/servers/{name} to observe status transitions.
+	// When auto-start is skipped (Disabled=true), the operation is fully
+	// complete synchronously — return 201 Created.
+	//
+	// CONTRACT CHANGE: previously always 201. Clients reading status code
+	// should handle both 201 and 202 as success (any 2xx). The dashboard's
+	// fetch wrapper already accepts any 2xx, so no dashboard change needed.
+	if req.Config.Disabled {
+		writeJSON(w, http.StatusCreated, map[string]string{"status": "added"})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"status": "accepted",
+		"hint":   "backend starting asynchronously; poll GET /api/v1/servers/" + req.Name + " for state",
+	})
 }
 
 // RemoveOpts controls optional behaviour of removeServerInProcess.

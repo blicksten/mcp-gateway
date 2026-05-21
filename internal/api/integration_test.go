@@ -153,14 +153,29 @@ func TestIntegration_AddRemoveServer(t *testing.T) {
 	lm := lifecycle.NewManager(cfg, "test", logger)
 	gw := proxy.New(cfg, lm, "test", logger)
 	srv := NewServer(lm, gw, nil, cfg, "", logger, AuthConfig{}, "test")
+	// F4: daemonCtx must be set so lifecycleCtx() works in async goroutine.
+	srv.daemonCtx = context.Background()
 	handler := srv.Handler()
 
 	// Add a server via REST.
+	// F4: POST returns 202 Accepted (async Start) instead of 201 Created.
 	rr := doRequest(t, handler, "POST", "/api/v1/servers", map[string]any{
 		"name":   "dynamic",
 		"config": map[string]any{"command": binary},
 	})
-	assert.Equal(t, http.StatusCreated, rr.Code)
+	assert.Equal(t, http.StatusAccepted, rr.Code)
+
+	// F4: wait for the backend to reach a stable state (running or error) before
+	// proceeding to DELETE. Calling DELETE while Start is in its final lock
+	// acquisition causes the lifecycle mutex to contest and stall the test.
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		entry, ok := lm.Entry("dynamic")
+		if ok && entry.Status != models.StatusStarting {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 
 	// Verify it exists.
 	rr = doRequest(t, handler, "GET", "/api/v1/servers/dynamic", nil)

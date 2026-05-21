@@ -177,17 +177,26 @@ func TestIntegration_AddHTTPServerViaREST(t *testing.T) {
 	handler := srv.Handler()
 
 	// Add HTTP server via REST.
+	// F4: POST returns 202 Accepted (async Start) instead of 201 Created.
+	srv.daemonCtx = context.Background()
 	rr := doRequest(t, handler, "POST", "/api/v1/servers", map[string]any{
 		"name":   "dynamic-http",
 		"config": map[string]any{"url": mockURL},
 	})
-	assert.Equal(t, http.StatusCreated, rr.Code)
+	assert.Equal(t, http.StatusAccepted, rr.Code)
 
-	// Verify it exists and is running (auto-started).
-	rr = doRequest(t, handler, "GET", "/api/v1/servers/dynamic-http", nil)
-	assert.Equal(t, http.StatusOK, rr.Code)
+	// F4: poll GET /servers/dynamic-http until backend is running (Start is async).
 	var sv ServerView
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &sv))
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		rr = doRequest(t, handler, "GET", "/api/v1/servers/dynamic-http", nil)
+		require.Equal(t, http.StatusOK, rr.Code)
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &sv))
+		if sv.Status == models.StatusRunning {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 	assert.Equal(t, models.StatusRunning, sv.Status)
 	assert.Equal(t, "http", sv.Transport)
 	t.Logf("Dynamic HTTP server added and running, tools: %d", len(sv.Tools))
