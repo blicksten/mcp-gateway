@@ -131,6 +131,13 @@ type Server struct {
 	// ResumableStreamableHTTPHandler so a re-created handler can resurrect a
 	// session whose live SDK transport was lost.
 	sessionRegistry *SessionStateRegistry
+
+	// daemonCtx is the long-lived daemon context, captured at ListenAndServe
+	// entry. Used by REST handlers for backend lifecycle operations (Start,
+	// Stop, Restart, AddServer, RemoveServer) so a client disconnect does not
+	// abort an in-flight operation. nil before ListenAndServe is called;
+	// lifecycleCtx() is nil-safe and falls back to context.Background().
+	daemonCtx context.Context
 }
 
 // Addr returns the bound listener address, or nil if ListenAndServe has
@@ -764,6 +771,10 @@ func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 
 // ListenAndServe starts the HTTP server. Blocks until context is cancelled.
 func (s *Server) ListenAndServe(ctx context.Context) error {
+	// F3 fix: capture the daemon-scoped context so REST lifecycle handlers can
+	// use it instead of r.Context(). This decouples backend Start/Stop/Restart
+	// from the HTTP client's connection lifetime.
+	s.daemonCtx = ctx
 	s.cfgMu.RLock()
 	port := s.cfg.Gateway.HTTPPort
 	bindAddr := s.cfg.Gateway.BindAddress
@@ -924,6 +935,31 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	return nil
 }
 
+// lifecycleCtx returns a daemon-scoped context with a generous timeout
+// suitable for backend Start/Stop/Restart operations. The 60-second budget
+// covers worst-case backend cold-start (e.g., playwright at ~15s) plus
+// retry headroom.
+//
+// F3 fix: previously these operations used r.Context(), which cancelled
+// when the HTTP client disconnected — backends ended up in a half-started
+// state because tools/list was cancelled mid-flight and the response was
+// silently dropped on arrival.
+//
+// Callers MUST call cancel() exactly once. Pattern:
+//
+//	ctx, cancel := s.lifecycleCtx()
+//	defer cancel()
+func (s *Server) lifecycleCtx() (context.Context, context.CancelFunc) {
+	base := s.daemonCtx
+	if base == nil {
+		// ListenAndServe not yet called (tests or pre-start path).
+		// Fall back to Background — bounded by the same timeout so a
+		// stuck backend cannot wedge things forever.
+		base = context.Background()
+	}
+	return context.WithTimeout(base, 60*time.Second)
+}
+
 // --- REST handlers ---
 
 // ServerView is the API response for a server entry (no secrets).
@@ -1024,7 +1060,7 @@ type AddOpts struct {
 // addServerInProcess adds the server to the lifecycle manager, persists the
 // config change, optionally auto-starts, and triggers plugin regen unless
 // suppressed. It is the extracted core of handleAddServer.
-func (s *Server) addServerInProcess(ctx context.Context, name string, sc *models.ServerConfig, opts AddOpts) error {
+func (s *Server) addServerInProcess(_ context.Context, name string, sc *models.ServerConfig, opts AddOpts) error {
 	if err := s.lm.AddServer(name, sc); err != nil {
 		return err
 	}
@@ -1037,8 +1073,12 @@ func (s *Server) addServerInProcess(ctx context.Context, name string, sc *models
 	s.flushConfig(data)
 
 	// AR-5 fix: auto-start unless disabled or suppressed.
+	// F3 fix: use daemon-scoped context so a client disconnect does not abort
+	// the backend Start (tools/list cancellation → half-started state).
 	if !sc.Disabled && !opts.SkipAutoStart {
-		if err := s.lm.Start(ctx, name); err != nil {
+		lctx, lcancel := s.lifecycleCtx()
+		defer lcancel()
+		if err := s.lm.Start(lctx, name); err != nil {
 			s.logger.Warn("auto-start after add failed", "server", name, "error", err)
 		}
 	}
@@ -1088,8 +1128,12 @@ type RemoveOpts struct {
 // removeServerInProcess removes the server from the lifecycle manager, persists
 // the config change, and optionally triggers plugin regen. It is the extracted
 // core of handleRemoveServer — HTTP handlers call this then write their response.
-func (s *Server) removeServerInProcess(ctx context.Context, name string, opts RemoveOpts) (lifecycle.RemoveResult, error) {
-	result, err := s.lm.RemoveServer(ctx, name)
+func (s *Server) removeServerInProcess(_ context.Context, name string, opts RemoveOpts) (lifecycle.RemoveResult, error) {
+	// F3 fix: use daemon-scoped context so a client disconnect does not abort
+	// the backend Stop that RemoveServer issues internally.
+	lctx, lcancel := s.lifecycleCtx()
+	defer lcancel()
+	result, err := s.lm.RemoveServer(lctx, name)
 	if err != nil {
 		return lifecycle.RemoveResult{}, err
 	}
@@ -1230,14 +1274,20 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	s.flushConfig(data)
 
 	// Handle disabled toggle (outside mutexes).
+	// F3 fix: use daemon-scoped context for Stop/Start so a client disconnect
+	// does not abort the in-flight lifecycle operation.
 	if patch.Disabled != nil {
 		if *patch.Disabled {
-			_ = s.lm.Stop(r.Context(), name)
+			stopCtx, stopCancel := s.lifecycleCtx()
+			defer stopCancel()
+			_ = s.lm.Stop(stopCtx, name)
 			s.lm.SetStatus(name, models.StatusDisabled, "disabled by user")
 		} else {
 			current, _ := s.lm.Entry(name)
 			if current.Status == models.StatusDisabled {
-				if err := s.lm.Start(r.Context(), name); err != nil {
+				startCtx, startCancel := s.lifecycleCtx()
+				defer startCancel()
+				if err := s.lm.Start(startCtx, name); err != nil {
 					writeError(w, http.StatusInternalServerError, err.Error())
 					return
 				}
@@ -1254,7 +1304,10 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if needsRestart {
 		// Restart server to pick up env/header changes (outside mutexes).
-		if err := s.lm.Restart(r.Context(), name); err != nil {
+		// F3 fix: daemon-scoped context so client disconnect does not abort restart.
+		restartCtx, restartCancel := s.lifecycleCtx()
+		defer restartCancel()
+		if err := s.lm.Restart(restartCtx, name); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -1274,7 +1327,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 //
 // scCopy is the already-validated merged config (env/header/disabled changes applied).
 // cfgMu must NOT be held by the caller — this function acquires it in step 3.
-func (s *Server) handleRename(w http.ResponseWriter, r *http.Request, name, newName string, scCopy *models.ServerConfig) {
+func (s *Server) handleRename(w http.ResponseWriter, _ *http.Request, name, newName string, scCopy *models.ServerConfig) {
 	// Step 1: register newName in lm — surfaces collision as 409.
 	if err := s.lm.AddServer(newName, scCopy); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
@@ -1282,9 +1335,13 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request, name, newN
 	}
 
 	// Step 2: remove old name from lm.
-	if _, err := s.lm.RemoveServer(r.Context(), name); err != nil {
+	// F3 fix: use daemon-scoped context so client disconnect does not abort the Stop
+	// that RemoveServer issues for the old-name entry.
+	removeCtx, removeCancel := s.lifecycleCtx()
+	defer removeCancel()
+	if _, err := s.lm.RemoveServer(removeCtx, name); err != nil {
 		// Rollback: remove the just-added newName entry.
-		// context.Background() because r.Context() may already be cancelled (F-ARCH-9 carry).
+		// context.Background() because removeCtx may already be cancelled (F-ARCH-9 carry).
 		if _, rbErr := s.lm.RemoveServer(context.Background(), newName); rbErr != nil {
 			s.logger.Error("rename failed at remove stage: rollback also failed",
 				"old_name", name, "new_name", newName,
@@ -1309,8 +1366,11 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request, name, newN
 	s.flushConfig(data)
 
 	// Step 4: auto-start under newName — warn-only, consistent with handleAddServer behavior.
+	// F3 fix: daemon-scoped context so client disconnect does not abort Start.
 	if !scCopy.Disabled {
-		if err := s.lm.Start(r.Context(), newName); err != nil {
+		renameStartCtx, renameStartCancel := s.lifecycleCtx()
+		defer renameStartCancel()
+		if err := s.lm.Start(renameStartCtx, newName); err != nil {
 			s.logger.Warn("auto-start after rename failed", "server", newName, "error", err)
 		}
 	}
@@ -1384,7 +1444,10 @@ func mergeEnv(env []string, add []string) []string {
 
 func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if err := s.lm.Restart(r.Context(), name); err != nil {
+	// F3 fix: daemon-scoped context so client disconnect does not abort Restart.
+	lctx, lcancel := s.lifecycleCtx()
+	defer lcancel()
+	if err := s.lm.Restart(lctx, name); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
