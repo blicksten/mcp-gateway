@@ -61,6 +61,13 @@ type Manager struct {
 	// StartAll becomes a no-op so the two paths do not fight each other.
 	supervisorTree *suture.Supervisor
 
+	// toolsChangedCb fires after a backend's tool list has been refreshed
+	// in response to a notifications/tools/list_changed from that backend.
+	// Wired by main.go to gw.RebuildTools(). Nil-safe: handleToolsChanged guards.
+	// F1 fix: closes the "gateway silently drops backend tool changes" gap
+	// documented in docs/spikes/2026-05-21-shim-architecture-draft.md §11.
+	toolsChangedCb func(name string)
+
 	// testStopHook is non-nil only in tests. When set, Stop calls this
 	// function instead of performing the real stop sequence. Allows tests
 	// to inject a failing Stop to verify RemoveResult.Orphan semantics.
@@ -164,6 +171,15 @@ func (m *Manager) Session(name string) (*mcp.ClientSession, bool) {
 		return nil, false
 	}
 	return e.session, true
+}
+
+// SetToolsChangedCallback installs a callback fired after a backend
+// reports notifications/tools/list_changed and Manager has refreshed
+// its cached entry.Tools. Call this BEFORE any backend starts (i.e.
+// before SetupSupervisor + ServeBackgroundSupervisor) so the handler
+// is installed for every backend connection.
+func (m *Manager) SetToolsChangedCallback(cb func(name string)) {
+	m.toolsChangedCb = cb
 }
 
 // Start connects to a backend server. It must not be called while
@@ -284,7 +300,20 @@ func (m *Manager) connect(ctx context.Context, name string, cfg *models.ServerCo
 	client := mcp.NewClient(&mcp.Implementation{
 		Name:    fmt.Sprintf("mcp-gateway/%s", name),
 		Version: m.impl.Version,
-	}, &mcp.ClientOptions{KeepAlive: BackendKeepaliveInterval})
+	}, &mcp.ClientOptions{
+		KeepAlive: BackendKeepaliveInterval,
+		ToolListChangedHandler: func(handlerCtx context.Context, _ *mcp.ToolListChangedRequest) {
+			// F1: backend signalled its tool list changed. Re-fetch + update
+			// cached entry.Tools, then notify the registered callback so
+			// Gateway can RebuildTools() and propagate to clients.
+			//
+			// F1-R1 (Sonnet cross-tier review 2026-05-21): launch in goroutine
+			// because go-sdk dispatches notification handlers SEQUENTIALLY per
+			// client. A blocking handler would hold up keepalive pings + later
+			// notifications for up to 30s; off-loading lets the SDK loop continue.
+			go m.handleToolsChanged(handlerCtx, name)
+		},
+	})
 
 	switch cfg.TransportType() {
 	case "stdio":
@@ -455,6 +484,44 @@ func (m *Manager) fetchTools(ctx context.Context, name string, session *mcp.Clie
 		})
 	}
 	return tools, nil
+}
+
+// handleToolsChanged fires from the ToolListChangedHandler registered in connect().
+// Looks up the live session, calls fetchTools, updates cached entry.Tools,
+// and invokes toolsChangedCb (if set). Logs warnings on failure but
+// never panics or blocks indefinitely.
+func (m *Manager) handleToolsChanged(ctx context.Context, name string) {
+	session, ok := m.Session(name)
+	if !ok || session == nil {
+		m.logger.Debug("F1: tools_changed handler fired but session gone", "server", name)
+		return
+	}
+	// Bound the re-fetch so a slow backend cannot wedge the handler goroutine.
+	// The go-sdk runs the handler in its own goroutine, so blocking here only
+	// affects subsequent notifications from the same backend; still cap it.
+	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	tools, err := m.fetchTools(fetchCtx, name, session)
+	if err != nil {
+		m.logger.Warn("F1: tools_changed re-fetch failed", "server", name, "error", err)
+		return
+	}
+	m.mu.Lock()
+	if e, ok := m.entries[name]; ok && e.session == session {
+		// Guard: only update if the entry still holds the same session we
+		// fetched from. If Stop() ran concurrently it cleared e.session, so
+		// the pointer mismatch prevents us from overwriting the nil that Stop
+		// deliberately set (Tools = nil on stop is a public invariant relied
+		// on by TestStop and callers that check entry state post-stop).
+		e.Tools = tools
+	}
+	m.mu.Unlock()
+	m.logger.Info("F1: tools refreshed via list_changed notification", "server", name, "count", len(tools))
+	// F1 read-once for race-safety: capture pointer before invoking so a
+	// concurrent SetToolsChangedCallback cannot observe a torn pointer.
+	if cb := m.toolsChangedCb; cb != nil {
+		cb(name)
+	}
 }
 
 // Stop disconnects from a backend server and kills its process if stdio.

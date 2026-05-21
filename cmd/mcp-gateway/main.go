@@ -216,6 +216,18 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 	monitor := health.NewMonitor(lm, time.Duration(cfg.Gateway.PingInterval), logger)
 	apiServer := api.NewServer(lm, gw, monitor, cfg, configPath, logger, authCfg, version)
 
+	// F1: when a backend signals notifications/tools/list_changed, Manager
+	// re-fetches that backend's tool list; our callback then triggers a
+	// gateway RebuildTools so the change propagates to all connected clients.
+	// Must be wired BEFORE SetupSupervisor so every backend connection
+	// receives the handler from the first connect() call.
+	// Closes "gateway silently drops backend notifications" gap from
+	// docs/spikes/2026-05-21-shim-architecture-draft.md §11 F1.
+	lm.SetToolsChangedCallback(func(name string) {
+		logger.Info("backend tool list changed; rebuilding gateway catalog", "backend", name)
+		gw.RebuildTools()
+	})
+
 	// Phase D.1: PID file — survives crash, stale-detected via HTTP liveness,
 	// removed on clean exit (AUDIT M-1, M-2). Written before the errgroup so
 	// defer Remove runs after all goroutines stop.

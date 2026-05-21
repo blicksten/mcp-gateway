@@ -1,0 +1,13 @@
+{
+  "name": "mock-expA-crash",
+  "config": {
+    "command": "C:/Users/stanislav.naumov/claude-workspace/mcp-gateway/experiments/mock-mcp-stdio/mock-mcp-stdio.exe",
+    "env": [
+      "MOCK_SERVER_NAME=expA",
+      "MOCK_SCENARIO_NAME=crash",
+      "MOCK_INITIAL_TOOL_COUNT=2",
+      "MOCK_CRASH_AFTER_S=20",
+      "MOCK_LOG_FILE=C:/Users/stanislav.naumov/claude-workspace/mcp-gateway/experiments/mock-mcp-stdio/expA.log"
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "mock-expB-notify",
+  "config": {
+    "command": "C:/Users/stanislav.naumov/claude-workspace/mcp-gateway/experiments/mock-mcp-stdio/mock-mcp-stdio.exe",
+    "env": [
+      "MOCK_SERVER_NAME=expB",
+      "MOCK_SCENARIO_NAME=notify",
+      "MOCK_INITIAL_TOOL_COUNT=1",
+      "MOCK_NOTIFY_AFTER_S=15",
+      "MOCK_EXTRA_TOOL_COUNT=3",
+      "MOCK_LOG_FILE=C:/Users/stanislav.naumov/claude-workspace/mcp-gateway/experiments/mock-mcp-stdio/expB.log"
+    ]
+  }
+}

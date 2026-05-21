@@ -1,0 +1,13 @@
+{
+  "name": "mock-expC-slow",
+  "config": {
+    "command": "C:/Users/stanislav.naumov/claude-workspace/mcp-gateway/experiments/mock-mcp-stdio/mock-mcp-stdio.exe",
+    "env": [
+      "MOCK_SERVER_NAME=expC",
+      "MOCK_SCENARIO_NAME=slow",
+      "MOCK_INITIAL_TOOL_COUNT=2",
+      "MOCK_TOOLS_LIST_DELAY_S=30",
+      "MOCK_LOG_FILE=C:/Users/stanislav.naumov/claude-workspace/mcp-gateway/experiments/mock-mcp-stdio/expC.log"
+    ]
+  }
+}
