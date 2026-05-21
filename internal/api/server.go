@@ -471,7 +471,8 @@ func (s *Server) Handler() http.Handler {
 			r.Get("/metrics", s.handleMetrics)
 		})
 
-		// Admin-only group — daemon-control endpoints (MCPR.3).
+		// Admin-only group — daemon-control endpoints (MCPR.3) and
+		// operator-initiated recovery surfaces (FM-34 PAL queue).
 		// Uses AdminMiddleware (admin scope) instead of authMW so the
 		// regular Bearer is rejected. The plugin manifest never exposes
 		// the admin token, so VSCode 1.119's built-in McpGatewayService
@@ -484,6 +485,15 @@ func (s *Server) Handler() http.Handler {
 
 			// Phase D.1 + MCPR.3: graceful daemon shutdown (admin-required).
 			r.Post("/shutdown", s.handleShutdown)
+
+			// FM-34: REST PAL queue endpoints — non-MCP recovery path
+			// onto orchestrator queue_review/get_review tools. Operator-
+			// initiated; admin-scoped per ADR-0007 spec for consistency
+			// with /shutdown and to keep VSCode's McpGatewayService out
+			// of the PAL dispatch surface. See docs/spikes/
+			// 2026-05-14-open-items-catalog.md §A4.
+			r.Post("/pal/queue_review", s.handlePalQueueReview)
+			r.Get("/pal/get_review/{task_id}", s.handlePalGetReview)
 		})
 
 		// Claude Code integration group (Phase 16.3).

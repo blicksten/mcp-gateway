@@ -67,7 +67,7 @@ Phases 1–16 implemented. Full history preserved locally in `full-history-backu
 
 ---
 
-## Stabilization Track (2026-05-19 → 2026-05-21 — partial, see deferred scope)
+## Stabilization Track (2026-05-19 → 2026-05-22 — partial, see deferred scope)
 
 Plan: `docs/PLAN-stabilization.md` (gitignored, local-only). Driven by FM-3 (gateway crash-stop + post-restart "session not found" cascade in Claude Code) and the reliability "heart fails last" invariant from PLAN §2.6.
 
@@ -85,6 +85,9 @@ Plan: `docs/PLAN-stabilization.md` (gitignored, local-only). Driven by FM-3 (gat
 | **E.1 F3** | **Decouple lifecycle ops from HTTP request context (60s daemon-scoped)** | `e6924e7` | ✅ LANDED 2026-05-21 |
 | **E.1 F2** | **Monitor defers backend restart to suture supervisor (kills dual-restart)** | `48b2b78` | ✅ LANDED 2026-05-21 |
 | **E.1 F4** | **POST `/api/v1/servers` returns 202 immediately; Start runs in background** | `42b370e` + `7bc38b4` (P4 regen-skip on error) | ✅ LANDED 2026-05-21 |
+| **P0.1 (2026-05-22)** | **Hollow-gate empirical verification** — bisection on known-bad Go diff via `queue_review` + direct PAL `codereview`; both paths return PASS+findings=[] on file with 5 objective CRITICAL defects. Bug A (orchestrator WEDGE.2 `INTERNAL_MODE_NO_EXPERT`) + Bug B (pal-mcp `_extract_gate_verdict` blind to `expert_analysis.raw_analysis`) — **both still open**, cross-project to claude-team-control. Phase 4 of PLAN-pal-decision either not landed or ineffective. | — | ⛔ cross-project blocker — handoff in `claude-team-control/.../project_hollow_gate_handoff_from_mcp_gateway_2026_05_22.md` |
+| **P0.2 (2026-05-22)** | **Hollow-window sweep** — direct sqlite query on `~/.claude/orchestrator/index.db`: **705/705 done review_tasks since 2026-05-13 hollow** (verdict=DISPUTE/PASS + findings=[]); **773/773 in DB history 2026-04-18→2026-05-22 also hollow**; `audit_findings` table dead since 2026-05-10. **15 affected pipelines** across 8 projects identified (1 active, 1 completed, 4 halted, 9 abandoned). Candidate list persisted to memory; re-audit deferred to post-Bug-A+B-fix. | — | ✅ swept — list ready for re-audit |
+| **P1.1 (2026-05-22)** | **FM-34 REST PAL queue endpoints** — `POST /api/v1/pal/queue_review` + `GET /api/v1/pal/get_review/{task_id}` as REST proxies onto orchestrator's MCP tools. Admin scope per ADR-0007 (mirrors `/shutdown`). New `internal/api/pal.go` (~110 LOC) + `internal/api/pal_test.go` (4 tests: no-auth/regular-Bearer/orchestrator-missing/GET-path). Operator-initiated recovery path for FM-2 + FM-24 + FM-32 (MCP transport down but daemon + orchestrator stdio alive). PAL codereview external + precommit internal both PASS, 0 findings. | this commit | ✅ LANDED 2026-05-22 |
 | T0.7.1 post-MVP | File-backed `SessionStateRegistry` for cross-process-restart persistence | — | ⬜ next (S.3) |
 | Upstream #57642 | Claude Code TS-client SSE GET stream auto-reconnect | — | ⛔ external |
 
