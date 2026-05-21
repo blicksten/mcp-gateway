@@ -1123,8 +1123,18 @@ func (s *Server) addServerInProcess(_ context.Context, name string, sc *models.S
 		defer s.bgStartWG.Done()
 		lctx, lcancel := s.lifecycleCtx()
 		defer lcancel()
-		if err := s.lm.Start(lctx, name); err != nil {
-			s.logger.Warn("async auto-start after add failed", "server", name, "error", err)
+		startErr := s.lm.Start(lctx, name)
+		if startErr != nil {
+			s.logger.Warn("async auto-start after add failed", "server", name, "error", startErr)
+		}
+		// F4-P4 (Sonnet retroactive review 2026-05-21): skip RebuildTools +
+		// TriggerPluginRegen when Start failed. The backend has no live tools
+		// to publish; running regen would have been harmless (entries[name].Tools
+		// is empty) but it muddles operator signal — a regen log for a failed
+		// backend looks like progress when it isn't. On Start failure callers
+		// can retry via PATCH/POST restart, which has its own regen path.
+		if startErr != nil {
+			return
 		}
 		if !opts.SuppressPluginRegen && !s.sapBatchActive() {
 			if s.gw != nil {
