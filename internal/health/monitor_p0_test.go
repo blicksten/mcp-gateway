@@ -173,8 +173,9 @@ func (p *panicLM) SetStatus(name string, status models.ServerStatus, lastErr str
 	p.statusLog = append(p.statusLog, statusEvent{name, status, lastErr})
 }
 
-func (p *panicLM) Restart(context.Context, string) error { return nil }
-func (p *panicLM) Start(context.Context, string) error   { return nil }
+func (p *panicLM) Restart(context.Context, string) error  { return nil }
+func (p *panicLM) Start(context.Context, string) error    { return nil }
+func (p *panicLM) SupervisorActive() bool                 { return false }
 
 // TestPanicInHealthCheck_DoesNotKillMonitorLoop — R2 panic isolation.
 func TestPanicInHealthCheck_DoesNotKillMonitorLoop(t *testing.T) {

@@ -679,6 +679,19 @@ func (m *Manager) ServeBackgroundSupervisor(ctx context.Context) func() {
 	}
 }
 
+// SupervisorActive returns true when the suture supervisor tree has been
+// wired (SetupSupervisor was called and supervisorTree is non-nil). The
+// Health Monitor uses this to defer restart logic to the supervisor — when
+// the supervisor is active, it owns backend restart policy and the Monitor
+// becomes purely observational.
+//
+// F2 fix (post-P1.5 step 2): closes the dual-restart race where both
+// Monitor.attemptRestart and suture's Serve loop tried to call Manager.Start
+// after a crash, producing transient "start already in progress" errors.
+func (m *Manager) SupervisorActive() bool {
+	return m.supervisorTree != nil
+}
+
 // StartAll starts all non-disabled servers concurrently.
 //
 // When the supervisor tree has been set up via SetupSupervisor, this method

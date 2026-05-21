@@ -111,6 +111,11 @@ func (m *mockLM) Start(ctx context.Context, name string) error {
 	return nil
 }
 
+// SupervisorActive returns false by default so existing tests exercise the
+// Monitor-owned restart path unchanged (F2 fix is a no-op when supervisor
+// is not wired).
+func (m *mockLM) SupervisorActive() bool { return false }
+
 func (m *mockLM) lastStatus(name string) models.ServerStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()

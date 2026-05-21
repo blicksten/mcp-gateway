@@ -80,6 +80,10 @@ type LifecycleManager interface {
 	SetStatus(name string, status models.ServerStatus, lastErr string)
 	Restart(ctx context.Context, name string) error
 	Start(ctx context.Context, name string) error
+	// SupervisorActive returns true when the suture supervisor tree has been
+	// wired. When true, the supervisor owns restart policy and Monitor's
+	// attemptRestart must not issue an independent Restart call (F2 fix).
+	SupervisorActive() bool
 }
 
 // serverState tracks per-server health state.
@@ -301,6 +305,19 @@ func (m *Monitor) checkOne(ctx context.Context, entry models.ServerEntry) {
 
 // attemptRestart tries to restart a server, respecting the circuit breaker.
 func (m *Monitor) attemptRestart(ctx context.Context, name string) {
+	// F2 fix: when the suture supervisor (P1.5 step 2) is active, IT owns
+	// restart policy. Monitor's role here becomes observational — we still
+	// track failures and mark degraded in checkOne, but we DO NOT issue an
+	// independent Restart call. Suture's Serve loop will see the session end
+	// and restart via its FailureBackoff=15s policy. Without this guard, two
+	// Restart paths race (suture + Monitor) and the Manager's `starting`
+	// guard surfaces transient errors.
+	if m.lm.SupervisorActive() {
+		m.logger.Info("backend health failure detected; restart deferred to supervisor",
+			"server", name)
+		return
+	}
+
 	m.mu.Lock()
 	state := m.getOrCreateState(name)
 

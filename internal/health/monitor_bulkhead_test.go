@@ -84,6 +84,10 @@ func (m *bulkheadMockLM) Start(_ context.Context, _ string) error {
 	return nil
 }
 
+// SupervisorActive returns false; bulkhead tests do not exercise the
+// supervisor path and must keep Monitor's own restart logic active.
+func (m *bulkheadMockLM) SupervisorActive() bool { return false }
+
 func (m *bulkheadMockLM) callsFor(name string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
