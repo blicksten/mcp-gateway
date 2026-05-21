@@ -490,16 +490,28 @@ func (m *Manager) fetchTools(ctx context.Context, name string, session *mcp.Clie
 // Looks up the live session, calls fetchTools, updates cached entry.Tools,
 // and invokes toolsChangedCb (if set). Logs warnings on failure but
 // never panics or blocks indefinitely.
-func (m *Manager) handleToolsChanged(ctx context.Context, name string) {
+//
+// F1-R2 (E.2 empirical 2026-05-21): the ctx parameter is INTENTIONALLY ignored.
+// F1-R1 wrapped the call in `go m.handleToolsChanged(handlerCtx, name)` to
+// avoid blocking the SDK's sequential notification dispatch. But the go-sdk
+// cancels the handler-scoped ctx when the handler closure returns — since
+// our goroutine outlives the handler, deriving fetchCtx from that ctx causes
+// session.ListTools to fail with "context canceled" milliseconds after the
+// notification arrives. Empirical evidence: mock-expB sent tools/list_changed
+// at t=15s; gateway immediately emitted notifications/cancelled (the SDK
+// cancelling our in-flight fetch) and never followed up with tools/list.
+// Fix: use context.Background() bounded by a 30s timeout. Daemon graceful
+// stop is observed via Manager.Stop being called and clearing e.session
+// (guarded below).
+func (m *Manager) handleToolsChanged(_ context.Context, name string) {
 	session, ok := m.Session(name)
 	if !ok || session == nil {
 		m.logger.Debug("F1: tools_changed handler fired but session gone", "server", name)
 		return
 	}
-	// Bound the re-fetch so a slow backend cannot wedge the handler goroutine.
-	// The go-sdk runs the handler in its own goroutine, so blocking here only
-	// affects subsequent notifications from the same backend; still cap it.
-	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Bound the re-fetch so a slow backend cannot wedge the goroutine.
+	// Use Background, not the SDK handler ctx — see godoc above.
+	fetchCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	tools, err := m.fetchTools(fetchCtx, name, session)
 	if err != nil {
