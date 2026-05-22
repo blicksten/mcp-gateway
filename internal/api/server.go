@@ -1206,7 +1206,13 @@ func (s *Server) waitForRunningAndRegen(name string, opts AddOpts) {
 				"server", name)
 			return
 		case <-poll.C:
-			switch s.lm.BackendStatus(name) {
+			// Sonnet MEDIUM (fix-in-cycle 2026-05-22): capture status once.
+			// Calling BackendStatus a second time inside the log argument
+			// could surface a different status (e.g. supervisor restart fast-
+			// transitions Error→Starting) than the one that matched the case,
+			// misleading operator logs.
+			st := s.lm.BackendStatus(name)
+			switch st {
 			case models.StatusRunning:
 				if !opts.SuppressPluginRegen && !s.sapBatchActive() {
 					if s.gw != nil {
@@ -1217,8 +1223,11 @@ func (s *Server) waitForRunningAndRegen(name string, opts AddOpts) {
 				return
 			case models.StatusError, models.StatusDisabled, models.StatusStopped:
 				s.logger.Warn("supervisor-driven add: terminal status, skipping regen",
-					"server", name, "status", s.lm.BackendStatus(name))
+					"server", name, "status", st)
 				return
+			default:
+				// StatusStarting, StatusRestarting, StatusDegraded → keep
+				// polling. Supervisor may still bring the backend up.
 			}
 		}
 	}

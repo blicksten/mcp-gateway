@@ -680,6 +680,10 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 // backend's ServiceToken in m.supervisorTokens so runtime removals
 // (RemoveBackendFromSupervisor) can target the right token even for
 // backends that predate the runtime-add path.
+//
+// Lock is m.mu.Lock (not RLock as before Task C) because SetupSupervisor
+// now atomically writes BOTH supervisorTree and supervisorTokens — readers
+// of either field must observe a consistent paired write.
 func (m *Manager) SetupSupervisor(logger *slog.Logger) {
 	m.mu.Lock()
 	names := make([]string, 0, len(m.entries))
@@ -716,11 +720,17 @@ func (m *Manager) AddBackendToSupervisor(name string, logger *slog.Logger) {
 	if m.supervisorTree == nil {
 		return
 	}
-	if _, exists := m.supervisorTokens[name]; exists {
-		return
-	}
+	// Sonnet HIGH (fix-in-cycle 2026-05-22): initialise supervisorTokens
+	// BEFORE the map read. Reading a nil map is safe in Go (returns zero
+	// value) but the post-read nil-init is unreachable in production
+	// (SetupSupervisor always allocates the map). Moving init first keeps
+	// the documented invariant honest if any future code path constructs
+	// the tree without going through SetupSupervisor.
 	if m.supervisorTokens == nil {
 		m.supervisorTokens = make(map[string]suture.ServiceToken)
+	}
+	if _, exists := m.supervisorTokens[name]; exists {
+		return
 	}
 	svc := NewBackendSupervisor(name, m, m, logger)
 	childSpec := DefaultSupervisorSpec(name, logger)
