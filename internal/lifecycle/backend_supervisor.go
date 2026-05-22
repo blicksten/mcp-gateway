@@ -187,6 +187,20 @@ func NewBackendSupervisorTree(
 	names []string,
 	logger *slog.Logger,
 ) *suture.Supervisor {
+	tree, _ := newBackendSupervisorTreeWithTokens(manager, checker, names, logger)
+	return tree
+}
+
+// newBackendSupervisorTreeWithTokens is the internal variant that also
+// returns the per-backend ServiceToken map so Manager.SetupSupervisor can
+// later RemoveAndWait a startup-time backend via the same code path as
+// runtime-added ones (Task C 2026-05-22).
+func newBackendSupervisorTreeWithTokens(
+	manager BackendManager,
+	checker StatusChecker,
+	names []string,
+	logger *slog.Logger,
+) (*suture.Supervisor, map[string]suture.ServiceToken) {
 	rootSpec := suture.Spec{
 		EventHook: func(e suture.Event) {
 			if ev, ok := e.(suture.EventServicePanic); ok {
@@ -196,14 +210,15 @@ func NewBackendSupervisorTree(
 		DontPropagateTermination: true,
 	}
 	root := suture.New("mcp-gateway", rootSpec)
+	tokens := make(map[string]suture.ServiceToken, len(names))
 
 	for _, name := range names {
 		svc := NewBackendSupervisor(name, manager, checker, logger)
 		childSpec := DefaultSupervisorSpec(name, logger)
 		child := suture.New("backends/"+name, childSpec)
 		child.Add(svc)
-		root.Add(child)
+		tokens[name] = root.Add(child)
 	}
 
-	return root
+	return root, tokens
 }

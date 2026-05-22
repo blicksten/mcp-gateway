@@ -1128,32 +1128,100 @@ func (s *Server) addServerInProcess(_ context.Context, name string, sc *models.S
 	// F4 fix: caller returns immediately while backend cold-start happens in
 	// the background. bgStartWG is drained on graceful daemon stop so in-flight
 	// goroutines finish (or are cancelled via lifecycleCtx timeout) before exit.
-	s.bgStartWG.Add(1)
-	go func() {
-		defer s.bgStartWG.Done()
-		lctx, lcancel := s.lifecycleCtx()
-		defer lcancel()
-		startErr := s.lm.Start(lctx, name)
-		if startErr != nil {
-			s.logger.Warn("async auto-start after add failed", "server", name, "error", startErr)
-		}
-		// F4-P4 (Sonnet retroactive review 2026-05-21): skip RebuildTools +
-		// TriggerPluginRegen when Start failed. The backend has no live tools
-		// to publish; running regen would have been harmless (entries[name].Tools
-		// is empty) but it muddles operator signal — a regen log for a failed
-		// backend looks like progress when it isn't. On Start failure callers
-		// can retry via PATCH/POST restart, which has its own regen path.
-		if startErr != nil {
-			return
-		}
-		if !opts.SuppressPluginRegen && !s.sapBatchActive() {
-			if s.gw != nil {
-				s.gw.RebuildTools()
+	//
+	// Task C (P1.3 2026-05-22): when the suture supervisor tree is active,
+	// register the new backend with it so future crashes are auto-restarted
+	// just like startup-time backends. We then take the SUPERVISOR path —
+	// the supervisor's Serve drives Start. We poll BackendStatus for the
+	// Running transition then fire regen. We do NOT also call Manager.Start
+	// from here because that would race the supervisor's Start (Manager.Start
+	// is not idempotent on a running backend — it would tear down the just-
+	// started session).
+	//
+	// When the supervisor is not active (legacy / test path), keep today's
+	// explicit Start + regen sequence.
+	if s.lm.SupervisorActive() {
+		s.lm.AddBackendToSupervisor(name, s.logger)
+		s.bgStartWG.Add(1)
+		go s.waitForRunningAndRegen(name, opts)
+	} else {
+		s.bgStartWG.Add(1)
+		go func() {
+			defer s.bgStartWG.Done()
+			lctx, lcancel := s.lifecycleCtx()
+			defer lcancel()
+			startErr := s.lm.Start(lctx, name)
+			if startErr != nil {
+				s.logger.Warn("async auto-start after add failed", "server", name, "error", startErr)
 			}
-			s.TriggerPluginRegen()
-		}
-	}()
+			// F4-P4 (Sonnet retroactive review 2026-05-21): skip RebuildTools +
+			// TriggerPluginRegen when Start failed. The backend has no live tools
+			// to publish; running regen would have been harmless (entries[name].Tools
+			// is empty) but it muddles operator signal — a regen log for a failed
+			// backend looks like progress when it isn't. On Start failure callers
+			// can retry via PATCH/POST restart, which has its own regen path.
+			if startErr != nil {
+				return
+			}
+			if !opts.SuppressPluginRegen && !s.sapBatchActive() {
+				if s.gw != nil {
+					s.gw.RebuildTools()
+				}
+				s.TriggerPluginRegen()
+			}
+		}()
+	}
 	return nil
+}
+
+// waitForRunningAndRegen polls backend status until it transitions to
+// StatusRunning, then triggers RebuildTools + TriggerPluginRegen. Used
+// only on the supervisor-active path of addServerInProcess (Task C
+// P1.3 2026-05-22); the supervisor drives Start, this goroutine just
+// observes the result and runs the regen side effect.
+//
+// Terminal statuses (StatusError, StatusStopped, StatusDisabled) skip
+// regen — same operator-signal semantics as F4-P4 for the non-supervisor
+// path. A 60-second deadline caps the wait so a backend that never
+// reaches Running does not leak the goroutine.
+func (s *Server) waitForRunningAndRegen(name string, opts AddOpts) {
+	defer s.bgStartWG.Done()
+	lctx, lcancel := s.lifecycleCtx()
+	defer lcancel()
+
+	const pollInterval = 200 * time.Millisecond
+	const deadline = 60 * time.Second
+
+	deadlineTimer := time.NewTimer(deadline)
+	defer deadlineTimer.Stop()
+	poll := time.NewTicker(pollInterval)
+	defer poll.Stop()
+
+	for {
+		select {
+		case <-lctx.Done():
+			return
+		case <-deadlineTimer.C:
+			s.logger.Warn("supervisor-driven add: deadline reached without Running, skipping regen",
+				"server", name)
+			return
+		case <-poll.C:
+			switch s.lm.BackendStatus(name) {
+			case models.StatusRunning:
+				if !opts.SuppressPluginRegen && !s.sapBatchActive() {
+					if s.gw != nil {
+						s.gw.RebuildTools()
+					}
+					s.TriggerPluginRegen()
+				}
+				return
+			case models.StatusError, models.StatusDisabled, models.StatusStopped:
+				s.logger.Warn("supervisor-driven add: terminal status, skipping regen",
+					"server", name, "status", s.lm.BackendStatus(name))
+				return
+			}
+		}
+	}
 }
 
 func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
@@ -1213,6 +1281,28 @@ func (s *Server) removeServerInProcess(_ context.Context, name string, opts Remo
 	// the backend Stop that RemoveServer issues internally.
 	lctx, lcancel := s.lifecycleCtx()
 	defer lcancel()
+
+	// Task C (P1.3 2026-05-22): if the supervisor is active, remove the
+	// backend from the tree BEFORE Manager.RemoveServer. RemoveAndWait
+	// fires ctx cancellation to the child's Serve which calls Manager.Stop
+	// — so the backend is already stopped by the time RemoveServer runs.
+	// RemoveServer's internal Stop call becomes a no-op on the already-
+	// stopped backend (Manager.Stop's conditional StatusStopped write
+	// preserves the prior status). 30s timeout matches the rest of the
+	// graceful-stop budget.
+	//
+	// No-op when supervisor not active or this backend was never added
+	// to the supervisor (startup-time backends are added by SetupSupervisor,
+	// runtime-added backends by AddBackendToSupervisor — neither path
+	// leaves a name unregistered).
+	if s.lm.SupervisorActive() {
+		if err := s.lm.RemoveBackendFromSupervisor(name, 30*time.Second); err != nil {
+			s.logger.Warn("RemoveBackendFromSupervisor failed", "server", name, "error", err)
+			// Fall through to RemoveServer regardless — operator intent is
+			// to delete the backend; a supervisor-tree leak is recoverable.
+		}
+	}
+
 	result, err := s.lm.RemoveServer(lctx, name)
 	if err != nil {
 		return lifecycle.RemoveResult{}, err

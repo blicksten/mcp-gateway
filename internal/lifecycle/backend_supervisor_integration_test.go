@@ -381,3 +381,159 @@ func TestStop_OverwritesToStoppedWhenNotRestarting(t *testing.T) {
 	assert.Equal(t, models.StatusStopped, m.BackendStatus("s1"),
 		"R-01 counter-test: plain Stop (status=Running) MUST overwrite to Stopped")
 }
+
+// --- Task C tests (P1.3 2026-05-22): runtime add/remove from supervisor ---
+
+// TestAddBackendToSupervisor_NoTreeIsNoop — calling AddBackendToSupervisor
+// on a Manager without SetupSupervisor must be a clean no-op.
+func TestAddBackendToSupervisor_NoTreeIsNoop(t *testing.T) {
+	cfg := &models.Config{Servers: map[string]*models.ServerConfig{}}
+	cfg.ApplyDefaults()
+	m := NewManager(cfg, "test", slog.Default())
+
+	require.NotPanics(t, func() {
+		m.AddBackendToSupervisor("nonexistent", slog.Default())
+	})
+	assert.False(t, m.SupervisorActive(), "no tree set up — SupervisorActive must remain false")
+}
+
+// TestAddBackendToSupervisor_RegistersAndStarts — after SetupSupervisor +
+// ServeBackgroundSupervisor, AddBackendToSupervisor on a freshly-added
+// backend triggers the supervisor's Serve to call Manager.Start. This is
+// the core Task C guarantee: backends added at runtime get supervisor
+// coverage just like startup-time ones.
+func TestAddBackendToSupervisor_RegistersAndStarts(t *testing.T) {
+	cfg := &models.Config{Servers: map[string]*models.ServerConfig{}}
+	cfg.ApplyDefaults()
+	m := NewManager(cfg, "test", slog.Default())
+
+	// Empty entries — supervisor tree starts with zero children.
+	m.SetupSupervisor(slog.Default())
+	require.True(t, m.SupervisorActive())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopFn := m.ServeBackgroundSupervisor(ctx)
+	defer stopFn()
+
+	// Add a backend AFTER the supervisor tree is already serving — this is
+	// the runtime-add scenario.
+	require.NoError(t, m.AddServer("runtime-1", &models.ServerConfig{URL: "http://localhost:19998/mcp"}))
+	m.AddBackendToSupervisor("runtime-1", slog.Default())
+
+	// The supervisor's Serve will call Start, which will fail (no server at
+	// 19998), set StatusError, and trigger suture's failure-backoff. We can
+	// observe the start attempt via the status transition away from Stopped.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status := m.BackendStatus("runtime-1")
+		if status != models.StatusStopped {
+			// Supervisor picked it up — Start was attempted. Good enough.
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("supervisor did not attempt to start the runtime-added backend within 5s")
+}
+
+// TestAddBackendToSupervisor_IdempotentOnSameName — calling
+// AddBackendToSupervisor twice with the same name must not register two
+// children. The second call is a no-op (single ServiceToken kept).
+func TestAddBackendToSupervisor_IdempotentOnSameName(t *testing.T) {
+	cfg := &models.Config{Servers: map[string]*models.ServerConfig{}}
+	cfg.ApplyDefaults()
+	m := NewManager(cfg, "test", slog.Default())
+	m.SetupSupervisor(slog.Default())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopFn := m.ServeBackgroundSupervisor(ctx)
+	defer stopFn()
+
+	require.NoError(t, m.AddServer("dup", &models.ServerConfig{URL: "http://localhost:19997/mcp"}))
+	m.AddBackendToSupervisor("dup", slog.Default())
+	m.AddBackendToSupervisor("dup", slog.Default()) // second call must no-op
+
+	// Removing once must clean the only entry. If the second Add had created
+	// a duplicate token in the map, the first one would leak.
+	require.NoError(t, m.RemoveBackendFromSupervisor("dup", 5*time.Second))
+}
+
+// TestRemoveBackendFromSupervisor_NoTreeIsNoop — Remove on a Manager
+// without SetupSupervisor must return nil without panic.
+func TestRemoveBackendFromSupervisor_NoTreeIsNoop(t *testing.T) {
+	cfg := &models.Config{Servers: map[string]*models.ServerConfig{}}
+	cfg.ApplyDefaults()
+	m := NewManager(cfg, "test", slog.Default())
+
+	err := m.RemoveBackendFromSupervisor("any", 5*time.Second)
+	assert.NoError(t, err)
+}
+
+// TestRemoveBackendFromSupervisor_UnknownNameIsNoop — Remove on an active
+// tree but unknown name returns nil (idempotent on repeated remove,
+// graceful on never-added name).
+func TestRemoveBackendFromSupervisor_UnknownNameIsNoop(t *testing.T) {
+	cfg := &models.Config{Servers: map[string]*models.ServerConfig{}}
+	cfg.ApplyDefaults()
+	m := NewManager(cfg, "test", slog.Default())
+	m.SetupSupervisor(slog.Default())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopFn := m.ServeBackgroundSupervisor(ctx)
+	defer stopFn()
+
+	err := m.RemoveBackendFromSupervisor("never-added", 5*time.Second)
+	assert.NoError(t, err)
+}
+
+// TestRemoveBackendFromSupervisor_StopsAndRemoves — round-trip: add a
+// backend at runtime, remove it, then verify the same name can be added
+// again without ServiceToken-already-present conflicts.
+func TestRemoveBackendFromSupervisor_StopsAndRemoves(t *testing.T) {
+	cfg := &models.Config{Servers: map[string]*models.ServerConfig{}}
+	cfg.ApplyDefaults()
+	m := NewManager(cfg, "test", slog.Default())
+	m.SetupSupervisor(slog.Default())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopFn := m.ServeBackgroundSupervisor(ctx)
+	defer stopFn()
+
+	require.NoError(t, m.AddServer("rt-roundtrip", &models.ServerConfig{URL: "http://localhost:19996/mcp"}))
+	m.AddBackendToSupervisor("rt-roundtrip", slog.Default())
+
+	// Remove — RemoveAndWait fires ctx.Done into the child's Serve.
+	require.NoError(t, m.RemoveBackendFromSupervisor("rt-roundtrip", 5*time.Second))
+
+	// Re-add — would panic or fail if the old token was still around.
+	m.AddBackendToSupervisor("rt-roundtrip", slog.Default())
+	require.NoError(t, m.RemoveBackendFromSupervisor("rt-roundtrip", 5*time.Second))
+}
+
+// TestSetupSupervisor_PopulatesTokensForStartupBackends — verifies the
+// SetupSupervisor refactor: startup-time backends now have tokens, so
+// RemoveBackendFromSupervisor can target them at runtime (not just
+// runtime-added ones).
+func TestSetupSupervisor_PopulatesTokensForStartupBackends(t *testing.T) {
+	cfg := &models.Config{
+		Servers: map[string]*models.ServerConfig{
+			"startup-1": {URL: "http://localhost:19995/mcp"},
+		},
+	}
+	cfg.ApplyDefaults()
+	m := NewManager(cfg, "test", slog.Default())
+	m.SetupSupervisor(slog.Default())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopFn := m.ServeBackgroundSupervisor(ctx)
+	defer stopFn()
+
+	// RemoveBackendFromSupervisor on the startup-time backend must succeed
+	// (token was recorded by SetupSupervisor — the Task C refactor).
+	err := m.RemoveBackendFromSupervisor("startup-1", 5*time.Second)
+	assert.NoError(t, err)
+}

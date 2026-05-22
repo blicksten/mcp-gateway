@@ -61,6 +61,18 @@ type Manager struct {
 	// StartAll becomes a no-op so the two paths do not fight each other.
 	supervisorTree *suture.Supervisor
 
+	// supervisorTokens tracks the suture ServiceToken for every backend
+	// currently registered with supervisorTree. Populated by
+	// SetupSupervisor (startup-time backends) and AddBackendToSupervisor
+	// (runtime add via PATCH/POST /api/v1/servers). Consumed by
+	// RemoveBackendFromSupervisor on delete. Nil before SetupSupervisor.
+	//
+	// Task C (P1.3 2026-05-22) closes the runtime-add gap documented in
+	// REVIEW-stabilization §"Assessment of known limitations": backends
+	// added via PATCH after startup must join the supervisor tree so they
+	// get the same crash-restart policy as startup-time backends.
+	supervisorTokens map[string]suture.ServiceToken
+
 	// toolsChangedCb fires after a backend's tool list has been refreshed
 	// in response to a notifications/tools/list_changed from that backend.
 	// Wired by main.go to gw.RebuildTools(). Nil-safe: handleToolsChanged guards.
@@ -663,14 +675,87 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 //
 // Manager satisfies both BackendManager and StatusChecker, so it passes
 // itself for both arguments of NewBackendSupervisorTree.
+//
+// Task C (P1.3 2026-05-22): SetupSupervisor now records every startup-time
+// backend's ServiceToken in m.supervisorTokens so runtime removals
+// (RemoveBackendFromSupervisor) can target the right token even for
+// backends that predate the runtime-add path.
 func (m *Manager) SetupSupervisor(logger *slog.Logger) {
-	m.mu.RLock()
+	m.mu.Lock()
 	names := make([]string, 0, len(m.entries))
 	for name := range m.entries {
 		names = append(names, name)
 	}
-	m.mu.RUnlock()
-	m.supervisorTree = NewBackendSupervisorTree(m, m, names, logger)
+	tree, tokens := newBackendSupervisorTreeWithTokens(m, m, names, logger)
+	m.supervisorTree = tree
+	m.supervisorTokens = tokens
+	m.mu.Unlock()
+}
+
+// AddBackendToSupervisor wraps the named backend in a new child supervisor
+// and adds it to the running supervisor tree. The backend gets the same
+// FailureThreshold/FailureBackoff/FailureDecay policy as startup-time
+// backends, so a runtime-added crash is auto-restarted just like any other.
+//
+// No-op when:
+//   - the supervisor tree was never set up (Manager constructed without
+//     SetupSupervisor — happens in tests and in legacy callers); or
+//   - a token is already recorded for this name (idempotent — repeated
+//     PATCH that adds the same backend does not produce duplicate
+//     supervisor children).
+//
+// The backend MUST already be registered in m.entries via AddServer
+// before this is called; the supervisor's first Serve() will call
+// Manager.Start which looks the entry up by name. Callers in
+// internal/api/server.go satisfy this ordering.
+//
+// Task C (P1.3 2026-05-22). Closes the runtime-add supervisor gap.
+func (m *Manager) AddBackendToSupervisor(name string, logger *slog.Logger) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.supervisorTree == nil {
+		return
+	}
+	if _, exists := m.supervisorTokens[name]; exists {
+		return
+	}
+	if m.supervisorTokens == nil {
+		m.supervisorTokens = make(map[string]suture.ServiceToken)
+	}
+	svc := NewBackendSupervisor(name, m, m, logger)
+	childSpec := DefaultSupervisorSpec(name, logger)
+	child := suture.New("backends/"+name, childSpec)
+	child.Add(svc)
+	m.supervisorTokens[name] = m.supervisorTree.Add(child)
+}
+
+// RemoveBackendFromSupervisor stops the named backend's child supervisor
+// and removes it from the tree. timeout caps the wait for in-flight
+// service termination (suture's RemoveAndWait returns ErrTimeout when
+// the service does not stop within the deadline).
+//
+// No-op (returns nil) when the supervisor tree is not set up OR no
+// token is recorded for the name. Idempotent on repeated removal.
+//
+// Suture's RemoveAndWait fires context cancellation to the child's Serve;
+// BackendSupervisor.Serve handles ctx.Done by calling Manager.Stop on the
+// backend. So removing from the supervisor tree DOES stop the backend.
+// Callers that also call Manager.RemoveServer after this will see Stop
+// as a no-op (Status already Stopped).
+//
+// Task C (P1.3 2026-05-22). Closes the runtime-remove supervisor leak.
+func (m *Manager) RemoveBackendFromSupervisor(name string, timeout time.Duration) error {
+	m.mu.Lock()
+	token, ok := m.supervisorTokens[name]
+	tree := m.supervisorTree
+	if ok {
+		delete(m.supervisorTokens, name)
+	}
+	m.mu.Unlock()
+	if !ok || tree == nil {
+		return nil
+	}
+	return tree.RemoveAndWait(token, timeout)
 }
 
 // ServeBackgroundSupervisor starts the supervisor tree in the background and
