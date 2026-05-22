@@ -15,6 +15,7 @@ import { BackendItem } from './backend-item';
 import { GatewayTreeProvider } from './gateway-tree-provider';
 import { McpStatusBar } from './status-bar';
 import { DaemonManager } from './daemon';
+import { resolveDefaultDaemonPath } from './daemon-path';
 import { DaemonLogFile } from './daemon-log-file';
 import { LogViewer } from './log-viewer';
 import { logger } from './logger';
@@ -81,7 +82,13 @@ export function activate(
 	const rawInterval = config.get<number>('pollInterval', 5000);
 	const pollInterval = Math.max(rawInterval, 1000);
 	const autoStart = config.get<boolean>('autoStart', true);
-	const daemonPath = config.get<string>('daemonPath', '');
+	// FM-16 binary drift fix (P2.3 2026-05-22): when the user has not
+	// configured an explicit daemonPath, prefer ~/go/bin/mcp-gateway[.exe]
+	// over the bare-name PATH-resolved lookup that Node's child_process.spawn
+	// would do. Without this, `spawn('mcp-gateway')` resolves cwd-first then
+	// PATH — opening the mcp-gateway project itself caused VS Code to launch
+	// a stale project-local build instead of the fresh ~/go/bin/ binary.
+	const daemonPath = resolveDefaultDaemonPath(config.get<string>('daemonPath', ''));
 	const sapSystemsEnabled = config.get<boolean>('sapSystemsEnabled', false);
 
 	// Seed the context key BEFORE any view registration so the `when` clause
