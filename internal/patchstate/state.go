@@ -147,9 +147,19 @@ type ProbeResult struct {
 // makes the entry stale within seconds. On daemon restart the statusline
 // hook re-registers automatically (idempotent via per-session marker file
 // on the client). No disk persistence by design.
+//
+// FM-9 multi-instance hard-limit (P1.2 2026-05-22):
+//   - SessionID stored alongside so FindSessionPidByWindow can return a
+//     full reverse-lookup result without an out-of-band session-id parameter.
+//   - WindowID is the VS Code window scope (set by statusline hook from the
+//     VSCODE_PID env var or extension-injected VSCODE_WINDOW_ID). Empty when
+//     claude.exe is launched outside VS Code (terminal, Cursor, CI) — gateway
+//     gracefully no-ops the limit in that case.
 type SessionPid struct {
 	PID          uint32    `json:"pid"`
 	RegisteredAt time.Time `json:"registered_at"`
+	SessionID    string    `json:"session_id,omitempty"`
+	WindowID     string    `json:"window_id,omitempty"`
 }
 
 // State is the concurrent owner of heartbeats, pending actions, and probe
@@ -770,16 +780,26 @@ func newID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// RecordSessionPid stores the claude.exe PID for sessionID. Overwrites any
-// prior entry (last-write wins — claude.exe restart in the same VSCode tab
-// produces a new PID with the same session_id). Returns a copy of the
-// stored entry. The caller (HTTP handler) maps an error to 400.
+// RecordSessionPid stores the claude.exe PID for sessionID with no window
+// scope. Equivalent to RecordSessionPidWithWindow(sessionID, pid, "").
+// Kept for backward compatibility with callers that predate FM-9.
+func (s *State) RecordSessionPid(sessionID string, pid uint32) (*SessionPid, error) {
+	return s.RecordSessionPidWithWindow(sessionID, pid, "")
+}
+
+// RecordSessionPidWithWindow stores the claude.exe PID for sessionID and
+// associates it with windowID (FM-9 multi-instance scope). Overwrites any
+// prior entry for the same sessionID (last-write wins — claude.exe restart
+// in the same VSCode tab produces a new PID with the same session_id).
+// Returns a copy of the stored entry. The caller (HTTP handler) maps a
+// validation error to 400.
 //
 // Validation: empty sessionID and pid < 5 (Windows kernel reserves 0-4:
 // System Idle, System, secure System) return an error. The handler also
 // rejects these to fail fast, but this internal guard ensures tests and
-// future internal callers can't accidentally store a poison PID.
-func (s *State) RecordSessionPid(sessionID string, pid uint32) (*SessionPid, error) {
+// future internal callers can't accidentally store a poison PID. windowID
+// is accepted as-is (caller-controlled opaque string) — no validation.
+func (s *State) RecordSessionPidWithWindow(sessionID string, pid uint32, windowID string) (*SessionPid, error) {
 	if sessionID == "" {
 		return nil, errors.New("session_id is required")
 	}
@@ -788,7 +808,12 @@ func (s *State) RecordSessionPid(sessionID string, pid uint32) (*SessionPid, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	entry := &SessionPid{PID: pid, RegisteredAt: s.now()}
+	entry := &SessionPid{
+		PID:          pid,
+		RegisteredAt: s.now(),
+		SessionID:    sessionID,
+		WindowID:     windowID,
+	}
 	s.sessionPids[sessionID] = entry
 
 	// Evict oldest entry if above cap. Mirrors the heartbeat eviction pattern.
@@ -808,6 +833,163 @@ func (s *State) RecordSessionPid(sessionID string, pid uint32) (*SessionPid, err
 
 	clone := *entry
 	return &clone, nil
+}
+
+// FindSessionPidByWindow searches sessionPids for an entry whose WindowID
+// matches windowID. Returns the first match (map iteration order is
+// unstable, but only one entry per window is the FM-9 invariant — callers
+// must enforce this via single-claude rejection). The entry for
+// excludeSessionID is skipped to allow re-registration of the same session
+// (claude.exe restart in the same VS Code tab).
+//
+// Returns the cloned entry and the session_id it is stored under. When no
+// match exists or windowID is empty, returns (nil, "", false).
+//
+// **Race safety:** this method takes RLock only. Callers that need to
+// check-then-write atomically must use EnforceWindowAndRecordPid instead —
+// the split read+write here exposes a TOCTOU race under concurrent
+// register-pid traffic (Sonnet finding 2026-05-22).
+func (s *State) FindSessionPidByWindow(windowID, excludeSessionID string) (*SessionPid, string, bool) {
+	if windowID == "" {
+		return nil, "", false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for sid, entry := range s.sessionPids {
+		if sid == excludeSessionID {
+			continue
+		}
+		if entry.WindowID == windowID {
+			clone := *entry
+			return &clone, sid, true
+		}
+	}
+	return nil, "", false
+}
+
+// EnforceWindowResult captures the outcome of EnforceWindowAndRecordPid.
+// Exactly one of {Stored, Conflict} is non-nil per call.
+//
+// FM-9 P1.2 invariant (Sonnet 2026-05-22 fix): the entire check-then-write
+// sequence runs under a single State.mu.Lock, so two concurrent callers
+// for the same windowID can never both observe "no conflict" and both
+// store. The second caller always sees the first caller's write.
+type EnforceWindowResult struct {
+	// Stored is the newly stored entry when no live conflict was detected
+	// (and either no conflict existed, or the conflict was stale and got
+	// evicted in the same critical section). Nil when Conflict is non-nil.
+	Stored *SessionPid
+
+	// Conflict is a clone of the live conflicting entry when the caller
+	// must reject (different session, same window_id, PID still alive
+	// per livenessCheck). Nil when Stored is non-nil.
+	Conflict *SessionPid
+
+	// ConflictSID is the session_id under which Conflict is stored.
+	// Empty when Conflict is nil.
+	ConflictSID string
+
+	// EvictedStale is true when a stale conflict (different session,
+	// same window_id, livenessCheck returned false) was evicted before
+	// storing the new entry. Caller can log this for observability.
+	EvictedStale bool
+
+	// EvictedPID is the PID of the evicted stale entry, when EvictedStale
+	// is true. Zero otherwise.
+	EvictedPID uint32
+}
+
+// EnforceWindowAndRecordPid is the atomic FM-9 compound: find existing
+// entry by windowID, evaluate liveness via the caller-supplied callback,
+// then either reject (live conflict) or store (no conflict / stale
+// conflict). All operations run under a single write lock.
+//
+// Semantics:
+//
+//  1. windowID == "" — no enforcement; same as RecordSessionPidWithWindow
+//     with empty windowID. Returns Stored.
+//  2. No existing entry for windowID (excluding sessionID) — stores and
+//     returns Stored.
+//  3. Existing entry for windowID under SAME sessionID — overwrite
+//     (re-registration; claude.exe restart in same VS Code tab). Stored.
+//  4. Existing entry for windowID under DIFFERENT sessionID:
+//     a. livenessCheck(existing.PID) returns true → Conflict (caller
+//        decides 409 vs WARN based on env flags).
+//     b. livenessCheck(existing.PID) returns false → evict the stale
+//        entry, store the new one, set EvictedStale=true. Stored.
+//
+// livenessCheck is invoked under the State write lock. It must NOT
+// re-enter the State (would deadlock); a syscall like Windows
+// OpenProcess+GetExitCodeProcess is safe.
+//
+// Returns a validation error (with no other field populated) when
+// sessionID is empty or pid < 5, matching RecordSessionPidWithWindow.
+func (s *State) EnforceWindowAndRecordPid(
+	sessionID string, pid uint32, windowID string,
+	livenessCheck func(pid uint32) bool,
+) (*EnforceWindowResult, error) {
+	if sessionID == "" {
+		return nil, errors.New("session_id is required")
+	}
+	if pid < 5 {
+		return nil, fmt.Errorf("pid %d is reserved (Windows kernel reserves 0-4)", pid)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result := &EnforceWindowResult{}
+
+	if windowID != "" {
+		for sid, existing := range s.sessionPids {
+			if sid == sessionID {
+				continue
+			}
+			if existing.WindowID != windowID {
+				continue
+			}
+			// Different session, same window — evaluate liveness.
+			if livenessCheck != nil && livenessCheck(existing.PID) {
+				clone := *existing
+				result.Conflict = &clone
+				result.ConflictSID = sid
+				return result, nil
+			}
+			// Stale entry — evict and fall through to store.
+			result.EvictedStale = true
+			result.EvictedPID = existing.PID
+			delete(s.sessionPids, sid)
+			break // FM-9 invariant: only one entry per windowID.
+		}
+	}
+
+	entry := &SessionPid{
+		PID:          pid,
+		RegisteredAt: s.now(),
+		SessionID:    sessionID,
+		WindowID:     windowID,
+	}
+	s.sessionPids[sessionID] = entry
+
+	// Same eviction logic as RecordSessionPidWithWindow — drop oldest if
+	// at cap. Mirrors the heartbeat eviction pattern.
+	if len(s.sessionPids) > MaxSessionPidsCached {
+		var oldestSID string
+		var oldestAt time.Time
+		for sid, existing := range s.sessionPids {
+			if oldestSID == "" || existing.RegisteredAt.Before(oldestAt) {
+				oldestSID = sid
+				oldestAt = existing.RegisteredAt
+			}
+		}
+		if oldestSID != "" && oldestSID != sessionID {
+			delete(s.sessionPids, oldestSID)
+		}
+	}
+
+	clone := *entry
+	result.Stored = &clone
+	return result, nil
 }
 
 // GetSessionPid returns the PID registered for sessionID, or (nil, false)

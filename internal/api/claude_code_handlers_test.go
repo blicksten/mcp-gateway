@@ -714,3 +714,210 @@ func TestUnfreezeExecTimeoutDropsRegistration(t *testing.T) {
 	rr2 := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/unfreeze", "", body, ccTestBearer)
 	assert.Equal(t, http.StatusNotFound, rr2.Code)
 }
+
+// --- FM-9 multi-instance hard-limit tests (P1.2 2026-05-22) ---
+
+// TestRegisterPidWithWindowID_HappyPath — backward-compat path:
+// window_id supplied, no prior entry, gateway stores it and returns 200.
+// The stored entry retains both session_id and window_id for the FM-9
+// reverse-lookup invariant.
+func TestRegisterPidWithWindowID_HappyPath(t *testing.T) {
+	srv, ps := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	body := map[string]any{
+		"session_id": "sess-fm9-1",
+		"pid":        uint32(13579),
+		"window_id":  "vscode-window-42",
+	}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/register-pid", "", body, ccTestBearer)
+	require.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
+
+	stored, ok := ps.GetSessionPid("sess-fm9-1")
+	require.True(t, ok, "patchState must hold the registered PID")
+	assert.Equal(t, uint32(13579), stored.PID)
+	assert.Equal(t, "vscode-window-42", stored.WindowID)
+	assert.Equal(t, "sess-fm9-1", stored.SessionID)
+}
+
+// TestRegisterPidWithWindowID_DuplicateLive_Enforced — feature-flag ON:
+// when MCP_GATEWAY_ENFORCE_SINGLE_CLAUDE=1 and a live PID is already
+// registered for the same window_id from a different session, the new
+// registration is rejected with 409.
+func TestRegisterPidWithWindowID_DuplicateLive_Enforced(t *testing.T) {
+	t.Setenv("MCP_GATEWAY_ENFORCE_SINGLE_CLAUDE", "1")
+	t.Setenv("MCP_GATEWAY_ALLOW_MULTI_INSTANCE", "")
+
+	srv, ps := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	// Pre-seed an existing live registration for window "win-X".
+	_, err := ps.RecordSessionPidWithWindow("sess-existing", uint32(11111), "win-X")
+	require.NoError(t, err)
+
+	body := map[string]any{
+		"session_id": "sess-newcomer",
+		"pid":        uint32(22222),
+		"window_id":  "win-X",
+	}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/register-pid", "", body, ccTestBearer)
+	require.Equal(t, http.StatusConflict, rr.Code, "body=%s", rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "another claude.exe")
+	assert.Contains(t, rr.Body.String(), "sess-existing")
+	assert.Contains(t, rr.Body.String(), "11111")
+
+	// Verify the original entry is intact and the newcomer was NOT stored.
+	existing, ok := ps.GetSessionPid("sess-existing")
+	require.True(t, ok)
+	assert.Equal(t, uint32(11111), existing.PID)
+
+	_, ok = ps.GetSessionPid("sess-newcomer")
+	assert.False(t, ok, "rejected newcomer must NOT have been stored")
+}
+
+// TestRegisterPidWithWindowID_DuplicateLive_LogOnlyByDefault — feature-flag
+// OFF (default): duplicate window_id is logged but NOT rejected. This is
+// the rollout default so the conflict frequency can be observed in
+// production logs before the hard cutover.
+func TestRegisterPidWithWindowID_DuplicateLive_LogOnlyByDefault(t *testing.T) {
+	// Explicitly unset both env vars to confirm default behaviour.
+	t.Setenv("MCP_GATEWAY_ENFORCE_SINGLE_CLAUDE", "")
+	t.Setenv("MCP_GATEWAY_ALLOW_MULTI_INSTANCE", "")
+
+	srv, ps := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	_, err := ps.RecordSessionPidWithWindow("sess-warn-existing", uint32(33333), "win-Y")
+	require.NoError(t, err)
+
+	body := map[string]any{
+		"session_id": "sess-warn-newcomer",
+		"pid":        uint32(44444),
+		"window_id":  "win-Y",
+	}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/register-pid", "", body, ccTestBearer)
+	require.Equal(t, http.StatusOK, rr.Code,
+		"log-only mode must accept the registration; body=%s", rr.Body.String())
+
+	// Both entries must be stored.
+	existing, ok := ps.GetSessionPid("sess-warn-existing")
+	require.True(t, ok)
+	assert.Equal(t, uint32(33333), existing.PID)
+
+	newcomer, ok := ps.GetSessionPid("sess-warn-newcomer")
+	require.True(t, ok)
+	assert.Equal(t, uint32(44444), newcomer.PID)
+}
+
+// TestRegisterPidWithWindowID_DuplicateDead_AllowsEvict — when the stored
+// PID no longer resolves to claude.exe, the entry is stale (claude.exe
+// exited / OS recycled the PID). Gateway evicts and accepts the new
+// registration even with enforcement enabled.
+func TestRegisterPidWithWindowID_DuplicateDead_AllowsEvict(t *testing.T) {
+	t.Setenv("MCP_GATEWAY_ENFORCE_SINGLE_CLAUDE", "1")
+	t.Setenv("MCP_GATEWAY_ALLOW_MULTI_INSTANCE", "")
+
+	srv, ps := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	// Pre-seed a stale registration: PID 55555 in window "win-Z".
+	_, err := ps.RecordSessionPidWithWindow("sess-stale", uint32(55555), "win-Z")
+	require.NoError(t, err)
+
+	// Mock the verifier to declare PID 55555 dead (does NOT resolve to
+	// claude.exe), while the newcomer's PID 66666 is still live.
+	mockVerifyPid(t, func(pid uint32) bool {
+		return pid != 55555
+	})
+
+	body := map[string]any{
+		"session_id": "sess-fresh",
+		"pid":        uint32(66666),
+		"window_id":  "win-Z",
+	}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/register-pid", "", body, ccTestBearer)
+	require.Equal(t, http.StatusOK, rr.Code,
+		"stale entry must be evicted and newcomer accepted; body=%s", rr.Body.String())
+
+	// Stale entry evicted.
+	_, ok := ps.GetSessionPid("sess-stale")
+	assert.False(t, ok, "stale entry must have been evicted")
+
+	// Newcomer stored.
+	fresh, ok := ps.GetSessionPid("sess-fresh")
+	require.True(t, ok)
+	assert.Equal(t, uint32(66666), fresh.PID)
+	assert.Equal(t, "win-Z", fresh.WindowID)
+}
+
+// TestRegisterPidWithWindowID_SameSessionReRegister — closing Sonnet
+// test-gap: a single session re-registering (claude.exe restart in the
+// same VS Code tab produces a new PID for the same session_id) must NOT
+// be rejected under enforcement. The excludeSessionID parameter in
+// EnforceWindowAndRecordPid is what makes this safe.
+func TestRegisterPidWithWindowID_SameSessionReRegister(t *testing.T) {
+	t.Setenv("MCP_GATEWAY_ENFORCE_SINGLE_CLAUDE", "1")
+	t.Setenv("MCP_GATEWAY_ALLOW_MULTI_INSTANCE", "")
+
+	srv, ps := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	// First registration — same session_id + window_id, PID 10001.
+	body1 := map[string]any{
+		"session_id": "sess-restart",
+		"pid":        uint32(10001),
+		"window_id":  "win-restart",
+	}
+	rr1 := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/register-pid", "", body1, ccTestBearer)
+	require.Equal(t, http.StatusOK, rr1.Code, "first registration must succeed; body=%s", rr1.Body.String())
+
+	// Second registration with SAME session_id but new PID 10002 — must
+	// overwrite cleanly even under enforcement (it's a restart, not a duplicate).
+	body2 := map[string]any{
+		"session_id": "sess-restart",
+		"pid":        uint32(10002),
+		"window_id":  "win-restart",
+	}
+	rr2 := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/register-pid", "", body2, ccTestBearer)
+	require.Equal(t, http.StatusOK, rr2.Code,
+		"same-session re-registration must NOT 409 under enforcement; body=%s", rr2.Body.String())
+
+	stored, ok := ps.GetSessionPid("sess-restart")
+	require.True(t, ok)
+	assert.Equal(t, uint32(10002), stored.PID,
+		"second registration must have overwritten the first")
+}
+
+// TestRegisterPidWithWindowID_BypassEnv — MCP_GATEWAY_ALLOW_MULTI_INSTANCE
+// fully bypasses the FM-9 check regardless of MCP_GATEWAY_ENFORCE_SINGLE_CLAUDE.
+// Used by pipeline sub-claude and operator override scenarios.
+func TestRegisterPidWithWindowID_BypassEnv(t *testing.T) {
+	t.Setenv("MCP_GATEWAY_ENFORCE_SINGLE_CLAUDE", "1")
+	t.Setenv("MCP_GATEWAY_ALLOW_MULTI_INSTANCE", "1")
+
+	srv, ps := setupClaudeCodeServer(t)
+	h := srv.Handler()
+
+	// Pre-seed a live duplicate — under enforcement this would 409, but the
+	// bypass env trumps the check entirely.
+	_, err := ps.RecordSessionPidWithWindow("sess-bypass-existing", uint32(77777), "win-B")
+	require.NoError(t, err)
+
+	body := map[string]any{
+		"session_id": "sess-bypass-newcomer",
+		"pid":        uint32(88888),
+		"window_id":  "win-B",
+	}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/register-pid", "", body, ccTestBearer)
+	require.Equal(t, http.StatusOK, rr.Code,
+		"ALLOW_MULTI_INSTANCE=1 must bypass enforcement; body=%s", rr.Body.String())
+
+	// Both entries coexist under bypass — graceful no-op of FM-9.
+	existing, ok := ps.GetSessionPid("sess-bypass-existing")
+	require.True(t, ok)
+	assert.Equal(t, uint32(77777), existing.PID)
+
+	newcomer, ok := ps.GetSessionPid("sess-bypass-newcomer")
+	require.True(t, ok)
+	assert.Equal(t, uint32(88888), newcomer.PID)
+}

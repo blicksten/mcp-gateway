@@ -616,3 +616,126 @@ func TestRemoveSessionPidIfPid_CASSemantics(t *testing.T) {
 	removed = s.RemoveSessionPidIfPid("unknown", 1000)
 	assert.False(t, removed, "unknown session must return false")
 }
+
+// --- FM-9 EnforceWindowAndRecordPid tests (P1.2 Sonnet fix-in-cycle 2026-05-22) ---
+
+// TestEnforceWindow_NoConflict_Stores — basic path: empty registry, store
+// new entry with window_id, no conflict.
+func TestEnforceWindow_NoConflict_Stores(t *testing.T) {
+	s, _ := newTestState(t, "")
+	live := func(uint32) bool { return true }
+
+	res, err := s.EnforceWindowAndRecordPid("sess-1", 12345, "win-A", live)
+	require.NoError(t, err)
+	require.NotNil(t, res.Stored)
+	assert.Nil(t, res.Conflict)
+	assert.False(t, res.EvictedStale)
+	assert.Equal(t, uint32(12345), res.Stored.PID)
+	assert.Equal(t, "win-A", res.Stored.WindowID)
+}
+
+// TestEnforceWindow_LiveConflict_ReturnsConflict — different session,
+// same window_id, live PID → returns Conflict, no store.
+func TestEnforceWindow_LiveConflict_ReturnsConflict(t *testing.T) {
+	s, _ := newTestState(t, "")
+	live := func(uint32) bool { return true }
+
+	_, err := s.RecordSessionPidWithWindow("sess-existing", 11111, "win-X")
+	require.NoError(t, err)
+
+	res, err := s.EnforceWindowAndRecordPid("sess-newcomer", 22222, "win-X", live)
+	require.NoError(t, err)
+	require.NotNil(t, res.Conflict)
+	assert.Nil(t, res.Stored)
+	assert.Equal(t, "sess-existing", res.ConflictSID)
+	assert.Equal(t, uint32(11111), res.Conflict.PID)
+
+	// New entry must NOT have been stored.
+	_, ok := s.GetSessionPid("sess-newcomer")
+	assert.False(t, ok, "rejected newcomer must not be stored")
+}
+
+// TestEnforceWindow_StaleConflict_EvictsAndStores — different session,
+// same window_id, dead PID → evicts stale, stores new.
+func TestEnforceWindow_StaleConflict_EvictsAndStores(t *testing.T) {
+	s, _ := newTestState(t, "")
+	live := func(pid uint32) bool { return pid != 55555 } // 55555 declared dead
+
+	_, err := s.RecordSessionPidWithWindow("sess-stale", 55555, "win-Z")
+	require.NoError(t, err)
+
+	res, err := s.EnforceWindowAndRecordPid("sess-fresh", 66666, "win-Z", live)
+	require.NoError(t, err)
+	require.NotNil(t, res.Stored)
+	assert.Nil(t, res.Conflict)
+	assert.True(t, res.EvictedStale)
+	assert.Equal(t, uint32(55555), res.EvictedPID)
+
+	_, ok := s.GetSessionPid("sess-stale")
+	assert.False(t, ok, "stale entry must be evicted")
+	got, ok := s.GetSessionPid("sess-fresh")
+	require.True(t, ok)
+	assert.Equal(t, uint32(66666), got.PID)
+}
+
+// TestEnforceWindow_SameSession_Overwrites — re-registration: same session,
+// new PID, same window — overwrite unconditionally (claude.exe restart).
+func TestEnforceWindow_SameSession_Overwrites(t *testing.T) {
+	s, _ := newTestState(t, "")
+	live := func(uint32) bool { return true }
+
+	_, err := s.RecordSessionPidWithWindow("sess-restart", 10001, "win-R")
+	require.NoError(t, err)
+
+	res, err := s.EnforceWindowAndRecordPid("sess-restart", 10002, "win-R", live)
+	require.NoError(t, err)
+	require.NotNil(t, res.Stored)
+	assert.Nil(t, res.Conflict)
+	assert.False(t, res.EvictedStale, "same-session re-register is not an eviction")
+	assert.Equal(t, uint32(10002), res.Stored.PID)
+}
+
+// TestEnforceWindow_ConcurrentSameWindow_OneWins — closes the Sonnet
+// HIGH-1 finding (TOCTOU race fix). Many goroutines call
+// EnforceWindowAndRecordPid in parallel for the SAME window_id with
+// DIFFERENT session_ids; under the compound write-lock atomicity, exactly
+// one must win (Stored != nil) and all others must observe a Conflict.
+//
+// Run with `go test -race` to catch any residual data race in the
+// State write-path.
+func TestEnforceWindow_ConcurrentSameWindow_OneWins(t *testing.T) {
+	s, _ := newTestState(t, "")
+	live := func(uint32) bool { return true }
+
+	const N = 8
+	var wg sync.WaitGroup
+	results := make([]*EnforceWindowResult, N)
+
+	wg.Add(N)
+	for i := range N {
+		go func(i int) {
+			defer wg.Done()
+			sid := "sess-concurrent-" + string(rune('A'+i))
+			pid := uint32(20000 + i)
+			res, err := s.EnforceWindowAndRecordPid(sid, pid, "win-CONCURRENT", live)
+			require.NoError(t, err)
+			results[i] = res
+		}(i)
+	}
+	wg.Wait()
+
+	wins := 0
+	conflicts := 0
+	for _, r := range results {
+		switch {
+		case r.Stored != nil && r.Conflict == nil:
+			wins++
+		case r.Conflict != nil && r.Stored == nil:
+			conflicts++
+		default:
+			t.Fatalf("invalid result: %+v", r)
+		}
+	}
+	assert.Equal(t, 1, wins, "exactly one goroutine must win the window")
+	assert.Equal(t, N-1, conflicts, "every other goroutine must see a Conflict")
+}

@@ -529,9 +529,17 @@ func (s *Server) handleClaudeCodeProbeResult(w http.ResponseWriter, r *http.Requ
 // Sent by hooks/statusline.mjs once per session (idempotency marker file
 // `~/.claude/sessions/<sid>.pid-registered` prevents repeat posts on the
 // client side).
+//
+// WindowID (FM-9 multi-instance scope, P1.2 2026-05-22) is the VS Code
+// window identifier supplied by the statusline hook (typically
+// `process.env.VSCODE_PID` or extension-injected `VSCODE_WINDOW_ID`). When
+// present, the gateway enforces "1 claude.exe per VS Code window"
+// (governed by MCP_GATEWAY_ENFORCE_SINGLE_CLAUDE — see handler). Empty
+// when claude.exe is launched outside VS Code; gateway gracefully no-ops.
 type registerPidRequest struct {
 	SessionID string `json:"session_id"`
 	PID       uint32 `json:"pid"`
+	WindowID  string `json:"window_id,omitempty"`
 }
 
 type registerPidResponse struct {
@@ -584,10 +592,92 @@ func (s *Server) handleClaudeCodeRegisterPid(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
-	if _, err := s.patchState.RecordSessionPid(req.SessionID, req.PID); err != nil {
+
+	// FM-9 multi-instance hard-limit (P1.2 2026-05-22). When a window_id is
+	// supplied AND there is an existing live entry for the same window_id
+	// from a DIFFERENT session, gateway enforces "1 claude.exe per VS Code
+	// window" per ADR-002.
+	//
+	// Atomic check-then-store via EnforceWindowAndRecordPid resolves the
+	// TOCTOU race between the prior split FindSessionPidByWindow +
+	// RecordSessionPidWithWindow path (Sonnet code-reviewer 2026-05-22:
+	// HIGH-1). Both find + write run under a single State write lock.
+	//
+	// Liveness check reuses verifyClaudeExePidFunc — if the stored PID no
+	// longer resolves to claude.exe it is stale (claude.exe exited; the
+	// rare PID-recycle false-positive is bounded by Windows' sequential-
+	// ascending PID assignment and the absence of a TTL on sessionPids
+	// only matters for entries past 24h, which any normal session will
+	// have re-registered). Stale entries are evicted in the same critical
+	// section that stores the new one.
+	//
+	// Bypass mechanisms:
+	//   - env MCP_GATEWAY_ALLOW_MULTI_INSTANCE=1 — full bypass (CI / pipeline
+	//     sub-claude / operator override). Equivalent to feature OFF.
+	//   - env MCP_GATEWAY_ENFORCE_SINGLE_CLAUDE not "1" — log-only mode
+	//     (default). We emit a WARN and proceed so the rollout can observe
+	//     real conflict frequency before the hard cutover.
+	//   - req.WindowID == "" — graceful no-op (terminal launch, non-VS-Code
+	//     IDE, statusline hook predating window_id support).
+	bypass := req.WindowID == "" || os.Getenv("MCP_GATEWAY_ALLOW_MULTI_INSTANCE") == "1"
+	if bypass {
+		// Bypass path: behave like classic RecordSessionPidWithWindow.
+		if _, err := s.patchState.RecordSessionPidWithWindow(req.SessionID, req.PID, req.WindowID); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, registerPidResponse{Stored: true})
+		return
+	}
+
+	enforce := os.Getenv("MCP_GATEWAY_ENFORCE_SINGLE_CLAUDE") == "1"
+
+	res, err := s.patchState.EnforceWindowAndRecordPid(
+		req.SessionID, req.PID, req.WindowID, verifyClaudeExePidFunc,
+	)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	if res.Conflict != nil {
+		if enforce {
+			s.logger.Warn("multi-claude rejected at register-pid",
+				"window_id", req.WindowID,
+				"existing_pid", res.Conflict.PID,
+				"existing_session", res.ConflictSID,
+				"new_pid", req.PID,
+				"new_session", req.SessionID,
+			)
+			writeError(w, http.StatusConflict, fmt.Sprintf(
+				"another claude.exe (pid %d, session %s) is already running in this VS Code window. Open a new window for parallel claude.exe sessions, or set MCP_GATEWAY_ALLOW_MULTI_INSTANCE=1 to disable enforcement.",
+				res.Conflict.PID, res.ConflictSID))
+			return
+		}
+		// Log-only mode: the conflict was detected but the new entry was
+		// NOT stored by EnforceWindowAndRecordPid (it returned the conflict
+		// without storing). We must store it ourselves to preserve the
+		// pre-FM-9 behaviour (last-write-wins under default flags).
+		s.logger.Warn("multi-claude detected (log-only; set MCP_GATEWAY_ENFORCE_SINGLE_CLAUDE=1 to enforce)",
+			"window_id", req.WindowID,
+			"existing_pid", res.Conflict.PID,
+			"existing_session", res.ConflictSID,
+			"new_pid", req.PID,
+			"new_session", req.SessionID,
+		)
+		if _, err := s.patchState.RecordSessionPidWithWindow(req.SessionID, req.PID, req.WindowID); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	} else if res.EvictedStale {
+		s.logger.Info("multi-claude evicted stale entry",
+			"window_id", req.WindowID,
+			"evicted_pid", res.EvictedPID,
+			"new_pid", req.PID,
+			"new_session", req.SessionID,
+		)
+	}
+
 	writeJSON(w, http.StatusOK, registerPidResponse{Stored: true})
 }
 
