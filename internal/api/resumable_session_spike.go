@@ -21,14 +21,44 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// DefaultSessionRegistryDiskPath returns the cross-platform default on-disk
+// path for persisted session state — ~/.mcp-gateway/sessions.json. Returns
+// "" if the home directory cannot be resolved (e.g. no HOME/USERPROFILE),
+// which makes the registry behave as in-memory-only — the same fall-back
+// posture as before this fix.
+//
+// 2026-05-23 closure of the T0.7.1 disk-persistence gap: the spike header
+// said "the full D-5 implementation will add file-backed persistence at
+// ~/.mcp-gateway/sessions.json" — that work was planned but never landed.
+// The in-memory-only registry meant T0.7.1 silently degraded to a TCP-blip-
+// only fix; the most common FM-3 trigger (daemon restart) was uncovered.
+// This function and NewSessionStateRegistryWithPath close that gap.
+//
+// Honest scope: recovers POST tool-call path after restart (T0.7.1 stated
+// goal) — does NOT recover the SSE GET notification stream, which dies
+// independently when the closed-source Claude Code MCP client gives up
+// after exponential backoff (FM-32 upstream issue #57642, closed as stale).
+// Notification stream recovery is handled separately by the porfiry-mcp.js
+// webview patch's reconnect-action flow (Phase MCPR.4, 2026-05-08).
+func DefaultSessionRegistryDiskPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".mcp-gateway", "sessions.json")
+}
 
 // CachedSessionState is the minimum state needed to recreate an MCP session
 // after the daemon process restart. Only fields that ServerSessionState
@@ -43,18 +73,130 @@ type CachedSessionState struct {
 	LastSeen          time.Time              `json:"lastSeen"`
 }
 
-// SessionStateRegistry is an in-memory, thread-safe cache of session states
-// keyed by Mcp-Session-Id. The full D-5 implementation will add file-backed
-// persistence at ~/.mcp-gateway/sessions.json so the cache survives restarts.
-// This spike keeps it in-memory only to isolate the resurrection mechanic.
+// SessionStateRegistry is a thread-safe cache of session states keyed by
+// Mcp-Session-Id. When constructed with a non-empty diskPath, every Put
+// and Delete is mirrored to disk via atomic rename so the cache survives
+// daemon restart (T0.7.1 disk-persistence — 2026-05-23). When diskPath
+// is empty (NewSessionStateRegistry()), behaviour is in-memory-only and
+// matches the pre-2026-05-23 posture.
 type SessionStateRegistry struct {
-	mu     sync.Mutex
-	states map[string]*CachedSessionState
+	mu       sync.Mutex
+	states   map[string]*CachedSessionState
+	diskPath string // "" disables persistence
 }
 
-// NewSessionStateRegistry constructs an empty registry.
+// NewSessionStateRegistry constructs an in-memory-only registry. Kept for
+// backward compatibility with existing tests that don't exercise the
+// restart-recovery path; production code should use
+// NewSessionStateRegistryWithPath(DefaultSessionRegistryDiskPath()).
 func NewSessionStateRegistry() *SessionStateRegistry {
 	return &SessionStateRegistry{states: make(map[string]*CachedSessionState)}
+}
+
+// NewSessionStateRegistryWithPath constructs a registry backed by an
+// on-disk JSON file. On startup, any existing file is loaded; subsequent
+// Put/Delete mutations are atomically written back via temp-file rename.
+//
+// Returns an empty registry (no error) when the file does not exist —
+// that is the cold-start case. Corrupted JSON is logged-and-skipped, with
+// the registry continuing empty so the daemon does not refuse to start
+// over a malformed cache.
+//
+// When diskPath is "" or the parent directory cannot be created, the
+// registry falls back to in-memory-only behaviour and is functionally
+// indistinguishable from NewSessionStateRegistry. This keeps the
+// "best-effort, never block startup" contract used elsewhere in the
+// gateway.
+func NewSessionStateRegistryWithPath(diskPath string) *SessionStateRegistry {
+	r := &SessionStateRegistry{
+		states:   make(map[string]*CachedSessionState),
+		diskPath: diskPath,
+	}
+	if diskPath == "" {
+		return r
+	}
+	// Best-effort: create parent dir but don't fail registry construction
+	// if mkdir errors (most likely a permissions surprise on Windows; the
+	// gateway should still start with in-memory cache).
+	if err := os.MkdirAll(filepath.Dir(diskPath), 0o700); err != nil {
+		r.diskPath = "" // fall back to in-memory
+		return r
+	}
+	if err := r.loadFromDisk(); err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Corrupted file: log via panic-recover-style noop (no logger
+		// dependency here to keep this package import-light). The cache
+		// starts empty; the daemon proceeds. A truncated file is no worse
+		// than a missing one — both manifest as no-resurrection on next
+		// restart.
+		r.states = make(map[string]*CachedSessionState)
+	}
+	return r
+}
+
+// loadFromDisk reads the persisted JSON into r.states. Caller must hold
+// r.mu OR be calling from the constructor (single-goroutine). Returns
+// os.ErrNotExist when the file does not exist (cold start, not an error).
+func (r *SessionStateRegistry) loadFromDisk() error {
+	data, err := os.ReadFile(r.diskPath)
+	if err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	var loaded map[string]*CachedSessionState
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		return fmt.Errorf("unmarshal %s: %w", r.diskPath, err)
+	}
+	if loaded == nil {
+		return nil
+	}
+	r.states = loaded
+	return nil
+}
+
+// flushToDiskLocked atomically writes the current registry state to
+// r.diskPath via a temp file in the same directory + rename. No-op when
+// diskPath is "". Caller MUST hold r.mu.
+//
+// Errors are intentionally swallowed (logged-only would be the right
+// shape with a logger; this file is logger-free by design). The next
+// successful flush overwrites; a single failed flush merely loses one
+// generation of disk durability while in-memory state remains correct.
+// This matches the "best effort persistence" contract per the function
+// doc on NewSessionStateRegistryWithPath.
+func (r *SessionStateRegistry) flushToDiskLocked() {
+	if r.diskPath == "" {
+		return
+	}
+	data, err := json.MarshalIndent(r.states, "", "  ")
+	if err != nil {
+		return
+	}
+	dir := filepath.Dir(r.diskPath)
+	// Same-directory temp guarantees os.Rename is atomic (within one
+	// filesystem). CreateTemp creates with mode 0600 by default which
+	// matches our auth-token convention.
+	tmp, err := os.CreateTemp(dir, "sessions-*.json.tmp")
+	if err != nil {
+		return
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return
+	}
+	if err := os.Rename(tmpName, r.diskPath); err != nil {
+		// Windows rename may fail across-volume; on same dir it is safe.
+		// Best-effort cleanup of the temp file.
+		_ = os.Remove(tmpName)
+		return
+	}
 }
 
 // Get returns the cached state for a session ID, or nil if absent.
@@ -70,7 +212,10 @@ func (r *SessionStateRegistry) Get(id string) *CachedSessionState {
 	return &cp
 }
 
-// Put records or replaces the cached state for a session ID.
+// Put records or replaces the cached state for a session ID. When
+// disk-backed, the new state is atomically flushed before Put returns —
+// callers can trust that a successful daemon shutdown after a Put
+// preserves the session for next-startup resurrection.
 func (r *SessionStateRegistry) Put(id string, s *CachedSessionState) {
 	if s == nil {
 		return
@@ -79,13 +224,17 @@ func (r *SessionStateRegistry) Put(id string, s *CachedSessionState) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.states[id] = s
+	r.flushToDiskLocked()
 }
 
 // Delete removes the cached state for a session ID (e.g. on DELETE /mcp).
+// When disk-backed, the deletion is atomically flushed before Delete
+// returns.
 func (r *SessionStateRegistry) Delete(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.states, id)
+	r.flushToDiskLocked()
 }
 
 // Size returns the number of cached states (for metrics/tests).

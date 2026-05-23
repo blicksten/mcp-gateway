@@ -198,7 +198,12 @@ func NewServer(
 		adminToken:      authCfg.AdminToken,
 		adminEnabled:    authCfg.AdminEnabled,
 		version:         version,
-		sessionRegistry: NewSessionStateRegistry(),
+		// T0.7.1 disk persistence (2026-05-23): registry survives daemon
+		// restart. When DefaultSessionRegistryDiskPath() returns "" (no
+		// resolvable home dir), the registry silently falls back to
+		// in-memory-only — same behaviour as before this fix, no startup
+		// regression risk.
+		sessionRegistry: NewSessionStateRegistryWithPath(DefaultSessionRegistryDiskPath()),
 	}
 }
 

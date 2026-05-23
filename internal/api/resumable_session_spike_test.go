@@ -7,7 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,6 +49,158 @@ func TestSessionStateRegistry_PutGetDelete(t *testing.T) {
 	r.Delete("sid-1")
 	assert.Equal(t, 0, r.Size())
 	assert.Nil(t, r.Get("sid-1"))
+}
+
+// --- disk persistence (T0.7.1 closure 2026-05-23) ---------------------------
+
+// makeTestState returns a deterministic state for persistence-roundtrip tests.
+func makeTestState(client, version string) *CachedSessionState {
+	return &CachedSessionState{
+		InitializeParams: &mcp.InitializeParams{
+			ProtocolVersion: "2025-06-18",
+			ClientInfo:      &mcp.Implementation{Name: client, Version: version},
+		},
+		LogLevel: "info",
+		UserID:   "u-" + client,
+	}
+}
+
+// Put → New(load) → Get yields the same state with LastSeen preserved. The
+// roundtrip is the core acceptance for T0.7.1's stated goal "registry
+// survives daemon restart".
+func TestSessionStateRegistry_PersistenceRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	r1 := NewSessionStateRegistryWithPath(path)
+	r1.Put("sid-A", makeTestState("alpha", "1.0"))
+	r1.Put("sid-B", makeTestState("beta", "2.0"))
+	require.Equal(t, 2, r1.Size())
+
+	// File must exist after Put (atomic flush is synchronous).
+	_, statErr := os.Stat(path)
+	require.NoError(t, statErr, "Put must flush to disk synchronously")
+
+	// Simulate daemon restart: new registry, same path, expect the same state.
+	r2 := NewSessionStateRegistryWithPath(path)
+	require.Equal(t, 2, r2.Size(), "post-restart registry must rehydrate Size")
+
+	a := r2.Get("sid-A")
+	require.NotNil(t, a)
+	assert.Equal(t, "alpha", a.InitializeParams.ClientInfo.Name)
+	assert.Equal(t, "u-alpha", a.UserID)
+	assert.False(t, a.LastSeen.IsZero(), "LastSeen must round-trip through disk")
+
+	b := r2.Get("sid-B")
+	require.NotNil(t, b)
+	assert.Equal(t, "beta", b.InitializeParams.ClientInfo.Name)
+}
+
+// Delete must remove from disk too — otherwise a deleted session would be
+// resurrected on next startup, contradicting MCP DELETE /mcp semantics.
+func TestSessionStateRegistry_PersistenceDelete(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	r1 := NewSessionStateRegistryWithPath(path)
+	r1.Put("sid-A", makeTestState("alpha", "1.0"))
+	r1.Put("sid-B", makeTestState("beta", "2.0"))
+	r1.Delete("sid-A")
+
+	r2 := NewSessionStateRegistryWithPath(path)
+	assert.Equal(t, 1, r2.Size())
+	assert.Nil(t, r2.Get("sid-A"), "deleted session must not resurrect on restart")
+	require.NotNil(t, r2.Get("sid-B"))
+}
+
+// Concurrent Put from N goroutines: every state must end up in the on-disk
+// file with no corruption (atomic rename guarantees indivisible writes).
+// Validates the "best-effort, last writer wins" contract per Put doc.
+func TestSessionStateRegistry_PersistenceConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	r := NewSessionStateRegistryWithPath(path)
+	const N = 20
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			id := "concurrent-" + string(rune('A'+n))
+			r.Put(id, makeTestState(id, "v"))
+		}(i)
+	}
+	wg.Wait()
+
+	// File must be valid JSON after the contention storm.
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var got map[string]*CachedSessionState
+	require.NoError(t, json.Unmarshal(data, &got), "disk file must remain valid JSON under concurrent Put")
+	// Final state may have any subset depending on flush ordering, but in-memory
+	// AND on-disk must agree on the post-Wait snapshot.
+	r2 := NewSessionStateRegistryWithPath(path)
+	assert.Equal(t, r.Size(), r2.Size(), "post-restart Size must match in-memory Size")
+}
+
+// Empty diskPath disables persistence — same observable behaviour as
+// NewSessionStateRegistry(). Guards backward compat for tests that don't
+// want disk I/O.
+func TestSessionStateRegistry_EmptyPathInMemoryOnly(t *testing.T) {
+	r := NewSessionStateRegistryWithPath("")
+	r.Put("sid-X", makeTestState("x", "1.0"))
+	assert.Equal(t, 1, r.Size())
+	// No file should be written when path is empty — nothing to assert
+	// directly, but a follow-up constructor must not see the state.
+	r2 := NewSessionStateRegistryWithPath("")
+	assert.Equal(t, 0, r2.Size(), "second empty-path registry must be a fresh empty one")
+}
+
+// Corrupted JSON on disk: registry must boot empty (no panic), so the
+// daemon never refuses to start over a malformed cache.
+func TestSessionStateRegistry_CorruptedFileBootsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	require.NoError(t, os.WriteFile(path, []byte("not valid json {{{"), 0o600))
+
+	r := NewSessionStateRegistryWithPath(path)
+	assert.Equal(t, 0, r.Size(), "corrupted file must yield empty registry, not panic")
+
+	// Subsequent Put must work and overwrite the corrupted file.
+	r.Put("sid-recover", makeTestState("recover", "1.0"))
+	r2 := NewSessionStateRegistryWithPath(path)
+	assert.Equal(t, 1, r2.Size(), "post-corruption Put must be persisted on top")
+}
+
+// Missing file on disk is the cold-start case: registry boots empty with no
+// error, ready to accept the first Put.
+func TestSessionStateRegistry_MissingFileColdStart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nonexistent-subdir", "sessions.json")
+
+	r := NewSessionStateRegistryWithPath(path)
+	assert.Equal(t, 0, r.Size())
+
+	// Parent dir was auto-created by MkdirAll in constructor; first Put
+	// must succeed end-to-end.
+	r.Put("sid-cold", makeTestState("cold", "1.0"))
+	_, statErr := os.Stat(path)
+	require.NoError(t, statErr, "MkdirAll + first Put must produce the file")
+}
+
+// DefaultSessionRegistryDiskPath gracefully returns "" when home is
+// unresolvable (degrades to in-memory) — verified by best-effort cross-
+// platform probe: returns non-empty under normal test environments and
+// behaves correctly when used as a path.
+func TestDefaultSessionRegistryDiskPath_NonEmpty(t *testing.T) {
+	p := DefaultSessionRegistryDiskPath()
+	if p == "" {
+		t.Skip("home directory unresolvable in this environment — skip")
+	}
+	assert.True(t, filepath.IsAbs(p), "default path must be absolute")
+	assert.Contains(t, p, ".mcp-gateway", "default path should be under .mcp-gateway/")
+	assert.True(t, strings.HasSuffix(p, "sessions.json"), "default path filename should be sessions.json")
 }
 
 // --- body capture -----------------------------------------------------------
