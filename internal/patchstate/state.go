@@ -49,6 +49,12 @@ const (
 	HeartbeatTTL = 1 * time.Hour
 	// ActionTTL is the TTL for undelivered pending actions.
 	ActionTTL = 10 * time.Minute
+	// SessionPidTTL is the TTL for persisted SessionPid entries. Daemon
+	// restart followed by the ClaudeSessionBridge (or statusline) firing
+	// re-registers fresh entries; this TTL bounds how long a stale entry
+	// from a previous run can linger before being dropped at Load(). 24h
+	// matches the longest practical Claude Code session length.
+	SessionPidTTL = 24 * time.Hour
 	// ProbeTTL is the TTL for stored probe results.
 	ProbeTTL = 5 * time.Minute
 
@@ -209,11 +215,20 @@ func New(persistPath string, logger *slog.Logger) *State {
 	}
 }
 
-// persisted is the on-disk shape. actions and heartbeats are durable;
-// probes are ephemeral (5 min TTL is short enough that reload loss is fine).
+// persisted is the on-disk shape. actions, heartbeats, and session-pids
+// are durable; probes are ephemeral (5 min TTL is short enough that reload
+// loss is fine). SessionPids was added 2026-05-24 to fix Gap 1 of the
+// register-pid pipeline RCA — without persistence the (session_id ->
+// pid -> window_id) map disappears on every daemon restart, leaving
+// /unfreeze + FM-9 enforcement non-functional until a re-registration
+// arrives (which never came in practice — see spike-2026-05-23 §V2).
+// On load, entries older than SessionPidTTL are dropped; a "still alive
+// at boot" liveness check is deferred to handlers that already know how
+// to validate process existence (claude.exe verifier).
 type persisted struct {
-	Heartbeats map[string]*Heartbeat `json:"heartbeats"`
-	Actions    []*PendingAction      `json:"actions"`
+	Heartbeats  map[string]*Heartbeat  `json:"heartbeats"`
+	Actions     []*PendingAction       `json:"actions"`
+	SessionPids map[string]*SessionPid `json:"session_pids,omitempty"`
 }
 
 // Load reads persistPath (if set) and rehydrates state. Missing file is not
@@ -279,7 +294,25 @@ func (s *State) loadLocked() (bool, error) {
 		}
 		s.actions = append(s.actions, act)
 	}
-	s.logger.Info("patch-state loaded", "heartbeats", len(s.heartbeats), "actions", len(s.actions))
+	// Gap 1 fix (2026-05-24): rehydrate sessionPids from disk so /unfreeze +
+	// FM-9 enforcement survive daemon restart. Drop expired entries; cap at
+	// MaxSessionPidsCached defensively in case a corrupted file claims more.
+	for sid, sp := range p.SessionPids {
+		if sp == nil || sid == "" {
+			continue
+		}
+		if now.Sub(sp.RegisteredAt) > SessionPidTTL {
+			continue
+		}
+		if len(s.sessionPids) >= MaxSessionPidsCached {
+			break
+		}
+		s.sessionPids[sid] = sp
+	}
+	s.logger.Info("patch-state loaded",
+		"heartbeats", len(s.heartbeats),
+		"actions", len(s.actions),
+		"session_pids", len(s.sessionPids))
 	return true, nil
 }
 
@@ -706,8 +739,9 @@ func (s *State) persistAsync() {
 		defer s.persistMu.Unlock()
 		s.mu.RLock()
 		snap := persisted{
-			Heartbeats: make(map[string]*Heartbeat, len(s.heartbeats)),
-			Actions:    make([]*PendingAction, 0, len(s.actions)),
+			Heartbeats:  make(map[string]*Heartbeat, len(s.heartbeats)),
+			Actions:     make([]*PendingAction, 0, len(s.actions)),
+			SessionPids: make(map[string]*SessionPid, len(s.sessionPids)),
 		}
 		for sid, hb := range s.heartbeats {
 			clone := *hb
@@ -724,6 +758,12 @@ func (s *State) persistAsync() {
 			}
 			clone := *act
 			snap.Actions = append(snap.Actions, &clone)
+		}
+		// Gap 1 fix (2026-05-24): include sessionPids in the snapshot so
+		// (session_id -> pid -> window_id) survives daemon restart.
+		for sid, sp := range s.sessionPids {
+			clone := *sp
+			snap.SessionPids[sid] = &clone
 		}
 		s.mu.RUnlock()
 		if err := writeAtomic(s.persistPath, snap); err != nil {
@@ -807,7 +847,6 @@ func (s *State) RecordSessionPidWithWindow(sessionID string, pid uint32, windowI
 		return nil, fmt.Errorf("pid %d is reserved (Windows kernel reserves 0-4)", pid)
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	entry := &SessionPid{
 		PID:          pid,
 		RegisteredAt: s.now(),
@@ -832,6 +871,10 @@ func (s *State) RecordSessionPidWithWindow(sessionID string, pid uint32, windowI
 	}
 
 	clone := *entry
+	s.mu.Unlock()
+	// Gap 1 fix (2026-05-24): persist sessionPids so the (session_id ->
+	// pid -> window_id) map survives daemon restart.
+	s.persistAsync()
 	return &clone, nil
 }
 
@@ -936,7 +979,6 @@ func (s *State) EnforceWindowAndRecordPid(
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	result := &EnforceWindowResult{}
 
@@ -953,6 +995,8 @@ func (s *State) EnforceWindowAndRecordPid(
 				clone := *existing
 				result.Conflict = &clone
 				result.ConflictSID = sid
+				s.mu.Unlock()
+				// Conflict path skipped the mutation, no persist needed.
 				return result, nil
 			}
 			// Stale entry — evict and fall through to store.
@@ -989,6 +1033,10 @@ func (s *State) EnforceWindowAndRecordPid(
 
 	clone := *entry
 	result.Stored = &clone
+	s.mu.Unlock()
+	// Gap 1 fix (2026-05-24): persist sessionPids so /unfreeze + FM-9
+	// enforcement survive daemon restart.
+	s.persistAsync()
 	return result, nil
 }
 
@@ -1014,11 +1062,15 @@ func (s *State) GetSessionPid(sessionID string) (*SessionPid, bool) {
 // against the same session_id return 404 cleanly.
 func (s *State) RemoveSessionPid(sessionID string) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, ok := s.sessionPids[sessionID]; !ok {
+		s.mu.Unlock()
 		return false
 	}
 	delete(s.sessionPids, sessionID)
+	s.mu.Unlock()
+	// Gap 1 fix (2026-05-24): persist so the deletion survives restart and
+	// /unfreeze does not resurrect a stale entry on next boot.
+	s.persistAsync()
 	return true
 }
 
@@ -1037,12 +1089,15 @@ func (s *State) RemoveSessionPid(sessionID string) bool {
 // thinkdeep finding A-1.)
 func (s *State) RemoveSessionPidIfPid(sessionID string, expectedPID uint32) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	entry, ok := s.sessionPids[sessionID]
 	if !ok || entry.PID != expectedPID {
+		s.mu.Unlock()
 		return false
 	}
 	delete(s.sessionPids, sessionID)
+	s.mu.Unlock()
+	// Gap 1 fix (2026-05-24): persist the CAS-delete so it survives restart.
+	s.persistAsync()
 	return true
 }
 

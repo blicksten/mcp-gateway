@@ -30,6 +30,10 @@ import {
     createDefaultSiblingDetector,
     filterStaleSiblings,
 } from './sibling-detector';
+import {
+    type RespawnCoordinator,
+    createDefaultRespawnCoordinator,
+} from './respawn-coordinator';
 
 /** Kill function abstraction — production uses process.kill, tests inject a spy. */
 export type KillFn = (pid: number, signal?: NodeJS.Signals | number) => void;
@@ -73,6 +77,13 @@ export interface StalenessDetectorOptions {
         message: string,
         ...actions: string[]
     ) => Promise<string | undefined>;
+    /**
+     * Cross-window respawn coordinator (Path 1 of FM-33 spike). Default
+     * uses the temp-dir file-sentinel implementation. Tests inject a stub
+     * that returns 'won' or 'lost' deterministically. When the result is
+     * 'lost', the detector skips the user prompt for this respawn cycle.
+     */
+    respawnCoordinator?: RespawnCoordinator;
 }
 
 export function createDefaultStalenessDetector(
@@ -86,6 +97,7 @@ export function createDefaultStalenessDetector(
             opts?.promptUser ??
             ((message, ...actions) =>
                 Promise.resolve(vscode.window.showWarningMessage(message, ...actions))),
+        respawnCoordinator: opts?.respawnCoordinator ?? createDefaultRespawnCoordinator(),
     });
 }
 
@@ -102,6 +114,7 @@ class StalenessDetectorImpl implements StalenessDetector {
         message: string,
         ...actions: string[]
     ) => Promise<string | undefined>;
+    private readonly respawnCoordinator: RespawnCoordinator;
 
     /**
      * Tracks the started_at of the most recently observed live gateway. The
@@ -124,6 +137,7 @@ class StalenessDetectorImpl implements StalenessDetector {
         this.killFn = opts.killFn;
         this.autoKillEnabled = opts.autoKillEnabled;
         this.promptUser = opts.promptUser;
+        this.respawnCoordinator = opts.respawnCoordinator;
     }
 
     async noteHealth(health: HealthResponse | null): Promise<number> {
@@ -181,6 +195,22 @@ class StalenessDetectorImpl implements StalenessDetector {
         // re-prompt for the same PIDs.
         for (const s of stale) {
             this.handledPids.add(s.pid);
+        }
+        // Path 1 sentinel (FM-33 spike, Gap B): coordinate with sibling
+        // dashboard-extension instances across other VSCode windows so a
+        // single daemon respawn produces ONE user prompt, not N. The first
+        // detector to atomically create the per-startedAt sentinel file wins
+        // and keeps the existing prompt/kill path; losers observe the
+        // sentinel and skip the UI prompt (autoKill still runs locally — the
+        // kill action is idempotent and the gateway is the single source of
+        // truth for the surviving claude.exe).
+        const claim = this.respawnCoordinator.claim(gatewayStartedAt.getTime());
+        if (claim.kind === 'lost') {
+            logger.info(
+                'staleness',
+                `respawn coordination: claim lost (pid=${claim.claimedBy.pid}) — skipping user prompt`,
+            );
+            return stale.length;
         }
         if (this.autoKillEnabled()) {
             await this.killAll(stale);

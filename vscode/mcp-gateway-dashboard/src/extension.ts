@@ -35,6 +35,8 @@ import { SettingsPanel } from './webview/settings-panel';
 import { ClaudeCodePanel } from './webview/claude-code-panel';
 import { SlashCommandGenerator } from './slash-command-generator';
 import { createDefaultStalenessDetector } from './transport-staleness';
+import { ClaudeSessionBridge } from './claude-session-bridge';
+import { createDefaultRespawnCoordinator } from './respawn-coordinator';
 import { assertCompatible } from './version-compat';
 import {
 	SERVER_NAME_RE,
@@ -67,6 +69,10 @@ export interface IGatewayClient {
 	// absence and surfaces a "v1.9+ daemon required" message.
 	importSnapshot?(source: string, projectRoot?: string): Promise<unknown>;
 	importApply?(ops: unknown[]): Promise<unknown>;
+	// Gap 3 fix (2026-05-24, spike-2026-05-23 §V2): replaces broken statusline
+	// register-pid pipeline. Optional so legacy injected test clients still
+	// satisfy the interface — ClaudeSessionBridge guards against absence.
+	registerPid?(req: { session_id: string; pid: number; window_id?: string }): Promise<unknown>;
 	// FM 7 (spike 2026-05-11): optional so legacy injected test clients that
 	// predate the keep-alive agent still satisfy the interface.
 	dispose?(): void;
@@ -189,11 +195,39 @@ export function activate(
 	// user can reopen Claude with a fresh MCP handshake. Default: prompts
 	// the user; opt-in `mcpGateway.autoKillStaleClaudeSessions=true` kills
 	// silently.
-	const stalenessDetector = createDefaultStalenessDetector();
+	// Path 1 sentinel coordinator (FM-33 spike). Shared between the
+	// StalenessDetector (claim-time sweep + claim logic) and the activate-
+	// time sweep (F-05 v2 fix — covers the case where the operator
+	// restarts the daemon at most once a day so claim-time sweep alone
+	// would never fire on stale files).
+	const respawnCoordinator = createDefaultRespawnCoordinator();
+	respawnCoordinator.sweepStale();
+
+	const stalenessDetector = createDefaultStalenessDetector({ respawnCoordinator });
 	context.subscriptions.push(stalenessDetector);
 	context.subscriptions.push(cache.onDidRefresh((payload) => {
 		void stalenessDetector.noteHealth(payload.gatewayHealth);
 	}));
+
+	// Gap 3 fix (2026-05-24, spike-2026-05-23 §V2 follow-up). The register-pid
+	// pipeline is broken end-to-end for VSCode Claude Code users because the
+	// only production caller (claude-team-control/hooks/statusline.mjs) is
+	// never invoked by the VSCode-embedded Claude Code (statusLine.command is
+	// CLI-only). Without register-pid the gateway's sessionPids map stays
+	// empty, /unfreeze button returns 404, and FM-9 multi-instance hard-limit
+	// silently no-ops. ClaudeSessionBridge replaces the broken pipeline by
+	// reading the per-PID session files Claude Code writes itself and POSTing
+	// register-pid for each. Idempotent + auto-resets on respawn (started_at
+	// jump). See memory project_register_pid_pipeline_broken_2026_05_24.
+	const sessionBridge = client.registerPid
+		? new ClaudeSessionBridge({ registerPid: (req) => client.registerPid!(req) })
+		: undefined;
+	if (sessionBridge) {
+		context.subscriptions.push(sessionBridge);
+		context.subscriptions.push(cache.onDidRefresh((payload) => {
+			void sessionBridge.sync(payload.gatewayHealth?.started_at);
+		}));
+	}
 
 	const treeProvider = new BackendTreeProvider(cache);
 

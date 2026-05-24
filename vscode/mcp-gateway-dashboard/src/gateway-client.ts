@@ -150,6 +150,21 @@ export class GatewayClient {
 		}
 	}
 
+	// --- Claude Code bridge (register-pid pipeline fix, Gap 3 2026-05-24) ---
+
+	/**
+	 * Post a (session_id, pid, window_id) tuple to the gateway so /unfreeze
+	 * can target this claude.exe and FM-9 multi-instance enforcement sees
+	 * it. Used by ClaudeSessionBridge; replaces the broken statusline.mjs
+	 * pipeline that never fires under VSCode-embedded Claude Code.
+	 *
+	 * Returns `{stored: true}` on success. Throws GatewayError on transport
+	 * or http failure — caller swallows + retries on next refresh.
+	 */
+	async registerPid(req: { session_id: string; pid: number; window_id?: string }): Promise<StatusResponse> {
+		return this.request<StatusResponse>('POST', '/api/v1/claude-code/register-pid', req);
+	}
+
 	// --- Tools ---
 
 	async listTools(): Promise<ToolInfo[]> {

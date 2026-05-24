@@ -739,3 +739,84 @@ func TestEnforceWindow_ConcurrentSameWindow_OneWins(t *testing.T) {
 	assert.Equal(t, 1, wins, "exactly one goroutine must win the window")
 	assert.Equal(t, N-1, conflicts, "every other goroutine must see a Conflict")
 }
+
+// TestSessionPidPersistence_RoundTrip verifies the Gap 1 fix (2026-05-24):
+// SessionPid entries are written to disk on register-pid and rehydrated on
+// daemon restart. Closes the gap that left /unfreeze + FM-9 enforcement
+// non-functional after every daemon respawn.
+func TestSessionPidPersistence_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "patch-state.json")
+
+	s1, _ := newTestState(t, path)
+	_, err := s1.RecordSessionPidWithWindow("sess-A", 12345, "window-x")
+	require.NoError(t, err)
+	_, err = s1.EnforceWindowAndRecordPid("sess-B", 67890, "window-y", nil)
+	require.NoError(t, err)
+
+	s1.FlushPersists()
+	waitForFile(t, path, time.Second)
+
+	// New State reads the file fresh — same daemon-restart shape.
+	s2, _ := newTestState(t, path)
+	require.NoError(t, s2.Load())
+
+	entryA, ok := s2.GetSessionPid("sess-A")
+	require.True(t, ok, "sess-A must rehydrate")
+	assert.Equal(t, uint32(12345), entryA.PID)
+	assert.Equal(t, "window-x", entryA.WindowID)
+
+	entryB, ok := s2.GetSessionPid("sess-B")
+	require.True(t, ok, "sess-B must rehydrate")
+	assert.Equal(t, uint32(67890), entryB.PID)
+	assert.Equal(t, "window-y", entryB.WindowID)
+}
+
+// TestSessionPidPersistence_TTLDropsStale ensures the TTL filter at Load
+// drops entries older than SessionPidTTL so a long-dead claude.exe does
+// not get resurrected on next daemon boot.
+func TestSessionPidPersistence_TTLDropsStale(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "patch-state.json")
+
+	now := time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC)
+	snap := persisted{
+		SessionPids: map[string]*SessionPid{
+			"fresh": {SessionID: "fresh", PID: 100, WindowID: "win-fresh", RegisteredAt: now.Add(-1 * time.Hour)},
+			"stale": {SessionID: "stale", PID: 200, WindowID: "win-stale", RegisteredAt: now.Add(-48 * time.Hour)},
+		},
+	}
+	data, err := json.Marshal(snap)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+
+	s, _ := newTestState(t, path)
+	s.now = func() time.Time { return now }
+	require.NoError(t, s.Load())
+
+	_, freshOK := s.GetSessionPid("fresh")
+	assert.True(t, freshOK, "1h-old entry must rehydrate (under 24h TTL)")
+	_, staleOK := s.GetSessionPid("stale")
+	assert.False(t, staleOK, "48h-old entry must be dropped at Load (over 24h TTL)")
+}
+
+// TestSessionPidPersistence_RemoveSurvivesRestart verifies that removing a
+// SessionPid (e.g., via /unfreeze) ALSO persists, so a stale entry does
+// not silently reappear after restart.
+func TestSessionPidPersistence_RemoveSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "patch-state.json")
+
+	s1, _ := newTestState(t, path)
+	_, err := s1.RecordSessionPidWithWindow("sess-X", 555, "win-z")
+	require.NoError(t, err)
+	require.True(t, s1.RemoveSessionPid("sess-X"))
+
+	s1.FlushPersists()
+	waitForFile(t, path, time.Second)
+
+	s2, _ := newTestState(t, path)
+	require.NoError(t, s2.Load())
+	_, ok := s2.GetSessionPid("sess-X")
+	assert.False(t, ok, "removed entry must NOT rehydrate")
+}
