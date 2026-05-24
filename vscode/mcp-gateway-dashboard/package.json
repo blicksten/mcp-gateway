@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.33.5",
+  "version": "1.33.6",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -529,7 +529,7 @@
     "lint:zombie-dom": "node scripts/check-zombie-dom.js",
     "check-grammar": "node -e \"const{spawnSync}=require('child_process');const r=spawnSync('go',['run','./tools/grammar-gen/check'],{cwd:require('path').resolve(__dirname,'..','..'),stdio:'inherit'});process.exit(r.status==null?2:r.status)\"",
     "pretest": "node scripts/check-zombie-dom.js",
-    "test": "mocha --require ts-node/register --file 'src/test/setup.ts' 'src/test/**/*.test.ts'",
+    "test": "mocha --require ts-node/register --file 'src/test/setup.ts' --exit --timeout 30000 'src/test/**/*.test.ts'",
     "package": "vsce package --allow-missing-repository --out mcp-gateway-dashboard-latest.vsix",
     "deploy": "npm run compile && npm run package && node scripts/install-vsix.js mcp-gateway-dashboard-latest.vsix",
     "vscode:prepublish": "npm run compile"
