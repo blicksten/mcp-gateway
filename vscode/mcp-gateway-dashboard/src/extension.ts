@@ -73,6 +73,14 @@ export interface IGatewayClient {
 	// register-pid pipeline. Optional so legacy injected test clients still
 	// satisfy the interface — ClaudeSessionBridge guards against absence.
 	registerPid?(req: { session_id: string; pid: number; window_id?: string }): Promise<unknown>;
+	// Path 1 Option B refactor (2026-05-25): atomic cross-window claim for
+	// gateway respawn events. Optional for the same backward-compat reason
+	// as registerPid -- the dashboard guards against absence and falls back
+	// to per-window prompt behavior.
+	claimRespawn?(req: { started_at_ms: number; pid?: number; window_id?: string }): Promise<{
+		kind: 'won' | 'lost';
+		claimed_by?: { pid: number; window_id?: string; claimed_at_ms: number };
+	}>;
 	// FM 7 (spike 2026-05-11): optional so legacy injected test clients that
 	// predate the keep-alive agent still satisfy the interface.
 	dispose?(): void;
@@ -195,19 +203,31 @@ export function activate(
 	// user can reopen Claude with a fresh MCP handshake. Default: prompts
 	// the user; opt-in `mcpGateway.autoKillStaleClaudeSessions=true` kills
 	// silently.
-	// Path 1 sentinel coordinator (FM-33 spike). Shared between the
-	// StalenessDetector (claim-time sweep + claim logic) and the activate-
-	// time sweep (F-05 v2 fix — covers the case where the operator
-	// restarts the daemon at most once a day so claim-time sweep alone
-	// would never fire on stale files).
-	const respawnCoordinator = createDefaultRespawnCoordinator();
-	respawnCoordinator.sweepStale();
+	// Path 1 respawn coordinator (FM-33 spike, Option B refactor 2026-05-25).
+	// Consults the gateway's atomic `/api/v1/claude-code/respawn-claim`
+	// endpoint so a single daemon respawn produces ONE user prompt across
+	// all dashboard-extension instances. Replaces the v1 filesystem-sentinel
+	// approach -- no %TEMP% files, no sweep, atomicity via patchState mutex.
+	const respawnCoordinator = client.claimRespawn
+		? createDefaultRespawnCoordinator({ claimRespawn: (req) => client.claimRespawn!(req) })
+		: undefined;
 
-	const stalenessDetector = createDefaultStalenessDetector({ respawnCoordinator });
-	context.subscriptions.push(stalenessDetector);
-	context.subscriptions.push(cache.onDidRefresh((payload) => {
-		void stalenessDetector.noteHealth(payload.gatewayHealth);
-	}));
+	if (respawnCoordinator) {
+		const stalenessDetector = createDefaultStalenessDetector({ respawnCoordinator });
+		context.subscriptions.push(stalenessDetector);
+		context.subscriptions.push(cache.onDidRefresh((payload) => {
+			void stalenessDetector.noteHealth(payload.gatewayHealth);
+		}));
+	} else {
+		// Option B (2026-05-25): if the client lacks claimRespawn the
+		// dashboard cannot coordinate respawn prompts across windows. Fall
+		// back to silent disable (no detector) -- pre-Option-B behavior
+		// was per-window prompt flood which is strictly worse.
+		logger.warn(
+			'extension',
+			'claimRespawn unavailable on injected client; transport-staleness detector disabled',
+		);
+	}
 
 	// Gap 3 fix (2026-05-24, spike-2026-05-23 §V2 follow-up). The register-pid
 	// pipeline is broken end-to-end for VSCode Claude Code users because the

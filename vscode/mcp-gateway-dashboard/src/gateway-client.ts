@@ -165,6 +165,21 @@ export class GatewayClient {
 		return this.request<StatusResponse>('POST', '/api/v1/claude-code/register-pid', req);
 	}
 
+	/**
+	 * Atomically claim a daemon-respawn event identified by started_at_ms
+	 * (the new daemon's started_at converted to Unix milliseconds). Returns
+	 * `{kind: "won"}` for the first dashboard-extension instance to POST;
+	 * subsequent POSTs receive `{kind: "lost", claimed_by: {...}}` so they
+	 * can suppress their user prompt. Replaces the v1 filesystem-sentinel
+	 * approach (FM-33 Path 1 Option B refactor, 2026-05-25).
+	 */
+	async claimRespawn(req: { started_at_ms: number; pid?: number; window_id?: string }): Promise<{
+		kind: 'won' | 'lost';
+		claimed_by?: { pid: number; window_id?: string; claimed_at_ms: number };
+	}> {
+		return this.request('POST', '/api/v1/claude-code/respawn-claim', req);
+	}
+
 	// --- Tools ---
 
 	async listTools(): Promise<ToolInfo[]> {

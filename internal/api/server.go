@@ -530,6 +530,11 @@ func (s *Server) Handler() http.Handler {
 			// are wired in InitClaudeCodeLimiters above.
 			r.Post("/register-pid", s.handleClaudeCodeRegisterPid)
 			r.Post("/unfreeze", s.handleClaudeCodeUnfreeze)
+			// FM-33 Path 1 Option B refactor (2026-05-25): atomic
+			// first-writer-wins claim for daemon-respawn events. Replaces
+			// the filesystem-sentinel approach (v1 2026-05-24). Same auth
+			// tier as siblings — no admin-scope elevation per ADR-0007.
+			r.Post("/respawn-claim", s.handleClaudeCodeRespawnClaim)
 
 			// Import-from-Claude routes (Phase D T-D.1). Additive
 			// under the FROZEN /api/v1/claude-code/* namespace per

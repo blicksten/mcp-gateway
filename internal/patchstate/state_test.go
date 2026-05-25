@@ -820,3 +820,70 @@ func TestSessionPidPersistence_RemoveSurvivesRestart(t *testing.T) {
 	_, ok := s2.GetSessionPid("sess-X")
 	assert.False(t, ok, "removed entry must NOT rehydrate")
 }
+
+// TestClaimRespawn_FirstWriterWins verifies the Option B refactor's atomic
+// claim semantics. The first POST for a given startedAtMs wins; subsequent
+// POSTs return the existing claim so the loser can suppress its prompt.
+func TestClaimRespawn_FirstWriterWins(t *testing.T) {
+	s, _ := newTestState(t, "")
+	const startedAt = int64(1779613000000)
+
+	first, won := s.ClaimRespawn(startedAt, 100, "win-A")
+	require.True(t, won, "first claim must win")
+	require.NotNil(t, first)
+	assert.Equal(t, uint32(100), first.PID)
+	assert.Equal(t, "win-A", first.WindowID)
+
+	second, won2 := s.ClaimRespawn(startedAt, 200, "win-B")
+	require.False(t, won2, "second claim must lose")
+	require.NotNil(t, second)
+	assert.Equal(t, uint32(100), second.PID, "loser receives winner's PID")
+	assert.Equal(t, "win-A", second.WindowID, "loser receives winner's window_id")
+}
+
+// TestClaimRespawn_DifferentStartedAtBothWin verifies independent
+// startedAtMs values do not collide.
+func TestClaimRespawn_DifferentStartedAtBothWin(t *testing.T) {
+	s, _ := newTestState(t, "")
+
+	_, won1 := s.ClaimRespawn(1779613000000, 100, "")
+	_, won2 := s.ClaimRespawn(1779614000000, 200, "")
+	assert.True(t, won1)
+	assert.True(t, won2)
+}
+
+// TestClaimRespawn_RejectsNonPositive verifies the started_at_ms validation
+// guard. Zero / negative values are caller-side bugs (failed parse of
+// health.started_at) — gateway rejects them rather than masking the bug.
+func TestClaimRespawn_RejectsNonPositive(t *testing.T) {
+	s, _ := newTestState(t, "")
+
+	_, won0 := s.ClaimRespawn(0, 100, "")
+	_, wonNeg := s.ClaimRespawn(-1, 100, "")
+	assert.False(t, won0, "zero started_at_ms must be rejected")
+	assert.False(t, wonNeg, "negative started_at_ms must be rejected")
+}
+
+// TestClaimRespawn_EvictedByCleaner verifies the cleaner goroutine drops
+// claims older than RespawnClaimTTL.
+func TestClaimRespawn_EvictedByCleaner(t *testing.T) {
+	s, _ := newTestState(t, "")
+
+	// Seed the now() function so we can advance it past the TTL.
+	base := time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return base }
+
+	_, won := s.ClaimRespawn(1779613000000, 100, "win-A")
+	require.True(t, won)
+
+	// Advance clock past TTL and run the cleaner directly.
+	s.now = func() time.Time { return base.Add(RespawnClaimTTL + 1*time.Minute) }
+	s.evictExpired()
+
+	_, ok := s.GetRespawnClaim(1779613000000)
+	assert.False(t, ok, "claim older than TTL must be evicted")
+
+	// New claim under same startedAtMs after eviction must win again.
+	_, wonAgain := s.ClaimRespawn(1779613000000, 200, "win-B")
+	assert.True(t, wonAgain, "post-eviction claim must win again")
+}

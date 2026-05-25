@@ -30,10 +30,7 @@ import {
     createDefaultSiblingDetector,
     filterStaleSiblings,
 } from './sibling-detector';
-import {
-    type RespawnCoordinator,
-    createDefaultRespawnCoordinator,
-} from './respawn-coordinator';
+import { type RespawnCoordinator } from './respawn-coordinator';
 
 /** Kill function abstraction — production uses process.kill, tests inject a spy. */
 export type KillFn = (pid: number, signal?: NodeJS.Signals | number) => void;
@@ -78,13 +75,24 @@ export interface StalenessDetectorOptions {
         ...actions: string[]
     ) => Promise<string | undefined>;
     /**
-     * Cross-window respawn coordinator (Path 1 of FM-33 spike). Default
-     * uses the temp-dir file-sentinel implementation. Tests inject a stub
-     * that returns 'won' or 'lost' deterministically. When the result is
-     * 'lost', the detector skips the user prompt for this respawn cycle.
+     * Cross-window respawn coordinator (Path 1 of FM-33 spike, Option B).
+     * When omitted the detector behaves as if it always wins the claim —
+     * useful for tests that don't exercise multi-window coordination and
+     * as a safety net when the dashboard extension activates against a
+     * gateway that predates the /respawn-claim endpoint. Production code
+     * in extension.ts always injects the gateway-backed coordinator.
      */
     respawnCoordinator?: RespawnCoordinator;
 }
+
+/**
+ * Local fallback when no coordinator is supplied. Behaves as "always won"
+ * — preserves the pre-Option-B per-window prompt behavior so the detector
+ * never silently suppresses a prompt due to a missing dependency.
+ */
+const ALWAYS_WON_COORDINATOR: RespawnCoordinator = {
+    claim: async () => ({ kind: 'won' as const }),
+};
 
 export function createDefaultStalenessDetector(
     opts?: StalenessDetectorOptions,
@@ -97,7 +105,7 @@ export function createDefaultStalenessDetector(
             opts?.promptUser ??
             ((message, ...actions) =>
                 Promise.resolve(vscode.window.showWarningMessage(message, ...actions))),
-        respawnCoordinator: opts?.respawnCoordinator ?? createDefaultRespawnCoordinator(),
+        respawnCoordinator: opts?.respawnCoordinator ?? ALWAYS_WON_COORDINATOR,
     });
 }
 
@@ -204,7 +212,7 @@ class StalenessDetectorImpl implements StalenessDetector {
         // sentinel and skip the UI prompt (autoKill still runs locally — the
         // kill action is idempotent and the gateway is the single source of
         // truth for the surviving claude.exe).
-        const claim = this.respawnCoordinator.claim(gatewayStartedAt.getTime());
+        const claim = await this.respawnCoordinator.claim(gatewayStartedAt.getTime());
         if (claim.kind === 'lost') {
             logger.info(
                 'staleness',

@@ -55,6 +55,14 @@ const (
 	// from a previous run can linger before being dropped at Load(). 24h
 	// matches the longest practical Claude Code session length.
 	SessionPidTTL = 24 * time.Hour
+	// RespawnClaimTTL bounds how long a respawn-claim record lives in the
+	// in-memory map before the cleaner goroutine drops it. Sized at 1h
+	// because dashboard-extension instances claim within seconds of the
+	// daemon coming back up; anything older is the previous boot's claim
+	// and can be safely evicted. Not persisted — the very next daemon
+	// start has a fresh started_at, so old claims have no semantic
+	// meaning across restarts.
+	RespawnClaimTTL = 1 * time.Hour
 	// ProbeTTL is the TTL for stored probe results.
 	ProbeTTL = 5 * time.Minute
 
@@ -168,6 +176,20 @@ type SessionPid struct {
 	WindowID     string    `json:"window_id,omitempty"`
 }
 
+// RespawnClaim records the first dashboard-extension instance to claim a
+// daemon-respawn event identified by the new daemon's started_at (in ms).
+// First POST wins; subsequent POSTs for the same StartedAtMs return the
+// existing record so the loser knows to suppress its user prompt. In-memory
+// only — the next daemon restart has a fresh started_at, so old claims
+// have no cross-restart meaning. Closes Path 1 of the FM-33 spike via the
+// `POST /api/v1/claude-code/respawn-claim` endpoint added 2026-05-25.
+type RespawnClaim struct {
+	StartedAtMs int64     `json:"started_at_ms"`
+	PID         uint32    `json:"pid"`
+	WindowID    string    `json:"window_id,omitempty"`
+	ClaimedAt   time.Time `json:"claimed_at"`
+}
+
 // State is the concurrent owner of heartbeats, pending actions, and probe
 // results. Construct via New.
 type State struct {
@@ -176,6 +198,7 @@ type State struct {
 	actions           []*PendingAction
 	probes            map[string]*ProbeResult
 	sessionPids       map[string]*SessionPid
+	respawnClaims     map[int64]*RespawnClaim
 	lastActionEnqueue time.Time
 	lastPersist       map[string]time.Time
 
@@ -204,11 +227,12 @@ func New(persistPath string, logger *slog.Logger) *State {
 		logger = slog.Default()
 	}
 	return &State{
-		heartbeats:  make(map[string]*Heartbeat),
-		actions:     make([]*PendingAction, 0, 32),
-		probes:      make(map[string]*ProbeResult),
-		sessionPids: make(map[string]*SessionPid),
-		lastPersist: make(map[string]time.Time),
+		heartbeats:    make(map[string]*Heartbeat),
+		actions:       make([]*PendingAction, 0, 32),
+		probes:        make(map[string]*ProbeResult),
+		sessionPids:   make(map[string]*SessionPid),
+		respawnClaims: make(map[int64]*RespawnClaim),
+		lastPersist:   make(map[string]time.Time),
 		persistPath: persistPath,
 		logger:      logger,
 		now:         time.Now,
@@ -710,6 +734,14 @@ func (s *State) evictExpired() {
 			delete(s.probes, nonce)
 		}
 	}
+	// Option B refactor (2026-05-25): drop respawn claims older than the
+	// TTL. Claims are scoped to a single daemon lifetime; anything older
+	// than 1h is either the previous boot's leftover or unused.
+	for startedAt, claim := range s.respawnClaims {
+		if claim == nil || now.Sub(claim.ClaimedAt) > RespawnClaimTTL {
+			delete(s.respawnClaims, startedAt)
+		}
+	}
 	s.trimActions()
 	s.mu.Unlock()
 }
@@ -1099,6 +1131,57 @@ func (s *State) RemoveSessionPidIfPid(sessionID string, expectedPID uint32) bool
 	// Gap 1 fix (2026-05-24): persist the CAS-delete so it survives restart.
 	s.persistAsync()
 	return true
+}
+
+// ClaimRespawn is the atomic "first-writer-wins" claim for a daemon-respawn
+// event identified by startedAtMs (the new daemon's started_at converted to
+// milliseconds). Returns (claim, true) on the very first call for this
+// startedAtMs and (winningClaim, false) on subsequent calls so the loser
+// can suppress its user-facing prompt. Replaces the filesystem-sentinel
+// approach (Path 1 v1, 2026-05-24) — co-locating the coordination point
+// with sessionPids in the same in-memory state removes the %TEMP% sentinel
+// files entirely and makes the contention point a single mutex.
+//
+// In-memory only; the cleaner goroutine drops entries older than
+// RespawnClaimTTL. Not persisted: each daemon restart produces a fresh
+// startedAtMs, so prior-boot claims have no semantic meaning.
+//
+// startedAtMs must be > 0 (callers compute it from health.started_at; the
+// guard rejects zero/negative values rather than masking a parsing bug).
+func (s *State) ClaimRespawn(startedAtMs int64, pid uint32, windowID string) (*RespawnClaim, bool) {
+	if startedAtMs <= 0 {
+		return nil, false
+	}
+	s.mu.Lock()
+	if existing, ok := s.respawnClaims[startedAtMs]; ok {
+		clone := *existing
+		s.mu.Unlock()
+		return &clone, false
+	}
+	claim := &RespawnClaim{
+		StartedAtMs: startedAtMs,
+		PID:         pid,
+		WindowID:    windowID,
+		ClaimedAt:   s.now(),
+	}
+	s.respawnClaims[startedAtMs] = claim
+	clone := *claim
+	s.mu.Unlock()
+	return &clone, true
+}
+
+// GetRespawnClaim returns the recorded claim for startedAtMs, or (nil, false)
+// when none exists. Returned struct is a copy. Exposed for tests + future
+// diagnostics endpoints.
+func (s *State) GetRespawnClaim(startedAtMs int64) (*RespawnClaim, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.respawnClaims[startedAtMs]
+	if !ok {
+		return nil, false
+	}
+	clone := *entry
+	return &clone, true
 }
 
 // newNonce returns a 16-hex-char random nonce. Separate function for call-

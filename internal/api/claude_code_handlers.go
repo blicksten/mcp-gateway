@@ -693,6 +693,73 @@ type unfreezeResponse struct {
 	Killed uint32 `json:"killed"`
 }
 
+// respawnClaimRequest is the body of POST /api/v1/claude-code/respawn-claim.
+// started_at_ms is the new daemon's started_at converted to Unix
+// milliseconds — the canonical key for this respawn event across all
+// dashboard-extension instances on the host.
+type respawnClaimRequest struct {
+	StartedAtMs int64  `json:"started_at_ms"`
+	PID         uint32 `json:"pid,omitempty"`
+	WindowID    string `json:"window_id,omitempty"`
+}
+
+// respawnClaimResponse is "won" with empty ClaimedBy when this caller
+// is the first writer for started_at_ms, otherwise "lost" with the
+// existing claimant's record so the loser can suppress its user prompt.
+type respawnClaimResponse struct {
+	Kind      string                 `json:"kind"`
+	ClaimedBy *respawnClaimClaimedBy `json:"claimed_by,omitempty"`
+}
+
+type respawnClaimClaimedBy struct {
+	PID         uint32 `json:"pid"`
+	WindowID    string `json:"window_id,omitempty"`
+	ClaimedAtMs int64  `json:"claimed_at_ms"`
+}
+
+// handleClaudeCodeRespawnClaim is the gateway-side atomic claim point for
+// the FM-33 Path 1 sentinel design (Option B refactor 2026-05-25). The
+// first dashboard-extension instance to POST for a given started_at_ms
+// wins; subsequent POSTs return the existing claim so they can suppress
+// the user prompt. Replaces the filesystem-sentinel approach (v1
+// 2026-05-24) — no %TEMP% files, atomicity via patchState mutex,
+// co-located with sessionPids in the same state owner.
+//
+// Validation:
+//   - started_at_ms <= 0 → 400 (callers must compute from health.started_at)
+//
+// Auth: user-tier authMW (no admin scope) — matches the rest of the
+// /api/v1/claude-code/* route group.
+func (s *Server) handleClaudeCodeRespawnClaim(w http.ResponseWriter, r *http.Request) {
+	if s.patchState == nil {
+		writeError(w, http.StatusServiceUnavailable, "patch state not initialized")
+		return
+	}
+	var req respawnClaimRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.StartedAtMs <= 0 {
+		writeError(w, http.StatusBadRequest, "started_at_ms must be > 0")
+		return
+	}
+	claim, won := s.patchState.ClaimRespawn(req.StartedAtMs, req.PID, req.WindowID)
+	if won {
+		writeJSON(w, http.StatusOK, respawnClaimResponse{Kind: "won"})
+		return
+	}
+	resp := respawnClaimResponse{
+		Kind: "lost",
+		ClaimedBy: &respawnClaimClaimedBy{
+			PID:         claim.PID,
+			WindowID:    claim.WindowID,
+			ClaimedAtMs: claim.ClaimedAt.UnixMilli(),
+		},
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // handleClaudeCodeUnfreeze runs `Stop-Process -Id <pid> -Force` against the
 // claude.exe PID registered for session_id. On success the registration is
 // dropped (claude.exe is gone). On failure (usually the process already

@@ -1,121 +1,117 @@
 import { strict as assert } from 'node:assert';
-import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
-import { createDefaultRespawnCoordinator } from '../respawn-coordinator';
+import {
+    createDefaultRespawnCoordinator,
+    type ClaimRespawnApi,
+} from '../respawn-coordinator';
 
-function mkTempBase(): string {
-    return fs.mkdtempSync(path.join(os.tmpdir(), 'respawn-coordinator-test-'));
+interface FakeClient extends ClaimRespawnApi {
+    calls: Array<{ started_at_ms: number; pid?: number; window_id?: string }>;
+    response: { kind: 'won' | 'lost'; claimed_by?: { pid: number; window_id?: string; claimed_at_ms: number } };
+    fail?: boolean;
 }
 
-describe('respawn-coordinator', () => {
-    let baseDir: string;
-
-    beforeEach(() => {
-        baseDir = mkTempBase();
-    });
-
-    afterEach(() => {
-        try { fs.rmSync(baseDir, { recursive: true, force: true }); } catch { /* best-effort */ }
-    });
-
-    describe('claim', () => {
-        it('first claim wins and writes the sentinel file', () => {
-            const c = createDefaultRespawnCoordinator({ baseDir, pid: 100, windowId: 'win-A' });
-            const result = c.claim(1779613481000);
-            assert.equal(result.kind, 'won');
-
-            const expected = path.join(baseDir, 'respawn-1779613481000.claimed');
-            assert.ok(fs.existsSync(expected), 'sentinel file should be created');
-            const payload = JSON.parse(fs.readFileSync(expected, 'utf8'));
-            assert.equal(payload.pid, 100);
-            assert.equal(payload.windowId, 'win-A');
-            assert.equal(typeof payload.claimedAtMs, 'number');
-        });
-
-        it('second claim for the same started_at loses and reads the winner', () => {
-            const winner = createDefaultRespawnCoordinator({ baseDir, pid: 100, windowId: 'win-A' });
-            const loser = createDefaultRespawnCoordinator({ baseDir, pid: 200, windowId: 'win-B' });
-
-            const winResult = winner.claim(1779613481000);
-            const loseResult = loser.claim(1779613481000);
-
-            assert.equal(winResult.kind, 'won');
-            assert.equal(loseResult.kind, 'lost');
-            if (loseResult.kind === 'lost') {
-                assert.equal(loseResult.claimedBy.pid, 100);
-                assert.equal(loseResult.claimedBy.windowId, 'win-A');
+function fakeClient(initial: Partial<FakeClient> = {}): FakeClient {
+    const c: FakeClient = {
+        calls: [],
+        response: { kind: 'won' },
+        ...initial,
+        async claimRespawn(req) {
+            c.calls.push(req);
+            if (c.fail) {
+                throw new Error('simulated transport failure');
             }
-        });
+            return c.response;
+        },
+    };
+    return c;
+}
 
-        it('different started_at values both win independently', () => {
-            const c1 = createDefaultRespawnCoordinator({ baseDir, pid: 100 });
-            const c2 = createDefaultRespawnCoordinator({ baseDir, pid: 200 });
+describe('respawn-coordinator (Option B — gateway-backed)', () => {
+    it('returns won when gateway responds kind=won', async () => {
+        const client = fakeClient({ response: { kind: 'won' } });
+        const c = createDefaultRespawnCoordinator(client, { pid: 100, windowId: 'win-A' });
 
-            assert.equal(c1.claim(1779613000000).kind, 'won');
-            assert.equal(c2.claim(1779613999000).kind, 'won');
-        });
-
-        it('treats sentinel-write failure (non-EEXIST) as won to avoid silent prompt loss', () => {
-            // Point baseDir at a file path so mkdir + writeFile both fail in
-            // a non-EEXIST way (path-component-is-file errors).
-            const filePath = path.join(baseDir, 'a-file-not-a-dir');
-            fs.writeFileSync(filePath, 'blocker');
-
-            const c = createDefaultRespawnCoordinator({ baseDir: filePath, pid: 100 });
-            const result = c.claim(1779613481000);
-            // The non-EEXIST fallback path returns 'won' so the operator
-            // still sees the prompt -- better than silent loss.
-            assert.equal(result.kind, 'won');
-        });
+        const result = await c.claim(1779613481000);
+        assert.equal(result.kind, 'won');
+        assert.equal(client.calls.length, 1);
+        assert.equal(client.calls[0].started_at_ms, 1779613481000);
+        assert.equal(client.calls[0].pid, 100);
+        assert.equal(client.calls[0].window_id, 'win-A');
     });
 
-    describe('sweepStale', () => {
-        it('unlinks claim files older than 1h based on mtime', () => {
-            const oldFile = path.join(baseDir, 'respawn-1.claimed');
-            const newFile = path.join(baseDir, 'respawn-2.claimed');
-            fs.writeFileSync(oldFile, '{}');
-            fs.writeFileSync(newFile, '{}');
-            // Backdate oldFile by 2h.
-            const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-            fs.utimesSync(oldFile, twoHoursAgo, twoHoursAgo);
-
-            const c = createDefaultRespawnCoordinator({ baseDir });
-            const removed = c.sweepStale();
-            assert.equal(removed, 1);
-            assert.ok(!fs.existsSync(oldFile), 'stale file should be unlinked');
-            assert.ok(fs.existsSync(newFile), 'fresh file should be kept');
+    it('returns lost with claimedBy metadata when gateway responds kind=lost', async () => {
+        const client = fakeClient({
+            response: {
+                kind: 'lost',
+                claimed_by: { pid: 999, window_id: 'win-winner', claimed_at_ms: 1779613500000 },
+            },
         });
+        const c = createDefaultRespawnCoordinator(client, { pid: 200 });
 
-        it('ignores non-respawn files in the same directory', () => {
-            const ours = path.join(baseDir, 'respawn-1.claimed');
-            const theirs = path.join(baseDir, 'other-tool.lock');
-            fs.writeFileSync(ours, '{}');
-            fs.writeFileSync(theirs, '{}');
-            const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
-            fs.utimesSync(ours, old, old);
-            fs.utimesSync(theirs, old, old);
+        const result = await c.claim(1779613481000);
+        assert.equal(result.kind, 'lost');
+        if (result.kind === 'lost') {
+            assert.equal(result.claimedBy.pid, 999);
+            assert.equal(result.claimedBy.windowId, 'win-winner');
+            assert.equal(result.claimedBy.claimedAtMs, 1779613500000);
+        }
+    });
 
-            const c = createDefaultRespawnCoordinator({ baseDir });
-            c.sweepStale();
-            assert.ok(!fs.existsSync(ours));
-            assert.ok(fs.existsSync(theirs), 'foreign file should be untouched');
-        });
+    it('treats malformed startedAtMs as won (over-prompt better than silent loss)', async () => {
+        const client = fakeClient();
+        const c = createDefaultRespawnCoordinator(client, { pid: 100 });
 
-        it('returns 0 when baseDir does not exist', () => {
-            const ghost = path.join(baseDir, 'missing-dir');
-            const c = createDefaultRespawnCoordinator({ baseDir: ghost });
-            assert.equal(c.sweepStale(), 0);
-        });
+        const result = await c.claim(0);
+        assert.equal(result.kind, 'won');
+        assert.equal(client.calls.length, 0, 'invalid input must not reach the gateway');
 
-        it('claim() invokes sweep on each call', () => {
-            const oldFile = path.join(baseDir, 'respawn-1.claimed');
-            fs.writeFileSync(oldFile, '{}');
-            fs.utimesSync(oldFile, new Date(Date.now() - 2 * 60 * 60 * 1000), new Date(Date.now() - 2 * 60 * 60 * 1000));
+        const negResult = await c.claim(-5);
+        assert.equal(negResult.kind, 'won');
+        assert.equal(client.calls.length, 0);
 
-            const c = createDefaultRespawnCoordinator({ baseDir });
-            c.claim(2);
-            assert.ok(!fs.existsSync(oldFile), 'claim should sweep stale siblings');
-        });
+        const nanResult = await c.claim(Number.NaN);
+        assert.equal(nanResult.kind, 'won');
+        assert.equal(client.calls.length, 0);
+    });
+
+    it('falls back to won on transport / HTTP error', async () => {
+        const client = fakeClient({ fail: true });
+        const c = createDefaultRespawnCoordinator(client, { pid: 100 });
+
+        const result = await c.claim(1779613481000);
+        assert.equal(result.kind, 'won', 'transport failure must fall back to won, not silent loss');
+        assert.equal(client.calls.length, 1, 'the failed call must still have been attempted');
+    });
+
+    it('treats kind=lost without claimedBy metadata as a normal lost', async () => {
+        const client = fakeClient({ response: { kind: 'lost' } });
+        const c = createDefaultRespawnCoordinator(client, { pid: 100 });
+
+        const result = await c.claim(1779613481000);
+        assert.equal(result.kind, 'lost', 'missing metadata should not flip to won');
+        if (result.kind === 'lost') {
+            assert.equal(result.claimedBy.pid, 0, 'placeholder pid surfaces the missing metadata');
+        }
+    });
+
+    it('uses process.pid by default', async () => {
+        const client = fakeClient();
+        const c = createDefaultRespawnCoordinator(client);
+        await c.claim(1779613481000);
+        assert.equal(client.calls[0].pid, process.pid);
+    });
+
+    it('propagates explicit windowId when provided', async () => {
+        const client = fakeClient();
+        const c = createDefaultRespawnCoordinator(client, { windowId: 'win-xyz' });
+        await c.claim(1779613481000);
+        assert.equal(client.calls[0].window_id, 'win-xyz');
+    });
+
+    it('omits empty windowId by passing empty string (gateway treats as absent)', async () => {
+        const client = fakeClient();
+        const c = createDefaultRespawnCoordinator(client);
+        await c.claim(1779613481000);
+        assert.equal(client.calls[0].window_id, '');
     });
 });
