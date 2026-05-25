@@ -1,0 +1,8 @@
+# Populated by scripts/00-prereq-check.ps1 at audit run time.
+# Format: <tool>=<version> per line
+# Example after a run:
+# go=1.22.0
+# node=20.10.0
+# knip=5.30.2
+# deadcode=v0.21.0
+# staticcheck=2024.1.1

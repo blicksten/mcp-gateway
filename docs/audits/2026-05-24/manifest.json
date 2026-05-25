@@ -1,0 +1,29 @@
+{
+  "audit_id": "mcp-gateway-2026-05-24",
+  "project": "mcp-gateway",
+  "audit_date": "2026-05-24",
+  "audit_type": "periodic-v-and-v-conformance",
+  "cadence": "quarterly",
+  "next_audit_due": "2026-08-24",
+  "protocol_version": "1.1",
+  "anchors": [
+    "IEEE 1012-2016",
+    "ISO/IEC/IEEE 29148:2018",
+    "ISO/IEC/IEEE 29119"
+  ],
+  "axes": [
+    "reachability",
+    "runtime_exercise",
+    "doc_code_conformance",
+    "correctness_assertion"
+  ],
+  "git_head_at_start": null,
+  "git_head_at_end": null,
+  "operator": null,
+  "tool_versions": {},
+  "status": "not_started",
+  "skeleton_run": null,
+  "skeleton_step_ids": [],
+  "verdict": null,
+  "predecessor_audit": null
+}

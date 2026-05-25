@@ -1,0 +1,149 @@
+# RTM — Requirements Traceability Matrix
+# Anchored on ISO/IEC/IEEE 29148:2018
+#
+# Each entry binds a documented semantic claim about mcp-gateway to its
+# implementation and the named scenario that proves it works.
+#
+# SCOPE: this file holds claims about mcp-gateway code ONLY. Cross-project
+# claims (e.g. claude-team-control hooks) are tracked in those projects'
+# own audit packets, per project isolation discipline (CLAUDE.md).
+#
+# Mechanical claims (endpoint exists, env var read, CLI subcommand registered)
+# are NOT here — they are handled by scripts/03-doc-diff.ps1 via extraction.
+#
+# This file holds SEMANTIC claims — claims that cannot be mechanically
+# extracted (e.g., "admin token gates this endpoint", "disk persistence
+# survives daemon restart").
+#
+# Required fields per claim:
+#   asserts             — one-sentence behavioral claim. MUST be testable via a scenario.
+#   implementation_file — relative path. MUST exist (validated by 03-doc-diff).
+#   implementation_line — line of declaration, or null with reason.
+#   scenario_id         — scenario from inputs/scenarios.md that PROVES this claim.
+#                          The scenario MUST include an assertion verifying the asserts text.
+#   verification_status — proven | unproven | drifted | doc_lie | needs_audit
+#   last_verified       — ISO date of last status update.
+#
+# Status semantics:
+#   proven       — impl + scenario found AND scenario asserted the behavior in latest run
+#   unproven     — impl found but no scenario covers it (must add scenario before claim is usable)
+#   drifted      — was proven; latest scenario run shows behavior changed
+#   doc_lie      — no implementation found at impl_file:impl_line
+#   needs_audit  — added or modified since last_verified; must be re-checked this cycle
+
+claims:
+  - claim_id: MCPR.3-admin-token-gates-shutdown
+    source_doc: docs/ADR-0007-two-tier-auth.md
+    source_section: "Decision — three invariants"
+    asserts: "POST /api/v1/shutdown with regular user-config Bearer returns HTTP 401 (scope=admin reason=mismatch); only the admin token from ~/.mcp-gateway/admin.token is accepted. The plugin manifest .mcp.json template substitutes only ${user_config.auth_token}, so VS Code's McpGatewayService cannot acquire the admin token."
+    implementation_file: internal/auth/admin.go
+    implementation_line: 39
+    implementation_symbol: AdminMiddleware
+    scenario_id: scn-shutdown-auth-rejection
+    verification_status: needs_audit
+    last_verified: null
+    references:
+      - "docs/ADR-0007-two-tier-auth.md"
+
+  - claim_id: bug-a-daemon-survives-vscode-close-cascade
+    source_doc: docs/ADR-0007-two-tier-auth.md
+    source_section: "Verification — Manual GATE MCPR.3 smoke"
+    asserts: "Closing 3+ VS Code windows in succession does NOT kill the mcp-gateway daemon. Daemon PID and process StartTime remain identical across all close events; audit log shows McpGatewayService's shutdown attempts rejected at admin-scope gate."
+    implementation_file: internal/auth/admin.go
+    implementation_line: 39
+    implementation_symbol: AdminMiddleware
+    scenario_id: scn-vscode-close-cascade-no-daemon-death
+    verification_status: needs_audit
+    last_verified: null
+
+  - claim_id: T0.7.1-session-state-disk-persistence
+    source_doc: docs/ROADMAP.md
+    source_section: "T0.7.1 SessionStateRegistry disk persistence"
+    asserts: "SessionStateRegistry persists session state to disk on Save; on daemon restart, prior session state is restored byte-for-byte and resumable via REST. Scenario MUST assert equal(loaded_state, saved_state)."
+    implementation_file: internal/api/resumable_session_spike.go
+    implementation_line: 82
+    implementation_symbol: "type SessionStateRegistry"
+    scenario_id: scn-daemon-restart-state-replay
+    verification_status: needs_audit
+    last_verified: null
+    references:
+      - "Commit cee568f"
+
+  - claim_id: phase-16.3-claude-code-handlers-contract
+    source_doc: docs/api/claude-code-endpoints.md
+    source_section: "FROZEN contract endpoints"
+    asserts: "Claude Code REST handlers (heartbeat, patch-status, pending-actions, plugin-sync, register-pid, unfreeze) accept their documented payloads and return the documented response shapes. Contract is FROZEN — any signature change is a breaking change requiring announcement."
+    implementation_file: internal/api/claude_code_handlers.go
+    implementation_line: 252
+    implementation_symbol: "handleClaudeCodeHeartbeat (and 9 sibling handlers at lines 321, 337, 353, 379, 415, 489, 511, 561, 707)"
+    scenario_id: scn-claude-code-endpoints-roundtrip
+    verification_status: needs_audit
+    last_verified: null
+
+  - claim_id: gateway-invoke-meta-tools
+    source_doc: docs/ADR-0006-toolsearch-vs-gateway-metatools.md
+    source_section: "Gateway meta-tools"
+    asserts: "gateway.list_servers, gateway.list_tools, and gateway.invoke meta-tools route correctly to any registered backend by name. gateway.invoke handles backend tool calls when the static tool list is stale."
+    implementation_file: internal/proxy/gateway.go
+    implementation_line: 172
+    implementation_symbol: "registerGatewayBuiltins (handlers at 245 handleGatewayInvoke, 296 handleGatewayListServers, 339 handleGatewayListTools)"
+    scenario_id: scn-gateway-meta-tools-roundtrip
+    verification_status: needs_audit
+    last_verified: null
+
+  - claim_id: scalability-3x16-sessions
+    source_doc: docs/spikes/2026-04-24-scalability-vs-classical-mcp.md
+    source_section: "3 windows × 16 tabs workload"
+    asserts: "Gateway sustains 3 concurrent VS Code windows × 16 MCP tabs each (48 total stdio sessions) without orphaning, cross-talk, or session ID collision. After all windows close, daemon process survives (PID unchanged)."
+    implementation_file: internal/proxy/gateway.go
+    implementation_line: null
+    implementation_symbol: "Gateway routing + session multiplexer — line unverified, gather from scenario run"
+    scenario_id: scn-scalability-3x16
+    verification_status: needs_audit
+    last_verified: null
+
+  - claim_id: server-rename-credential-store-move
+    source_doc: docs/PLAN-server-rename.md
+    source_section: "Phase 2 — TS Extension Client"
+    asserts: "Renaming a server in the VS Code extension atomically moves credentials in SecretStorage with index-first ordering; partial-failure mid-rename leaves either all-old or all-new state, never partial."
+    implementation_file: vscode/mcp-gateway-dashboard/src/credential-store.ts
+    implementation_line: 148
+    implementation_symbol: renameServerCredentials
+    scenario_id: scn-server-rename-credential-move
+    verification_status: needs_audit
+    last_verified: null
+
+  - claim_id: sap-keepass-readonly
+    source_doc: docs/PLAN-sap-picker-and-import-mcp.md
+    source_section: "Phase A T-A.0 KeePass PoC"
+    asserts: "sapcreds.keepass reader reads KDBX (AES and ChaCha20 ciphers) in read-only mode; the KDBX file mtime and content hash are identical before and after the read operation."
+    implementation_file: internal/sapcreds/keepass.go
+    implementation_line: null
+    implementation_symbol: "KDBX reader — line unverified, populate from 03-doc-diff"
+    scenario_id: scn-sap-keepass-readonly
+    verification_status: needs_audit
+    last_verified: null
+
+  - claim_id: patchstate-toctou-atomic-compound
+    source_doc: docs/ROADMAP.md
+    source_section: "P1.2 FM-9 multi-instance hard-limit"
+    asserts: "patchstate compound operations (EnforceWindowAndRecordPid path) are atomic with respect to concurrent callers: no caller observes a partial state where the window record exists but the PID record does not, or vice versa."
+    implementation_file: internal/patchstate/state.go
+    implementation_line: null
+    implementation_symbol: "EnforceWindowAndRecordPid — line populated by 03-doc-diff"
+    scenario_id: scn-patchstate-concurrent-enforce
+    verification_status: needs_audit
+    last_verified: null
+    notes: "Added per PAL review M6 finding — load-bearing security boundary previously without a claim."
+
+  - claim_id: gateway-orphan-mcp-session-recovery
+    source_doc: docs/ROADMAP.md
+    source_section: "Phase 17 + Symptom A.2 mitigation"
+    asserts: "When a backend MCP session is orphaned (daemon restart, transport disconnect), the gateway returns a structured 'session not found' error to the caller rather than hanging or returning silent corruption. Subsequent calls with a new session_id succeed."
+    implementation_file: internal/proxy/gateway.go
+    implementation_line: null
+    implementation_symbol: "session lookup error path — populate from 03-doc-diff"
+    scenario_id: scn-backend-crash-mid-session
+    verification_status: needs_audit
+    last_verified: null
+    notes: "Added per PAL review M5 — missing scenario for backend crash mid-session."
