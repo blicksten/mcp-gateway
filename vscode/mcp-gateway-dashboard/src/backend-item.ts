@@ -8,13 +8,17 @@ interface IconDef {
 }
 
 const STATUS_ICONS: Record<ServerStatus, IconDef> = {
-	running:    { id: 'vm-running',    color: 'testing.iconPassed' },
-	stopped:    { id: 'debug-stop',    color: 'disabledForeground' },
-	error:      { id: 'error',         color: 'testing.iconFailed' },
-	degraded:   { id: 'warning',       color: 'list.warningForeground' },
-	disabled:   { id: 'circle-slash',  color: 'disabledForeground' },
-	starting:   { id: 'loading~spin' },
-	restarting: { id: 'sync~spin' },
+	running:     { id: 'vm-running',    color: 'testing.iconPassed' },
+	stopped:     { id: 'debug-stop',    color: 'disabledForeground' },
+	error:       { id: 'error',         color: 'testing.iconFailed' },
+	degraded:    { id: 'warning',       color: 'list.warningForeground' },
+	disabled:    { id: 'circle-slash',  color: 'disabledForeground' },
+	starting:    { id: 'loading~spin' },
+	restarting:  { id: 'sync~spin' },
+	// Yellow warning triangle, same color as 'degraded'. Stable badge —
+	// no spinner — communicates "host is down, gateway knows, not in
+	// a doom loop". See docs/PLAN-unreachable-handling.md.
+	unreachable: { id: 'warning',       color: 'list.warningForeground' },
 };
 
 export class BackendItem extends vscode.TreeItem {
@@ -27,10 +31,20 @@ export class BackendItem extends vscode.TreeItem {
 		this.contextValue = server.status;
 		const transport = server.transport || 'rest';
 		const restartSuffix = server.restart_count > 0 ? ` (x${server.restart_count})` : '';
-		// When stale, append "· offline" so the user sees data is from cache.
-		this.description = stale
-			? `${transport}${restartSuffix} · offline`
-			: `${transport}${restartSuffix}`;
+		// Build the right-aligned description text. Order of precedence:
+		//   stale (cache, gateway offline)  →  "· offline"
+		//   status=unreachable (host down)  →  "· host offline (slow-polling)"
+		//   default                          →  no suffix.
+		// "host offline" is the unreachable wording so operators read it
+		// as "your network/VPN, not the gateway"; the slow-polling tag
+		// signals gateway is patiently re-checking, no spinner needed.
+		let suffix = '';
+		if (stale) {
+			suffix = ' · offline';
+		} else if (server.status === 'unreachable') {
+			suffix = ' · host offline (slow-polling)';
+		}
+		this.description = `${transport}${restartSuffix}${suffix}`;
 		this.tooltip = BackendItem.buildTooltip(server, stale);
 
 		if (stale) {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
@@ -28,6 +29,20 @@ const (
 	DefaultRESTHealthTimeout    = 5 * time.Second
 	DefaultMaxConcurrentChecks  = 20
 	DefaultRestartStuckTimeout  = 60 * time.Second
+	// UnreachableProbeInitial — interval between reachability TCP probes
+	// for backends in StatusUnreachable for the first 5 probes (~5 min).
+	UnreachableProbeInitial = 60 * time.Second
+	// UnreachableProbeMax — interval cap for reachability probes after
+	// the initial window. Long-unreachable backends are checked every
+	// 5 min, not flooded with retries. See docs/PLAN-unreachable-handling.md.
+	UnreachableProbeMax = 5 * time.Minute
+	// UnreachableProbeDialTimeout — single TCP-dial budget for one
+	// reachability probe. Short to keep the monitor loop responsive
+	// even when the slow-poll target is genuinely unreachable.
+	UnreachableProbeDialTimeout = 3 * time.Second
+	// UnreachableProbeInitialBurstCount — number of probes at the
+	// initial cadence before backing off to UnreachableProbeMax.
+	UnreachableProbeInitialBurstCount = 5
 	// DefaultConsecutiveFailedStarts trips the circuit breaker when a server
 	// fails to start this many times in a row, regardless of the time window.
 	// Guards against the window-reset escape: with 90s restart intervals and
@@ -110,6 +125,16 @@ type serverState struct {
 	// attemptRestart before this instant is skipped. Cleared on a proven
 	// healthy check and by ResetCircuit.
 	nextRestartAllowedAt time.Time
+	// nextReachProbeAt gates the slow-poll reachability check for
+	// backends in StatusUnreachable. Set by maybeProbeUnreachable each
+	// time it dispatches a probe. Cleared when the backend transitions
+	// back to StatusRunning. See docs/PLAN-unreachable-handling.md.
+	nextReachProbeAt time.Time
+	// reachProbeCount counts dispatched reachability probes for the
+	// current StatusUnreachable episode. Drives the burst-then-backoff
+	// cadence (first N at 60s, then 5min cap). Reset to 0 on transition
+	// back to StatusRunning.
+	reachProbeCount int
 }
 
 // Monitor periodically checks backend server health and manages
@@ -237,9 +262,125 @@ func (m *Monitor) checkAll(ctx context.Context) {
 			if !entry.StartedAt.IsZero() && time.Since(entry.StartedAt) > DefaultRestartStuckTimeout {
 				m.lm.SetStatus(entry.Name, models.StatusError, "stuck in restarting state")
 			}
+		case models.StatusUnreachable:
+			// pdap-docs unreachable feature: slow-poll for reachability
+			// instead of restart-storming. The probe is short (3s TCP
+			// dial) and throttled (60s initial, 5min cap) so it does not
+			// add load to the monitor loop. On reachable -> Start() to
+			// resume normal flow. See docs/PLAN-unreachable-handling.md.
+			wg.Add(1)
+			go func(e models.ServerEntry) {
+				defer wg.Done()
+				if err := bh.AcquirePermit(ctx); err != nil {
+					return
+				}
+				defer bh.ReleasePermit()
+				defer func() {
+					if r := recover(); r != nil {
+						m.logger.Error("panic in unreachable probe recovered",
+							"server", e.Name, "panic", r)
+					}
+				}()
+				m.maybeProbeUnreachable(ctx, e)
+			}(entry)
 		}
 	}
 	wg.Wait()
+}
+
+// maybeProbeUnreachable runs the slow-poll reachability probe for a
+// StatusUnreachable backend. Throttled via serverState.nextReachProbeAt
+// to UnreachableProbeInitial (60s) for the first
+// UnreachableProbeInitialBurstCount (5) probes, then capped at
+// UnreachableProbeMax (5min). On reachable, schedules a full Start
+// (which runs the TCP pre-check + connectSafe MCP handshake; failure
+// there will route the backend back to StatusUnreachable or
+// StatusError via the same classifier).
+//
+// CRITICAL: this path does NOT touch serverState.restartCount,
+// firstRestartAt, consecutiveFailures, or any other field driving the
+// existing circuit-breaker. An unreachable backend can sit in slow-poll
+// indefinitely without ever opening the circuit — that is the desired
+// "stable yellow warning" behaviour. The breaker exists for genuine
+// flapping (start succeeds, ping fails repeatedly), not for VPN-off
+// network partitions.
+func (m *Monitor) maybeProbeUnreachable(ctx context.Context, entry models.ServerEntry) {
+	if entry.Config.URL == "" {
+		// stdio backends don't have a URL — they should never reach
+		// StatusUnreachable (the classifier path is HTTP-only). Defensive.
+		return
+	}
+	now := time.Now()
+	m.mu.Lock()
+	state := m.getOrCreateState(entry.Name)
+	if !state.nextReachProbeAt.IsZero() && now.Before(state.nextReachProbeAt) {
+		m.mu.Unlock()
+		return // throttled — next probe scheduled for later
+	}
+	state.reachProbeCount++
+	probeCount := state.reachProbeCount
+	delay := UnreachableProbeInitial
+	if probeCount > UnreachableProbeInitialBurstCount {
+		delay = UnreachableProbeMax
+	}
+	state.nextReachProbeAt = now.Add(delay)
+	m.mu.Unlock()
+
+	reachable := m.probeReachable(ctx, entry.Config.URL)
+	if !reachable {
+		m.logger.Debug("unreachable probe still failing",
+			"server", entry.Name,
+			"probe_count", probeCount,
+			"next_probe_in", delay,
+		)
+		return
+	}
+
+	// Host is reachable again — reset probe state and trigger Start.
+	m.logger.Info("backend reachable again, attempting Start",
+		"server", entry.Name, "probe_count", probeCount)
+	m.mu.Lock()
+	state.reachProbeCount = 0
+	state.nextReachProbeAt = time.Time{}
+	m.mu.Unlock()
+
+	// Start runs the full lifecycle (TCP pre-check + MCP handshake).
+	// If anything fails, the classifier re-routes back to
+	// StatusUnreachable / StatusError as appropriate. We don't touch
+	// status here directly — Start owns that.
+	if err := m.lm.Start(ctx, entry.Name); err != nil {
+		m.logger.Warn("auto-restart after reachability recovery failed",
+			"server", entry.Name, "error", err)
+	}
+}
+
+// probeReachable performs a short TCP dial to verify reachability. Returns
+// true if the dial succeeds within UnreachableProbeDialTimeout, false on
+// any failure. Mirrors lifecycle.checkTCPReachable but without error
+// classification — the only consumer of the result is a boolean decision.
+func (m *Monitor) probeReachable(ctx context.Context, rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" || u.Scheme == "mcps" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	addr := net.JoinHostPort(host, port)
+	dialCtx, cancel := context.WithTimeout(ctx, UnreachableProbeDialTimeout)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", addr)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // checkOne performs a two-level health check on one server.

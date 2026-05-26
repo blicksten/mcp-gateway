@@ -71,8 +71,13 @@ func TestHTTPBackend_InitialConnectionFailure(t *testing.T) {
 	// Since the unfreeze-button fix, the TCP pre-check (checkTCPReachable) fires
 	// before connectSafe, so the error is returned immediately without writing
 	// "[gateway] connecting…" or "[gateway] HTTP connect failed:" to the ring
-	// buffer.  The contract is: StatusError is set and LastError contains
-	// "host unreachable".
+	// buffer.
+	//
+	// pdap-docs unreachable feature (docs/PLAN-unreachable-handling.md):
+	// the contract is now StatusUnreachable (not StatusError) for transport-
+	// layer failures like "connection refused" on a closed port. The slow-
+	// poll recovery (60s) replaces the previous aggressive restart loop.
+	// LastError still contains "host unreachable" from checkTCPReachable.
 	cfg := &models.Config{
 		Servers: map[string]*models.ServerConfig{
 			"bad-url": {URL: "http://127.0.0.1:1/mcp"},
@@ -90,7 +95,8 @@ func TestHTTPBackend_InitialConnectionFailure(t *testing.T) {
 
 	e, ok := m.Entry("bad-url")
 	require.True(t, ok)
-	assert.Equal(t, models.StatusError, e.Status)
+	assert.Equal(t, models.StatusUnreachable, e.Status,
+		"TCP-level failure (ECONNREFUSED) must route to StatusUnreachable, not StatusError")
 	assert.NotEmpty(t, e.LastError, "LastError must be set on TCP pre-check failure")
 	assert.Contains(t, e.LastError, "host unreachable",
 		"LastError must contain 'host unreachable' from checkTCPReachable")

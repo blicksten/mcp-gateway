@@ -12,6 +12,10 @@ const STATUS_DOTS: Record<ServerStatus, string> = {
 	disabled: '\u2298',
 	starting: '\u25CB',
 	restarting: '\u25CB',
+	// Same yellow warning glyph as 'degraded' \u2014 both communicate "needs
+	// attention but not broken" / "host offline, no spin". See
+	// docs/PLAN-unreachable-handling.md.
+	unreachable: '\u26A0',
 };
 
 export class SapStatusBar implements vscode.Disposable {
@@ -43,12 +47,14 @@ export class SapStatusBar implements vscode.Disposable {
 		this.item.text = `$(server) SAP: ${labels.join('  ')}`;
 
 		const hasError = systems.some((s) => s.status === 'error');
-		const hasDegraded = systems.some((s) => s.status === 'degraded');
+		const hasDegraded = systems.some((s) => s.status === 'degraded' || s.status === 'unreachable');
 		const allRunning = systems.every((s) => s.status === 'running');
 		this.item.backgroundColor = undefined;
 		if (hasError) {
 			this.item.color = new vscode.ThemeColor('testing.iconFailed');
 		} else if (hasDegraded) {
+			// 'unreachable' rolls into the yellow bucket (same UX semantic
+			// as 'degraded'). See docs/PLAN-unreachable-handling.md.
 			this.item.color = new vscode.ThemeColor('notificationsWarningIcon.foreground');
 		} else if (allRunning) {
 			this.item.color = new vscode.ThemeColor('testing.iconPassed');

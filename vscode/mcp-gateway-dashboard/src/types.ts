@@ -8,7 +8,16 @@ export type ServerStatus =
 	| 'degraded'
 	| 'error'
 	| 'restarting'
-	| 'disabled';
+	| 'disabled'
+	// Transport-layer failure: host cannot be reached at the TCP level
+	// (DNS fail, conn-refused, network partition, VPN off). Distinct from
+	// 'error' which is for protocol-layer failures (HTTP 4xx/5xx, TLS
+	// handshake, bad MCP handshake). Unreachable backends are slow-polled
+	// (~60s) by the gateway health monitor instead of restart-stormed —
+	// UI shows a stable yellow warning, not a spinner or red error.
+	// Auto-recovers when host becomes reachable again.
+	// See docs/PLAN-unreachable-handling.md.
+	| 'unreachable';
 
 export interface ToolInfo {
 	name: string;

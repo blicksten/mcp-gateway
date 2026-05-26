@@ -2,11 +2,14 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
+	"syscall"
 	"time"
 )
 
@@ -99,4 +102,76 @@ func checkTCPReachable(ctx context.Context, rawURL string, timeout time.Duration
 	}
 	conn.Close()
 	return nil
+}
+
+// IsTransportUnreachable reports whether err represents a transport-layer
+// failure to reach the backend host — distinct from a protocol-layer
+// failure once the connection is established. Returns true for: DNS
+// resolution failure, TCP connection refused, host/network unreachable,
+// dial timeout (context deadline OR Go's underlying timeout). Returns
+// false for protocol errors (HTTP 4xx/5xx, TLS handshake failure, MCP
+// handshake reject) and for non-network errors.
+//
+// Used by the lifecycle manager to route TCP-unreachable failures to
+// StatusUnreachable (slow-poll recovery, yellow UI badge) instead of
+// StatusError (aggressive restart). See docs/PLAN-unreachable-handling.md.
+//
+// On Windows the underlying syscall errors map to ECONNREFUSED /
+// ENETUNREACH / EHOSTUNREACH like POSIX, so the syscall checks work
+// without OS branching. The Windows-only message substrings
+// ("connectex: A connection attempt failed", "target machine actively
+// refused") are kept as a defensive fallback in case Go's net package
+// stops surfacing syscall.Errno through errors.Is on a future Windows
+// build — pinned by the classifier unit tests so any regression is
+// caught in CI.
+func IsTransportUnreachable(err error) bool {
+	if err == nil {
+		return false
+	}
+	// 1. DNS resolution failure (e.g. "no such host", VPN-DNS down).
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	// 2. POSIX/Windows syscall errors meaning "transport refuses/can't reach".
+	if errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.EHOSTUNREACH) {
+		return true
+	}
+	// 3. net.OpError on the dial path that timed out — covers both
+	//    "i/o timeout" raw and "connectex: A connection attempt failed"
+	//    on Windows (which wraps WSAETIMEDOUT but not always exposed
+	//    through errors.Is on older Go versions).
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		if opErr.Timeout() {
+			return true
+		}
+		// Defensive Windows substring fallback. Pinned by unit tests.
+		msg := opErr.Err.Error()
+		if strings.Contains(msg, "connectex: A connection attempt failed") ||
+			strings.Contains(msg, "target machine actively refused") ||
+			strings.Contains(msg, "no route to host") ||
+			strings.Contains(msg, "network is unreachable") {
+			return true
+		}
+	}
+	// 4. Dial-time context.DeadlineExceeded — caller passed a deadline
+	//    that fired during the dial phase (e.g. our 3s checkTCPReachable
+	//    timeout). On a healthy network the dial completes in <100 ms;
+	//    a deadline-exceeded here is a strong signal of unreachable.
+	//    NOTE: this branch is only taken when the dial was the operation
+	//    that hit the deadline — request-context deadlines bubbling up
+	//    from higher layers are handled by the syscall.Errno / DNSError
+	//    branches above.
+	if errors.Is(err, context.DeadlineExceeded) {
+		// Only treat as unreachable when paired with a dial-shaped
+		// net.OpError (the dial that timed out). Bare DeadlineExceeded
+		// can come from any phase and should preserve current behavior.
+		if errors.As(err, &opErr) && opErr.Op == "dial" {
+			return true
+		}
+	}
+	return false
 }

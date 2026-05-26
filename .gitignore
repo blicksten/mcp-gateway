@@ -12,10 +12,14 @@ dist/
 # Output
 *.out
 *.output
+*.tmp
 .test-output.txt
 .ts-test-output.txt
 .ts-lint.txt
 .diff-detector.txt
+
+# Playwright MCP browser-tool runtime cache
+.playwright-mcp/
 
 # Logs
 logs/

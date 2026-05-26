@@ -464,11 +464,16 @@ func TestStart_HTTPBackend_UnreachableHost_FastFail(t *testing.T) {
 	assert.Contains(t, err.Error(), "host unreachable",
 		"error must contain 'host unreachable' from checkTCPReachable")
 
-	// Backend status must be StatusError, not stuck in StatusStarting.
+	// Backend status must be StatusUnreachable (NOT StatusError or
+	// StatusStarting). pdap-docs unreachable feature
+	// (docs/PLAN-unreachable-handling.md) routes TCP-level failures to
+	// StatusUnreachable so the UI shows a stable yellow warning and the
+	// health monitor switches to slow-poll recovery instead of the old
+	// aggressive exponential-restart loop.
 	e, ok := m.Entry("unreachable")
 	require.True(t, ok)
-	assert.Equal(t, models.StatusError, e.Status,
-		"backend must be in StatusError after TCP pre-check failure")
+	assert.Equal(t, models.StatusUnreachable, e.Status,
+		"backend must be in StatusUnreachable after TCP pre-check failure")
 }
 
 // TestStart_StdioBackend_NoTCPCheck verifies that stdio backends (cfg.URL == "",

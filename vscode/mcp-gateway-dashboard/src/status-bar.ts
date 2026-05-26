@@ -64,14 +64,30 @@ export class McpStatusBar implements vscode.Disposable {
 	): void {
 		this.resetStyle();
 
+		const allUnreachable = total > 0 && servers.every((s) => s.status === 'unreachable');
+		const anyUnreachable = servers.some((s) => s.status === 'unreachable');
+
 		if (total === 0) {
 			this.item.text = '$(circle-slash) MCP: \u2014';
 		} else if (running === total) {
 			this.item.text = `$(check) MCP: ${running}/${total}`;
 			this.item.color = new vscode.ThemeColor('testing.iconPassed');
+		} else if (allUnreachable) {
+			// All servers unreachable (e.g. VPN-off, all backends behind it):
+			// yellow warning, NOT red error. The gateway is healthy; the
+			// hosts are. Operator sees "your network, fix that" rather than
+			// "gateway broken". See docs/PLAN-unreachable-handling.md.
+			this.item.text = `$(warning) MCP: 0/${total} (offline)`;
+			this.item.color = new vscode.ThemeColor('list.warningForeground');
 		} else if (running === 0) {
 			this.item.text = `$(error) MCP: 0/${total}`;
 			this.item.color = new vscode.ThemeColor('testing.iconFailed');
+		} else if (anyUnreachable) {
+			// Partial running + some unreachable: still yellow (matches
+			// per-server colour) so the aggregate icon matches the dominant
+			// per-server icon when the operator opens the tree.
+			this.item.text = `$(warning) MCP: ${running}/${total}`;
+			this.item.color = new vscode.ThemeColor('list.warningForeground');
 		} else {
 			this.item.text = `$(warning) MCP: ${running}/${total}`;
 			this.item.color = new vscode.ThemeColor('notificationsWarningIcon.foreground');
@@ -150,7 +166,10 @@ export class McpStatusBar implements vscode.Disposable {
 			byStatus.set(s.status, bucket);
 		}
 		// Deterministic order: running first, then problematic, then others.
-		const order = ['running', 'degraded', 'error', 'restarting', 'starting', 'stopped', 'disabled'];
+		// 'unreachable' grouped with 'degraded' (both yellow / "needs
+		// attention but not broken"). Ahead of 'error' to highlight the
+		// network/VPN angle first when both classes are present.
+		const order = ['running', 'unreachable', 'degraded', 'error', 'restarting', 'starting', 'stopped', 'disabled'];
 		for (const status of order) {
 			const names = byStatus.get(status);
 			if (!names || names.length === 0) { continue; }

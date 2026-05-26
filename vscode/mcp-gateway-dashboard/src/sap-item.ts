@@ -11,6 +11,8 @@ const STATUS_ICONS: Record<ServerStatus, string> = {
 	disabled: 'circle-slash',
 	starting: 'loading~spin',
 	restarting: 'sync~spin',
+	// Yellow warning, same as degraded — see docs/PLAN-unreachable-handling.md.
+	unreachable: 'warning',
 };
 
 const STATUS_DOTS: Record<ServerStatus, string> = {
@@ -21,6 +23,7 @@ const STATUS_DOTS: Record<ServerStatus, string> = {
 	disabled: '\u2298',     // ⊘
 	starting: '\u25CB',
 	restarting: '\u25CB',
+	unreachable: '\u26A0',  // \u26A0 \u2014 see docs/PLAN-unreachable-handling.md
 };
 
 /**

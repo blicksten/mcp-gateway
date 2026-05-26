@@ -73,6 +73,19 @@ func (b *BackendSupervisor) Serve(ctx context.Context) error {
 		b.logger.Info("suture: circuit open, not restarting", "backend", b.name)
 		return suture.ErrDoNotRestart
 	}
+	// Gate: StatusUnreachable backends are slow-polled by the health
+	// monitor (60s probe cycle) instead of suture-restarted. Returning
+	// ErrDoNotRestart here removes the service from the supervisor;
+	// the monitor's maybeProbeUnreachable will re-add it via
+	// AddBackendToSupervisor when the host becomes reachable again.
+	// Without this gate, suture's FailureBackoff would still pile retries
+	// on top of the monitor's slow-poll, defeating the "stop spinning" UX.
+	// See docs/PLAN-unreachable-handling.md.
+	if b.checker.BackendStatus(b.name) == models.StatusUnreachable {
+		b.logger.Info("suture: backend unreachable, deferring to health monitor slow-poll",
+			"backend", b.name)
+		return suture.ErrDoNotRestart
+	}
 
 	b.logger.Info("suture: starting backend", "backend", b.name)
 	if err := b.manager.Start(ctx, b.name); err != nil {

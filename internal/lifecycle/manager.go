@@ -219,12 +219,26 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 
 	// TCP reachability pre-check for HTTP/SSE backends. Avoids a 42-second
 	// Windows connectex timeout when the backend host is unreachable.
+	//
+	// pdap-docs unreachable feature: classify the failure mode. Transport-
+	// layer failures (DNS, conn-refused, host-unreach, dial-timeout —
+	// typical of VPN-off / network-partition) route to StatusUnreachable
+	// so the operator UI shows a stable yellow warning instead of red
+	// error + the health monitor switches to slow-poll recovery.
+	// Protocol-layer failures (TLS handshake, HTTP 4xx/5xx) keep
+	// StatusError (with aggressive restart) because those are usually
+	// actual backend bugs that benefit from quick retries.
+	// See docs/PLAN-unreachable-handling.md.
 	if cfg.URL != "" {
 		if err := checkTCPReachable(ctx, cfg.URL, 3*time.Second); err != nil {
 			m.mu.Lock()
 			if e2, ok := m.entries[name]; ok {
 				e2.starting = false
-				e2.Status = models.StatusError
+				if IsTransportUnreachable(err) {
+					e2.Status = models.StatusUnreachable
+				} else {
+					e2.Status = models.StatusError
+				}
 				e2.LastError = err.Error()
 			}
 			m.mu.Unlock()

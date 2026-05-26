@@ -75,13 +75,24 @@ func ValidateServerName(name string) error {
 type ServerStatus string
 
 const (
-	StatusStopped    ServerStatus = "stopped"
-	StatusStarting   ServerStatus = "starting"
-	StatusRunning    ServerStatus = "running"
-	StatusDegraded   ServerStatus = "degraded"
-	StatusError      ServerStatus = "error"
-	StatusRestarting ServerStatus = "restarting"
-	StatusDisabled   ServerStatus = "disabled"
+	StatusStopped     ServerStatus = "stopped"
+	StatusStarting    ServerStatus = "starting"
+	StatusRunning     ServerStatus = "running"
+	StatusDegraded    ServerStatus = "degraded"
+	StatusError       ServerStatus = "error"
+	StatusRestarting  ServerStatus = "restarting"
+	StatusDisabled    ServerStatus = "disabled"
+	// StatusUnreachable indicates a transport-level failure where the
+	// backend host cannot be reached at the TCP layer (host down, DNS
+	// failure, VPN off, network partition). Distinct from StatusError
+	// which is for protocol-level failures (bad MCP handshake, 4xx/5xx
+	// HTTP responses, TLS handshake fails). An unreachable backend is
+	// slow-polled for reachability (~60s) instead of being aggressively
+	// restarted with exponential backoff — operator UX is a stable yellow
+	// "host offline" badge rather than a perpetually-spinning loader.
+	// Auto-recovers (Start → Running) when the host becomes reachable
+	// again. See docs/PLAN-unreachable-handling.md.
+	StatusUnreachable ServerStatus = "unreachable"
 )
 
 // ServerConfig defines how to connect to a backend MCP server.
