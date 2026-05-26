@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.33.6",
+  "version": "1.33.7",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -432,6 +432,12 @@
           "type": "string",
           "default": "",
           "description": "Optional KeePass group to filter entries to (e.g. 'MCP/Servers'). Empty = all groups.",
+          "scope": "machine"
+        },
+        "mcpGateway.sapLandscapePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to SAPUILandscape.xml for the SAP Picker. Empty resolves to %APPDATA%/SAP/Common/SAPUILandscape.xml on Windows (the SAP Logon default).",
           "scope": "machine"
         },
         "mcpGateway.marketplaceJsonPath": {
