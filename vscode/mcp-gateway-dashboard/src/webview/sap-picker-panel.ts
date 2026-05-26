@@ -1,4 +1,5 @@
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { IGatewayClient } from '../extension';
@@ -196,9 +197,53 @@ export class SapPickerPanel {
 			landscapePath = path.join(appData, 'SAP', 'Common', 'SAPUILandscape.xml');
 		}
 
-		const mcpCtlPath = cfg.get<string>('mcpCtlPath', '').trim() || 'mcp-ctl';
+		const mcpCtlPath = this.resolveMcpCtlPath(cfg);
+		logger.info('sap-picker', `using mcp-ctl at ${mcpCtlPath}`);
 
 		return { mcpCtlPath, kdbxPath, landscapePath };
+	}
+
+	/**
+	 * Resolve which mcp-ctl binary to spawn. Strict order:
+	 *   1. mcpGateway.mcpCtlPath if set AND the file exists on disk.
+	 *   2. Sibling of mcpGateway.daemonPath (mcp-ctl(.exe) in same dir).
+	 *      mcp-ctl ships next to the daemon in every release artefact,
+	 *      and the user's daemon path is reliably set since the daemon
+	 *      runs.
+	 *   3. Bare "mcp-ctl" → execFile resolves via PATH.
+	 *
+	 * Why the file-exists check on (1): a stale or out-of-band binary at
+	 * ~/go/bin/mcp-ctl.exe on PATH can shadow the configured path when
+	 * cfg.get returns empty for any reason (machine-scope read miss,
+	 * profile mismatch, settings.json typo). The old binary did not have
+	 * `credential list-structured` and surfaces the SAP Picker as
+	 * "unknown flag: --kdbx" — observed 2026-05-26.
+	 */
+	private resolveMcpCtlPath(cfg: vscode.WorkspaceConfiguration): string {
+		const explicit = cfg.get<string>('mcpCtlPath', '').trim();
+		if (explicit && fs.existsSync(explicit)) {
+			return explicit;
+		}
+		if (explicit) {
+			logger.warn('sap-picker', `mcpGateway.mcpCtlPath does not exist on disk: ${explicit}`);
+		}
+
+		const daemonPath = cfg.get<string>('daemonPath', '').trim();
+		if (daemonPath) {
+			const dir = path.dirname(daemonPath);
+			const candidates = [path.join(dir, 'mcp-ctl.exe'), path.join(dir, 'mcp-ctl')];
+			for (const c of candidates) {
+				if (fs.existsSync(c)) {
+					logger.info('sap-picker', `mcpCtlPath empty/missing — falling back to daemon sibling: ${c}`);
+					return c;
+				}
+			}
+		}
+
+		// Last resort. execFile will probe PATH; on Windows the resolution
+		// includes %PATHEXT%. Behaviour matches legacy mcp-ctl invocations
+		// from runKeepassImport.
+		return 'mcp-ctl';
 	}
 
 	/**

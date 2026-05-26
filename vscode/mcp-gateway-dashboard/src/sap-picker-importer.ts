@@ -105,8 +105,14 @@ export async function listPickerRows(opts: PickerListOptions): Promise<PickerLis
 					const execErr = err as ExecException;
 					const exitCode = typeof execErr.code === 'number' ? execErr.code : undefined;
 					const stderrHead = (stderrBuf ?? '').split(/\r?\n/, 1)[0] ?? '';
+					// Include resolved mcp-ctl path so the operator can tell
+					// at a glance whether a stale binary on PATH was hit
+					// instead of the one configured in mcpGateway.mcpCtlPath.
+					// "unknown flag: --kdbx" landing here is a near-certain
+					// indicator that an old binary (pre-list-structured) was
+					// found via PATH-fallback.
 					reject(new SapPickerImportError(
-						`mcp-ctl failed${stderrHead ? ': ' + stderrHead : ''}`,
+						`mcp-ctl (${opts.mcpCtlPath}) failed${stderrHead ? ': ' + stderrHead : ''}`,
 						exitCode,
 					));
 					return;

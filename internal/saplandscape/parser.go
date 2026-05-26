@@ -43,9 +43,37 @@ type Landscape struct {
 	Warnings []string
 }
 
-// xmlWorkspace mirrors the top-level <Workspace> element.
+// xmlWorkspace mirrors the legacy top-level <Workspace> element used in our
+// historical test fixtures (testdata/*.xml). decodeWorkspace below tolerates
+// the real SAP Logon shape (root <Landscape>) by transcribing into this type.
 type xmlWorkspace struct {
 	XMLName  xml.Name     `xml:"Workspace"`
+	Services []xmlService `xml:"Services>Service"`
+	Includes []xmlInclude `xml:"Includes>Include"`
+}
+
+// xmlLandscape mirrors the real SAP Logon top-level element. SAP GUI for
+// Windows v8000.1.x (verified against an operator file 2026-05-26) emits:
+//
+//   <Landscape updated="..." version="1" generator="SAP GUI for Windows ...">
+//     <Includes>
+//       <Include url="file://server/share/SAPUILandscape.xml" .../>
+//     </Includes>
+//     <Workspaces>
+//       <Workspace uuid="..." name="..."/>
+//     </Workspaces>
+//     <Services>
+//       <Service systemid="..." client="..." ... />
+//     </Services>
+//   </Landscape>
+//
+// Picker rows only need Services + Includes; we ignore <Workspaces> entirely
+// (it just groups Items by UUID — not load-bearing for SID/client/server
+// fields). Included files (UNC corporate landscapes) may carry the bulk of
+// the <Service> entries — parseInclude handles them recursively, each going
+// through decodeWorkspace again so the same dispatch applies.
+type xmlLandscape struct {
+	XMLName  xml.Name     `xml:"Landscape"`
 	Services []xmlService `xml:"Services>Service"`
 	Includes []xmlInclude `xml:"Includes>Include"`
 }
@@ -105,18 +133,57 @@ func ParseReader(r io.Reader, basePath string) (*Landscape, error) {
 // mapped to a zero-value workspace + nil error — empty landscape == zero
 // services is the documented contract (F-06 — TestParse_EmptyFile pins
 // this behaviour).
+//
+// 2026-05-26 fix: the historical implementation only matched root
+// <Workspace>, which is the shape of testdata/*.xml fixtures. Real SAP
+// Logon files use root <Landscape> with the same children. We now walk
+// to the first start element and dispatch on its local name so both
+// shapes parse to the same internal struct. An unknown root element
+// returns *ParseError so the caller can surface a clear diagnostic.
 func decodeWorkspace(r io.Reader, filePath string) (*xmlWorkspace, error) {
-	var ws xmlWorkspace
 	dec := xml.NewDecoder(r)
-	if err := dec.Decode(&ws); err != nil {
-		if synErr, ok := err.(*xml.SyntaxError); ok {
-			return nil, &ParseError{Path: filePath, Offset: int64(synErr.Line), Err: synErr}
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return &xmlWorkspace{}, nil
 		}
-		if err != io.EOF {
+		if err != nil {
+			if synErr, ok := err.(*xml.SyntaxError); ok {
+				return nil, &ParseError{Path: filePath, Offset: int64(synErr.Line), Err: synErr}
+			}
 			return nil, &ParseError{Path: filePath, Offset: 0, Err: err}
 		}
+		start, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		switch start.Name.Local {
+		case "Workspace":
+			var ws xmlWorkspace
+			if err := dec.DecodeElement(&ws, &start); err != nil {
+				if synErr, okSyn := err.(*xml.SyntaxError); okSyn {
+					return nil, &ParseError{Path: filePath, Offset: int64(synErr.Line), Err: synErr}
+				}
+				return nil, &ParseError{Path: filePath, Offset: 0, Err: err}
+			}
+			return &ws, nil
+		case "Landscape":
+			var ls xmlLandscape
+			if err := dec.DecodeElement(&ls, &start); err != nil {
+				if synErr, okSyn := err.(*xml.SyntaxError); okSyn {
+					return nil, &ParseError{Path: filePath, Offset: int64(synErr.Line), Err: synErr}
+				}
+				return nil, &ParseError{Path: filePath, Offset: 0, Err: err}
+			}
+			return &xmlWorkspace{Services: ls.Services, Includes: ls.Includes}, nil
+		default:
+			return nil, &ParseError{
+				Path:   filePath,
+				Offset: 0,
+				Err:    fmt.Errorf("unexpected root element <%s>: want <Landscape> or <Workspace>", start.Name.Local),
+			}
+		}
 	}
-	return &ws, nil
 }
 
 // parseInclude resolves and parses a single <Include> URL recursively.
