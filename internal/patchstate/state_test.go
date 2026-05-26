@@ -865,19 +865,19 @@ func TestClaimRespawn_RejectsNonPositive(t *testing.T) {
 }
 
 // TestClaimRespawn_EvictedByCleaner verifies the cleaner goroutine drops
-// claims older than RespawnClaimTTL.
+// claims older than RespawnClaimTTL. Uses the standard newTestState +
+// fakeClock.advance() idiom (review 0393974 MEDIUM-3 fix); the prior raw-
+// lambda assignment to s.now diverged from every other clock-dependent
+// test in this file and a future copy-paste could have produced a claim
+// whose ClaimedAt > TTL (immediately evictable false positive).
 func TestClaimRespawn_EvictedByCleaner(t *testing.T) {
-	s, _ := newTestState(t, "")
-
-	// Seed the now() function so we can advance it past the TTL.
-	base := time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC)
-	s.now = func() time.Time { return base }
+	s, fc := newTestState(t, "")
 
 	_, won := s.ClaimRespawn(1779613000000, 100, "win-A")
 	require.True(t, won)
 
 	// Advance clock past TTL and run the cleaner directly.
-	s.now = func() time.Time { return base.Add(RespawnClaimTTL + 1*time.Minute) }
+	fc.advance(RespawnClaimTTL + time.Minute)
 	s.evictExpired()
 
 	_, ok := s.GetRespawnClaim(1779613000000)
@@ -886,4 +886,77 @@ func TestClaimRespawn_EvictedByCleaner(t *testing.T) {
 	// New claim under same startedAtMs after eviction must win again.
 	_, wonAgain := s.ClaimRespawn(1779613000000, 200, "win-B")
 	assert.True(t, wonAgain, "post-eviction claim must win again")
+}
+
+// TestClaimRespawn_Concurrent verifies the first-writer-wins invariant
+// under concurrent ClaimRespawn calls from N goroutines for the same
+// startedAtMs. Exactly one goroutine must observe won=true; all others
+// must observe (existing_claim, false) where existing_claim is the
+// claim recorded by the winner. Mirrors
+// TestEnforceWindow_ConcurrentSameWindow_OneWins (the canonical pattern
+// for State write-path concurrency invariants) so any future refactor of
+// the State write lock catches both endpoints in CI -race.
+//
+// Review 0393974 LOW-2 fix — closes the gap where the original 4 Go
+// tests covered the sequential semantics only.
+func TestClaimRespawn_Concurrent(t *testing.T) {
+	s, _ := newTestState(t, "")
+
+	const startedAt int64 = 1779613000000
+	const N = 8
+	var wg sync.WaitGroup
+	wons := make([]bool, N)
+	claims := make([]*RespawnClaim, N)
+
+	wg.Add(N)
+	for i := range N {
+		go func(i int) {
+			defer wg.Done()
+			claim, won := s.ClaimRespawn(startedAt, uint32(30000+i), "win-"+string(rune('A'+i)))
+			wons[i] = won
+			claims[i] = claim
+		}(i)
+	}
+	wg.Wait()
+
+	winners := 0
+	losers := 0
+	for i := range N {
+		if wons[i] {
+			winners++
+		} else {
+			losers++
+		}
+		require.NotNil(t, claims[i], "every caller must receive a claim (won) or the existing claim (lost)")
+	}
+	assert.Equal(t, 1, winners, "exactly one goroutine must win the claim")
+	assert.Equal(t, N-1, losers, "every other goroutine must observe an existing claim")
+}
+
+// TestClaimRespawn_CapEnforced verifies the MaxRespawnClaimsCached cap
+// (review 0393974 MEDIUM-2). At cap, a fresh startedAtMs must observe
+// (nil, false) — silent reject — without panicking or mutating the map.
+// The existing-claim short-circuit must still work for cached entries
+// so legitimate same-boot retries are not affected.
+func TestClaimRespawn_CapEnforced(t *testing.T) {
+	s, _ := newTestState(t, "")
+
+	// Fill the map exactly to the cap with distinct startedAtMs values.
+	for i := range MaxRespawnClaimsCached {
+		claim, won := s.ClaimRespawn(int64(2_000_000_000_000+i), uint32(40000+i), "win-cap")
+		require.True(t, won, "fill claim %d must win", i)
+		require.NotNil(t, claim)
+	}
+
+	// One past the cap → silent reject.
+	overflow, won := s.ClaimRespawn(int64(2_000_000_000_000+MaxRespawnClaimsCached), 50000, "win-overflow")
+	assert.False(t, won, "claim past cap must not win")
+	assert.Nil(t, overflow, "claim past cap must return nil claim")
+
+	// Existing-claim short-circuit must still work at cap (re-claim of an
+	// already-cached startedAtMs returns the existing claim, NOT silent-reject).
+	cached, wonCached := s.ClaimRespawn(int64(2_000_000_000_000), 99999, "win-recheck")
+	assert.False(t, wonCached, "re-claim of cached entry must be lost")
+	require.NotNil(t, cached, "re-claim must surface the existing claim")
+	assert.Equal(t, uint32(40000), cached.PID, "existing-claim short-circuit must take precedence over the cap")
 }

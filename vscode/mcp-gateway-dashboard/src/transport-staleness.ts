@@ -89,8 +89,14 @@ export interface StalenessDetectorOptions {
  * Local fallback when no coordinator is supplied. Behaves as "always won"
  * — preserves the pre-Option-B per-window prompt behavior so the detector
  * never silently suppresses a prompt due to a missing dependency.
+ *
+ * Exported (review 0393974 MEDIUM-1) so extension.ts can use it as a
+ * fallback when the injected GatewayClient lacks claimRespawn (legacy
+ * daemon path). The pre-fix branch silently disabled the staleness
+ * detector entirely, which is a regression from pre-Option-B behaviour
+ * where every window showed the prompt — strictly worse than over-prompt.
  */
-const ALWAYS_WON_COORDINATOR: RespawnCoordinator = {
+export const ALWAYS_WON_COORDINATOR: RespawnCoordinator = {
     claim: async () => ({ kind: 'won' as const }),
 };
 
@@ -198,12 +204,6 @@ class StalenessDetectorImpl implements StalenessDetector {
         if (stale.length === 0) {
             return 0;
         }
-        // Mark every candidate as handled before we await user input — if the
-        // next cache refresh fires while the dialog is open, we must not
-        // re-prompt for the same PIDs.
-        for (const s of stale) {
-            this.handledPids.add(s.pid);
-        }
         // Path 1 sentinel (FM-33 spike, Gap B): coordinate with sibling
         // dashboard-extension instances across other VSCode windows so a
         // single daemon respawn produces ONE user prompt, not N. The first
@@ -212,6 +212,13 @@ class StalenessDetectorImpl implements StalenessDetector {
         // sentinel and skip the UI prompt (autoKill still runs locally — the
         // kill action is idempotent and the gateway is the single source of
         // truth for the surviving claude.exe).
+        //
+        // Review 0393974 LOW-1 fix: only mark handledPids AFTER a confirmed
+        // won claim. Marking before the claim resolved meant a lost claim
+        // permanently suppressed those PIDs for this detector's lifetime,
+        // even if the winner's user later dismissed without killing. Now
+        // a loser keeps the PIDs eligible for a future cache cycle if the
+        // winning dashboard never resolves the prompt.
         const claim = await this.respawnCoordinator.claim(gatewayStartedAt.getTime());
         if (claim.kind === 'lost') {
             logger.info(
@@ -219,6 +226,13 @@ class StalenessDetectorImpl implements StalenessDetector {
                 `respawn coordination: claim lost (pid=${claim.claimedBy.pid}) — skipping user prompt`,
             );
             return stale.length;
+        }
+        // Won the claim — now safe to mark every candidate as handled
+        // before we await user input. If the next cache refresh fires
+        // while the dialog is open, we must not re-prompt for the same
+        // PIDs in this window.
+        for (const s of stale) {
+            this.handledPids.add(s.pid);
         }
         if (this.autoKillEnabled()) {
             await this.killAll(stale);

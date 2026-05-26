@@ -89,6 +89,13 @@ type Server struct {
 	// cannot exhaust the budget for other sessions on the same host.
 	registerPidLimiter *rateLimiter
 	unfreezeLimiter    *rateLimiter
+	// respawnClaimLimiter guards POST /api/v1/claude-code/respawn-claim
+	// (Path 1 Option B atomic claim — review 0393974 HIGH-1). Per-IP
+	// because the request body has no session_id; mirrors
+	// pendingActionsLimiter / patchStatusLimiter shape. Defence-in-depth
+	// pair with patchstate.MaxRespawnClaimsCached cap on the underlying
+	// in-memory map.
+	respawnClaimLimiter *rateLimiter
 
 	// listenerAddr records the bound listener address once ListenAndServe
 	// has successfully called net.Listen. Nil before that point. Used by
@@ -281,6 +288,7 @@ func (s *Server) InitClaudeCodeLimiters() {
 	s.patchStatusLimiter = newRateLimiter(pendingActionsRateLimit, ipKey)
 	s.registerPidLimiter = newRateLimiter(registerPidRateLimit, sessionKey)
 	s.unfreezeLimiter = newRateLimiter(unfreezeRateLimit, sessionKey)
+	s.respawnClaimLimiter = newRateLimiter(respawnClaimRateLimit, ipKey)
 }
 
 // TriggerPluginRegen rebuilds the plugin's `.mcp.json` from the current

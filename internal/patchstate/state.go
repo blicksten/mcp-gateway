@@ -93,6 +93,14 @@ const (
 	// Each entry is ~40 bytes; 256 entries = ~10 KB ceiling regardless of
 	// how many short-lived VSCode windows have registered.
 	MaxSessionPidsCached = 256
+	// MaxRespawnClaimsCached is a hard cap on the in-memory respawn-claim
+	// map. Steady-state is 1 entry per daemon boot; 64 is comfortable
+	// headroom that survives short bursts (e.g. test fixtures or rapid
+	// restart cycling) while bounding heap growth in the presence of an
+	// abusive caller that holds the user-tier Bearer token. Defence-in-
+	// depth pair with api.respawnClaimLimiter rate limiter.
+	// Review 0393974 MEDIUM-2.
+	MaxRespawnClaimsCached = 64
 
 	// StaleTmpThreshold is the age cutoff for orphaned writeAtomic tmp files
 	// swept by Load. Set generously above worst-case in-flight persist duration.
@@ -1157,6 +1165,18 @@ func (s *State) ClaimRespawn(startedAtMs int64, pid uint32, windowID string) (*R
 		clone := *existing
 		s.mu.Unlock()
 		return &clone, false
+	}
+	// MaxRespawnClaimsCached defence-in-depth cap (review 0393974 MEDIUM-2).
+	// Silent reject mirrors RecordSessionPidWithWindow's cap pattern at
+	// L331: the caller treats a (nil, false) result the same as a lost
+	// claim, which is the correct degradation under abuse (no spurious
+	// prompts get suppressed, no panic, no unbounded heap growth). The
+	// limiter at api.respawnClaimLimiter is the primary defence — this cap
+	// only fires when a same-IP attacker burst-creates unique
+	// started_at_ms values faster than the cleaner can evict them.
+	if len(s.respawnClaims) >= MaxRespawnClaimsCached {
+		s.mu.Unlock()
+		return nil, false
 	}
 	claim := &RespawnClaim{
 		StartedAtMs: startedAtMs,

@@ -34,7 +34,7 @@ import { ImportClaudePanel } from './webview/import-claude-panel';
 import { SettingsPanel } from './webview/settings-panel';
 import { ClaudeCodePanel } from './webview/claude-code-panel';
 import { SlashCommandGenerator } from './slash-command-generator';
-import { createDefaultStalenessDetector } from './transport-staleness';
+import { createDefaultStalenessDetector, ALWAYS_WON_COORDINATOR } from './transport-staleness';
 import { ClaudeSessionBridge } from './claude-session-bridge';
 import { createDefaultRespawnCoordinator } from './respawn-coordinator';
 import { assertCompatible } from './version-compat';
@@ -208,26 +208,29 @@ export function activate(
 	// endpoint so a single daemon respawn produces ONE user prompt across
 	// all dashboard-extension instances. Replaces the v1 filesystem-sentinel
 	// approach -- no %TEMP% files, no sweep, atomicity via patchState mutex.
+	//
+	// Review 0393974 MEDIUM-1 fix: when the injected client lacks
+	// claimRespawn (legacy daemon, mock test client), fall back to
+	// ALWAYS_WON_COORDINATOR rather than disabling the detector entirely.
+	// Pre-fix behaviour silently regressed staleness detection on the
+	// "new extension + old daemon" path; the fallback restores pre-
+	// Option-B per-window prompt behaviour, which is strictly better
+	// than no prompt at all.
 	const respawnCoordinator = client.claimRespawn
 		? createDefaultRespawnCoordinator({ claimRespawn: (req) => client.claimRespawn!(req) })
-		: undefined;
-
-	if (respawnCoordinator) {
-		const stalenessDetector = createDefaultStalenessDetector({ respawnCoordinator });
-		context.subscriptions.push(stalenessDetector);
-		context.subscriptions.push(cache.onDidRefresh((payload) => {
-			void stalenessDetector.noteHealth(payload.gatewayHealth);
-		}));
-	} else {
-		// Option B (2026-05-25): if the client lacks claimRespawn the
-		// dashboard cannot coordinate respawn prompts across windows. Fall
-		// back to silent disable (no detector) -- pre-Option-B behavior
-		// was per-window prompt flood which is strictly worse.
+		: ALWAYS_WON_COORDINATOR;
+	if (!client.claimRespawn) {
 		logger.warn(
 			'extension',
-			'claimRespawn unavailable on injected client; transport-staleness detector disabled',
+			'claimRespawn unavailable on injected client; falling back to ALWAYS_WON_COORDINATOR (per-window prompts; no cross-window dedupe)',
 		);
 	}
+
+	const stalenessDetector = createDefaultStalenessDetector({ respawnCoordinator });
+	context.subscriptions.push(stalenessDetector);
+	context.subscriptions.push(cache.onDidRefresh((payload) => {
+		void stalenessDetector.noteHealth(payload.gatewayHealth);
+	}));
 
 	// Gap 3 fix (2026-05-24, spike-2026-05-23 §V2 follow-up). The register-pid
 	// pipeline is broken end-to-end for VSCode Claude Code users because the

@@ -332,6 +332,74 @@ func TestPendingActionsRateLimit_Returns429AfterThreshold(t *testing.T) {
 	assert.Equal(t, "60", rr.Header().Get("Retry-After"))
 }
 
+// TestRespawnClaim_CapOverflowReturnsLostNotPanic verifies the handler
+// nil-guard for the cap-overflow path (review 0393974 follow-up; closes
+// the CRITICAL regression introduced by the MEDIUM-2 fix where the
+// handler dereferenced claim.PID on a nil return from ClaimRespawn).
+// Saturates the in-memory map and then issues one more claim from a
+// brand-new started_at_ms; the handler must return 200 + Kind="lost"
+// (no ClaimedBy), not panic + 500. Rate limiter is disabled for this
+// test so the cap is reachable through the public surface.
+func TestRespawnClaim_CapOverflowReturnsLostNotPanic(t *testing.T) {
+	srv, ps := setupClaudeCodeServer(t)
+	// Disable limiter so the cap (not the limiter) is the effective cap.
+	srv.respawnClaimLimiter = nil
+	h := srv.Handler()
+
+	// Saturate the map directly via the state API to avoid generating
+	// thousands of HTTP requests just to fill the cap.
+	for i := range patchstate.MaxRespawnClaimsCached {
+		_, won := ps.ClaimRespawn(int64(1_900_000_000_000+i), uint32(50000+i), "win-fill")
+		require.True(t, won, "fill claim %d must win", i)
+	}
+
+	// One more — must NOT panic and must return 200 with a bare "lost".
+	body := map[string]any{
+		"started_at_ms": int64(1_900_999_999_999),
+		"pid":           uint32(60000),
+		"window_id":     "win-overflow",
+	}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/respawn-claim", "", body, ccTestBearer)
+	require.Equal(t, http.StatusOK, rr.Code, "cap-overflow handler must NOT panic; body=%s", rr.Body.String())
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "lost", resp["kind"], "cap-overflow path returns kind=lost")
+	_, hasClaimedBy := resp["claimed_by"]
+	assert.False(t, hasClaimedBy, "cap-overflow lost has no claimed_by metadata")
+}
+
+// TestRespawnClaimRateLimit_Returns429AfterThreshold verifies the per-IP
+// limiter on POST /api/v1/claude-code/respawn-claim. Compressed budget of
+// 2 keeps the test fast; production is 30/min. Closes review 0393974
+// HIGH-1 (missing rate limiter on the newly-added endpoint).
+//
+// Each request uses a distinct started_at_ms so we exercise the
+// rate-limit path (which fires BEFORE the in-memory map gets touched)
+// rather than the existing-claim short-circuit.
+func TestRespawnClaimRateLimit_Returns429AfterThreshold(t *testing.T) {
+	srv, _ := setupClaudeCodeServer(t)
+	srv.respawnClaimLimiter = newRateLimiter(2, ipKey)
+	h := srv.Handler()
+
+	for i := range 2 {
+		body := map[string]any{
+			"started_at_ms": int64(1_779_700_000_000 + i),
+			"pid":           uint32(40000 + i),
+			"window_id":     "win-rl",
+		}
+		rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/respawn-claim", "", body, ccTestBearer)
+		require.Equal(t, http.StatusOK, rr.Code, "call %d body=%s", i, rr.Body.String())
+	}
+	body := map[string]any{
+		"started_at_ms": int64(1_779_700_000_999),
+		"pid":           uint32(49999),
+		"window_id":     "win-rl-overflow",
+	}
+	rr := doClaudeCodeRequest(t, h, "POST", "/api/v1/claude-code/respawn-claim", "", body, ccTestBearer)
+	assert.Equal(t, http.StatusTooManyRequests, rr.Code)
+	assert.Equal(t, "60", rr.Header().Get("Retry-After"))
+}
+
 func TestProbeTrigger_EnqueuesAction(t *testing.T) {
 	srv, ps := setupClaudeCodeServer(t)
 	h := srv.Handler()

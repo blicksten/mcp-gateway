@@ -64,6 +64,13 @@ const (
 	// generous for an operator hammering the button when claude.exe is
 	// stuck; production rate is closer to 0–2 per hour.
 	unfreezeRateLimit = 10
+	// /respawn-claim: dashboard-extension fires once per daemon respawn per
+	// VSCode window. 12 windows × ~5 respawns/day = 60/day total. 30/min
+	// per client IP (request body has no session_id, so the bucket is keyed
+	// by IP like pendingActions) is well above the natural rate and bounds
+	// abuse from any token-holder. Defence-in-depth pair with
+	// MaxRespawnClaimsCached cap on the in-memory map.
+	respawnClaimRateLimit = 30
 )
 
 // unfreezeExecTimeout caps how long the Stop-Process call may run. The real
@@ -735,6 +742,11 @@ func (s *Server) handleClaudeCodeRespawnClaim(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusServiceUnavailable, "patch state not initialized")
 		return
 	}
+	if s.respawnClaimLimiter != nil && !s.respawnClaimLimiter.Allow(r) {
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+		return
+	}
 	var req respawnClaimRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -747,6 +759,17 @@ func (s *Server) handleClaudeCodeRespawnClaim(w http.ResponseWriter, r *http.Req
 	claim, won := s.patchState.ClaimRespawn(req.StartedAtMs, req.PID, req.WindowID)
 	if won {
 		writeJSON(w, http.StatusOK, respawnClaimResponse{Kind: "won"})
+		return
+	}
+	if claim == nil {
+		// Cap-overflow path (MaxRespawnClaimsCached exceeded). The
+		// review-0393974 MEDIUM-2 cap is defence-in-depth behind the
+		// rate limiter; if it fires the underlying map is being abused.
+		// Return a bare "lost" with no claimed_by so the client
+		// suppresses its prompt (conservative — better to miss a prompt
+		// than to panic the daemon on a nil dereference of claim.PID).
+		// The cleaner will free slots within RespawnClaimTTL.
+		writeJSON(w, http.StatusOK, respawnClaimResponse{Kind: "lost"})
 		return
 	}
 	resp := respawnClaimResponse{
