@@ -26,12 +26,27 @@ func newCredentialListStructuredCmd() *cobra.Command {
 		Long: `Reads a SAPUILandscape.xml file and a KeePass vault, intersects them,
 and emits a JSON array of rows — one per landscape SID. Each row carries the
 SID, client, user, and a kpMissing flag indicating whether no matching KeePass
-entry was found.`,
+entry was found.
+
+Password sources (mutually exclusive):
+  --password-stdin    read master password from stdin (preferred for non-TTY
+                      callers such as the VS Code extension; password is never
+                      visible in process listings).
+  --password-file P   read master password from file P.
+  --password PW       pass master password directly (DEPRECATED — visible in
+                      process listings and shell history; kept only for
+                      backwards compatibility).
+  (none)              interactive TTY prompt.`,
 		RunE: runCredentialListStructured,
 	}
 
 	cmd.Flags().String("kdbx", "", "Path to the KeePass KDBX vault (required)")
-	cmd.Flags().String("password", "", "Master password for the vault")
+	cmd.Flags().String("password", "", "Master password (DEPRECATED — prefer --password-stdin)")
+	cmd.Flags().String("password-file", "", "Path to file containing the master password")
+	cmd.Flags().Bool("password-stdin", false,
+		"Read master password from stdin (mutually exclusive with --password / --password-file). "+
+			"Mirrors `credential import --password-stdin` so the extension can pipe the password "+
+			"without it appearing on the command line.")
 	cmd.Flags().String("keyfile", "", "Path to the KeePass key file (optional)")
 	cmd.Flags().String("landscape", "", "Path to SAPUILandscape.xml (required)")
 
@@ -43,16 +58,45 @@ entry was found.`,
 
 func runCredentialListStructured(cmd *cobra.Command, _ []string) error {
 	kdbxPath, _ := cmd.Flags().GetString("kdbx")
-	password, _ := cmd.Flags().GetString("password")
+	passwordFlag, _ := cmd.Flags().GetString("password")
+	passwordFile, _ := cmd.Flags().GetString("password-file")
+	passwordStdin, _ := cmd.Flags().GetBool("password-stdin")
 	keyfile, _ := cmd.Flags().GetString("keyfile")
 	landscapePath, _ := cmd.Flags().GetString("landscape")
+
+	// Mutual-exclusivity guards mirror credential_import.go so misuse is
+	// reported the same way to callers (VS Code extension, ops scripts).
+	if passwordStdin && passwordFile != "" {
+		return fmt.Errorf("--password-stdin and --password-file are mutually exclusive")
+	}
+	if passwordStdin && passwordFlag != "" {
+		return fmt.Errorf("--password-stdin and --password are mutually exclusive")
+	}
+	if passwordFile != "" && passwordFlag != "" {
+		return fmt.Errorf("--password-file and --password are mutually exclusive")
+	}
+
+	// Resolve password from one of the four sources. The legacy --password
+	// flag short-circuits the shared readPassword helper so deprecation
+	// stays additive (no behaviour change for existing callers).
+	var password []byte
+	if passwordFlag != "" {
+		password = []byte(passwordFlag)
+	} else {
+		pw, err := readPassword(cmd, passwordFile, passwordStdin, keyfile)
+		if err != nil {
+			return err
+		}
+		password = pw
+	}
+	defer zeroBytes(password)
 
 	landscape, err := saplandscape.Parse(landscapePath)
 	if err != nil {
 		return err
 	}
 
-	kpEntries, err := sapcreds.ListEntries(kdbxPath, password, keyfile)
+	kpEntries, err := sapcreds.ListEntries(kdbxPath, string(password), keyfile)
 	if err != nil {
 		return err
 	}
