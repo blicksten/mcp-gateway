@@ -4,7 +4,7 @@ import { MockMarkdownString } from './mock-vscode';
 
 import * as assert from 'node:assert';
 import { describe, it, beforeEach, afterEach } from 'mocha';
-import { BackendTreeProvider, GatewayVersionItem } from '../backend-tree-provider';
+import { BackendTreeProvider } from '../backend-tree-provider';
 import { BackendItem } from '../backend-item';
 import { PlaceholderTreeItem } from '../tree-placeholder';
 import { ServerDataCache } from '../server-data-cache';
@@ -122,7 +122,12 @@ describe('BackendTreeProvider', () => {
 			]);
 		});
 
-		it('shows version footer when daemon reports a real release version', async () => {
+		it('does NOT show version footer (removed 2026-05-25 — daemon version moved to status-bar tooltip)', async () => {
+			// Pre-2026-05-25 the tree appended a "mcp-gateway daemon" footer.
+			// Removed because operators read it as a phantom server entry.
+			// Version is now exposed only via the MCP status-bar tooltip
+			// and `GET /api/v1/version`. Regression guard: with no servers
+			// and a real-release version, the tree must be empty.
 			const client = {
 				listServers: async () => [] as ServerView[],
 				getHealth: async () => ({ status: 'ok', servers: 0, running: 0, version: '1.7.2' }),
@@ -135,26 +140,23 @@ describe('BackendTreeProvider', () => {
 			await cache.refresh();
 			provider = new BackendTreeProvider(cache);
 			const items = provider.getChildren();
-			assert.strictEqual(items.length, 1, 'exactly one item — the version footer');
-			assert.ok(items[0] instanceof GatewayVersionItem, 'should be GatewayVersionItem');
-			assert.strictEqual((items[0] as GatewayVersionItem).description, 'v1.7.2');
+			assert.strictEqual(items.length, 0, 'tree must be empty — no version footer');
 		});
 
-		it('returns empty list (no footer) when no servers and daemon version is "dev"', () => {
-			// "dev" = local source build — not useful to show in the UI.
+		it('returns empty list when no servers and daemon version is "dev"', () => {
 			cache = new ServerDataCache(createMockClient([]) as any);
 			provider = new BackendTreeProvider(cache);
 			const items = provider.getChildren();
-			// Default mock returns {} for getHealth → no version → no footer.
 			assert.strictEqual(items.length, 0);
 		});
 
-		it('sets None state for all servers (flat list)', async () => {
+		it('sets None state for all server rows (flat list)', async () => {
 			cache = new ServerDataCache(createMockClient(sampleServers) as any);
 			await cache.refresh();
 			provider = new BackendTreeProvider(cache);
 			const items = provider.getChildren();
-			// All items (server rows + version footer) are non-collapsible.
+			// All server rows are non-collapsible. Version footer was
+			// removed 2026-05-25, so only BackendItem rows remain.
 			for (const item of items) {
 				assert.strictEqual(item.collapsibleState, 0, `Expected None (0) for item`);
 			}
@@ -290,8 +292,9 @@ describe('BackendTreeProvider', () => {
 			for (const item of items) {
 				assert.ok(!(item instanceof PlaceholderTreeItem),
 					'PlaceholderTreeItem must not appear when preserved data exists');
-				// Each item is either a BackendItem (server row) or a GatewayVersionItem (footer).
-				assert.ok(item instanceof BackendItem || item instanceof GatewayVersionItem);
+				// Footer was removed 2026-05-25; only BackendItem rows remain.
+				assert.ok(item instanceof BackendItem,
+					'every item must be a BackendItem (version footer removed 2026-05-25)');
 			}
 		});
 

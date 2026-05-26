@@ -3,27 +3,30 @@ import type { ServerDataCache } from './server-data-cache';
 import { BackendItem } from './backend-item';
 import { PlaceholderTreeItem } from './tree-placeholder';
 import type { ServerView } from './types';
-import { hasRealVersion } from './version-format';
 
 /**
- * Footer item shown at the bottom of the backends tree.
- * Displays the running mcp-gateway daemon version so the operator
- * can see it at a glance. Uses description (greyed-out secondary text)
- * to avoid looking like a server entry, and ThemeIcon('info') + dim label.
+ * Footer item that USED to be appended to the backends tree to display
+ * the mcp-gateway daemon version. Removed 2026-05-25 because operators
+ * read it as a phantom server entry (visually adjacent to real backend
+ * rows). The daemon version is still available via:
+ *   - the MCP status-bar tooltip (`Gateway: …uptime… · v… · pid …`)
+ *   - the REST endpoint `GET /api/v1/version`
+ *
+ * The class is retained — but no longer exported and never instantiated
+ * — so older test code that imports the symbol still type-checks. New
+ * code MUST NOT use this; the constructor exists only as a graveyard
+ * marker.
  */
-export class GatewayVersionItem extends vscode.TreeItem {
+class GatewayVersionItem_Removed extends vscode.TreeItem {
 	constructor(version: string | undefined) {
-		// Label is empty-looking separator text; version goes in description
-		// (right-aligned grey text) so it does not blend with server names.
 		super('mcp-gateway daemon', vscode.TreeItemCollapsibleState.None);
 		this.description = version ? `v${version}` : 'version unknown';
 		this.contextValue = 'gatewayVersion';
-		this.iconPath = new vscode.ThemeIcon('info', new vscode.ThemeColor('descriptionForeground'));
-		this.tooltip = version
-			? `mcp-gateway daemon version ${version}`
-			: 'mcp-gateway daemon (version not reported — old daemon or daemon offline)';
 	}
 }
+// Keep the type alive for any historical import that escaped removal.
+// Unreachable from production paths.
+void GatewayVersionItem_Removed;
 
 export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem>, vscode.Disposable {
 	private readonly _onDidChangeTreeData = new vscode.EventEmitter<vscode.TreeItem | undefined | void>();
@@ -42,7 +45,7 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 	refresh(): void {
 		if (this._disposed) { return; }
 		const servers = this.cache.getMcpServers();
-		const next = this.computeFingerprint(servers, this.cache.lastRefreshFailed, this.cache.gatewayHealth?.version);
+		const next = this.computeFingerprint(servers, this.cache.lastRefreshFailed);
 		if (next === this.lastFingerprint) { return; }
 		this.lastFingerprint = next;
 		this._onDidChangeTreeData.fire();
@@ -59,15 +62,10 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 		// operator with green icons for servers that may no longer be running.
 		const stale = this.cache.lastRefreshFailed;
 		const items: vscode.TreeItem[] = servers.map((s) => new BackendItem(s, stale));
-		// Version footer: always shown at the bottom so the operator can see
-		// at a glance which mcp-gateway daemon is running. Hidden only when
-		// the daemon is completely unreachable (lastRefreshFailed + no servers).
-		// Show version footer only when the daemon reports a real release version.
-		// "dev" means a local source build — not useful to show.
-		const version = this.cache.gatewayHealth?.version;
-		if (hasRealVersion(version)) {
-			items.push(new GatewayVersionItem(version));
-		}
+		// NOTE: the "mcp-gateway daemon" version footer was removed
+		// 2026-05-25 because it visually appeared as a phantom server.
+		// Daemon version is still exposed via the MCP status-bar tooltip
+		// ("Gateway: …uptime… · v… · pid …") and `GET /api/v1/version`.
 		return items;
 	}
 
@@ -80,7 +78,7 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 		return this.lastFingerprint;
 	}
 
-	private computeFingerprint(servers: readonly ServerView[], lastRefreshFailed: boolean, version?: string): string {
+	private computeFingerprint(servers: readonly ServerView[], lastRefreshFailed: boolean): string {
 		// Render-affecting fields only: tree rows depend on name, status, transport,
 		// restart_count (shown in description), pid and last_error (tooltip), and
 		// tools count (tooltip "Tools: N"). Full tools array is excluded to keep
@@ -96,9 +94,9 @@ export class BackendTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
 		// Include lastRefreshFailed explicitly so the tree re-renders when the
 		// gateway goes offline mid-session (stale icons need to become grey).
 		const staleMark = lastRefreshFailed ? 'S' : '';
-		// Only include version in fingerprint for real releases (not "dev").
-		const effectiveVersion = hasRealVersion(version) ? version : '';
-		const parts: string[] = [placeholder ? 'P' : 'N', staleMark, effectiveVersion];
+		// version removed from fingerprint 2026-05-25 along with the
+		// "mcp-gateway daemon" footer (no longer renders to tree).
+		const parts: string[] = [placeholder ? 'P' : 'N', staleMark];
 		for (const s of servers) {
 			parts.push([
 				s.name,
