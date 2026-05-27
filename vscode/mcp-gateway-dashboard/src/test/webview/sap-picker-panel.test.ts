@@ -5,6 +5,7 @@ import {
 	resetMockState,
 	mockWebviewPanels,
 	dialogResponses,
+	MockSecretStorage,
 	type MockWebviewPanel,
 } from '../mock-vscode';
 import { SapPickerPanel } from '../../webview/sap-picker-panel';
@@ -118,7 +119,7 @@ describe('SapPickerPanel', () => {
 		};
 		const client = makeClient(snap);
 		const cache = await freshCache([]);
-		await SapPickerPanel.createOrShow(FAKE_URI, client, cache);
+		await SapPickerPanel.createOrShow(FAKE_URI, client, cache, new MockSecretStorage() as any);
 		await flush();
 		const panel = latestPanel();
 		assert.ok(panel.webview.html.includes('SAP Picker'), 'expected SAP Picker title in HTML');
@@ -137,7 +138,7 @@ describe('SapPickerPanel', () => {
 		};
 		const client = makeClient(snap);
 		const cache = await freshCache([{ name: 'vsp-DEV-100', status: 'running', transport: 'stdio', restart_count: 0 } as ServerView]);
-		await SapPickerPanel.createOrShow(FAKE_URI, client, cache);
+		await SapPickerPanel.createOrShow(FAKE_URI, client, cache, new MockSecretStorage() as any);
 		await flush();
 		const panel = latestPanel();
 		// User toggles VSP on with command override
@@ -167,7 +168,7 @@ describe('SapPickerPanel', () => {
 		};
 		const client = makeClient(snap);
 		const cache = await freshCache([]);
-		await SapPickerPanel.createOrShow(FAKE_URI, client, cache);
+		await SapPickerPanel.createOrShow(FAKE_URI, client, cache, new MockSecretStorage() as any);
 		await flush();
 		const panel = latestPanel();
 		panel.webview._simulateMessage({
@@ -192,7 +193,7 @@ describe('SapPickerPanel', () => {
 		const client = makeClient(snap);
 		client.addServerError = new Error('config conflict');
 		const cache = await freshCache([]);
-		await SapPickerPanel.createOrShow(FAKE_URI, client, cache);
+		await SapPickerPanel.createOrShow(FAKE_URI, client, cache, new MockSecretStorage() as any);
 		await flush();
 		const panel = latestPanel();
 		panel.webview._simulateMessage({
@@ -212,7 +213,7 @@ describe('SapPickerPanel', () => {
 		const client = makeClient(snap);
 		client.removeServerError = new Error('orphan: stop failed at PID 1234');
 		const cache = await freshCache([]);
-		await SapPickerPanel.createOrShow(FAKE_URI, client, cache);
+		await SapPickerPanel.createOrShow(FAKE_URI, client, cache, new MockSecretStorage() as any);
 		await flush();
 		const panel = latestPanel();
 		panel.webview._simulateMessage({
@@ -238,7 +239,7 @@ describe('SapPickerPanel', () => {
 		const cache = await freshCache([]);
 		// dialogResponses.showWarningMessage defaults to undefined → user
 		// dismissed dialog → panel must NOT proceed to removeServer.
-		await SapPickerPanel.createOrShow(FAKE_URI, client, cache);
+		await SapPickerPanel.createOrShow(FAKE_URI, client, cache, new MockSecretStorage() as any);
 		await flush();
 		const panel = latestPanel();
 		const removeCallsBefore = client.calls.filter((c) => c.method === 'removeServer').length;
@@ -257,7 +258,7 @@ describe('SapPickerPanel', () => {
 		const cache = await freshCache([]);
 		// Simulate the operator clicking 'Force kill' in the warning dialog.
 		dialogResponses.showWarningMessage = 'Force kill';
-		await SapPickerPanel.createOrShow(FAKE_URI, client, cache);
+		await SapPickerPanel.createOrShow(FAKE_URI, client, cache, new MockSecretStorage() as any);
 		await flush();
 		const panel = latestPanel();
 		panel.webview._simulateMessage({ type: 'forceKill', rowKey: 'DEV-100', component: 'vsp' });
@@ -281,7 +282,7 @@ describe('SapPickerPanel', () => {
 		client.removeServerError = new Error('still alive');
 		const cache = await freshCache([]);
 		dialogResponses.showWarningMessage = 'Force kill';
-		await SapPickerPanel.createOrShow(FAKE_URI, client, cache);
+		await SapPickerPanel.createOrShow(FAKE_URI, client, cache, new MockSecretStorage() as any);
 		await flush();
 		const panel = latestPanel();
 		panel.webview._simulateMessage({ type: 'forceKill', rowKey: 'DEV-100', component: 'vsp' });
@@ -306,7 +307,7 @@ describe('SapPickerPanel', () => {
 		const client = makeClient(snap1);
 		client.snapshotResponses.push(snap2);
 		const cache = await freshCache([]);
-		await SapPickerPanel.createOrShow(FAKE_URI, client, cache);
+		await SapPickerPanel.createOrShow(FAKE_URI, client, cache, new MockSecretStorage() as any);
 		await flush();
 		const panel = latestPanel();
 		panel.webview._simulateMessage({ type: 'refresh' });
@@ -320,7 +321,7 @@ describe('SapPickerPanel', () => {
 		const snap: PickerSnapshot = { rows: [], warnings: [] };
 		const client = makeClient(snap);
 		const cache = await freshCache([]);
-		await SapPickerPanel.createOrShow(FAKE_URI, client, cache);
+		await SapPickerPanel.createOrShow(FAKE_URI, client, cache, new MockSecretStorage() as any);
 		await flush();
 		const panel = latestPanel();
 		panel.webview._simulateMessage({ type: 'apply', diffs: 'not-an-array' });

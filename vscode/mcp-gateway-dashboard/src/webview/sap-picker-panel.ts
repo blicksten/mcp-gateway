@@ -57,6 +57,7 @@ export class SapPickerPanel {
 	private readonly panel: vscode.WebviewPanel;
 	private readonly client: IGatewayClient;
 	private readonly cache: ServerDataCache;
+	private readonly secrets: vscode.SecretStorage;
 	private readonly disposables: vscode.Disposable[] = [];
 	private disposed = false;
 	private applying = false;
@@ -64,21 +65,28 @@ export class SapPickerPanel {
 	private latestSnapshot: PickerSnapshot = { rows: [], warnings: [] };
 	private rows: RowState[] = [];
 
-	/** Cached KeePass master password — lives in RAM only for the panel
-	 *  lifetime so the operator doesn't re-enter it on every refresh /
-	 *  apply. Cleared on dispose. Never persisted to SecretStorage (an
-	 *  enhancement candidate, but it carries different threat-model
-	 *  implications — opt-in only). */
+	/** Cached KeePass master password — in-memory for the panel lifetime.
+	 *  Hydrated on first access from SecretStorage when present; otherwise
+	 *  prompted via showInputBox and then written to SecretStorage so the
+	 *  operator does not re-enter after Reload Window or panel close.
+	 *  Cleared on dispose AND on wrong-password (HMAC mismatch) so the
+	 *  next refresh re-prompts. Threat model: see docs/PLAN-sap-picker-
+	 *  and-import-mcp.md (v1.33.9 enhancement); password lives in the OS
+	 *  keychain (DPAPI on Windows) keyed per-KDBX-path, same security
+	 *  posture as the per-server credentials already stored under
+	 *  mcpGateway/<server>/env/<KEY>. */
 	private kpMasterPassword?: string;
 
 	private constructor(
 		panel: vscode.WebviewPanel,
 		client: IGatewayClient,
 		cache: ServerDataCache,
+		secrets: vscode.SecretStorage,
 	) {
 		this.panel = panel;
 		this.client = client;
 		this.cache = cache;
+		this.secrets = secrets;
 
 		this.disposables.push(this.panel.onDidDispose(() => this.dispose()));
 		this.disposables.push(this.panel.webview.onDidReceiveMessage((msg: unknown) => {
@@ -90,6 +98,7 @@ export class SapPickerPanel {
 		extensionUri: vscode.Uri,
 		client: IGatewayClient,
 		cache: ServerDataCache,
+		secrets: vscode.SecretStorage,
 	): Promise<SapPickerPanel> {
 		if (SapPickerPanel.current && !SapPickerPanel.current.disposed) {
 			SapPickerPanel.current.panel.reveal();
@@ -104,7 +113,7 @@ export class SapPickerPanel {
 			{ enableScripts: true, localResourceRoots: [extensionUri], retainContextWhenHidden: true },
 		);
 
-		const instance = new SapPickerPanel(panel, client, cache);
+		const instance = new SapPickerPanel(panel, client, cache, secrets);
 		SapPickerPanel.current = instance;
 		instance.render();
 		void instance.refresh();
@@ -143,7 +152,7 @@ export class SapPickerPanel {
 		const inputs = this.resolveInputs();
 		if (!inputs) { return null; }
 
-		const password = await this.resolveMasterPassword();
+		const password = await this.resolveMasterPassword(inputs.kdbxPath);
 		if (password === null) { return null; }    // operator cancelled
 
 		let rows: PickerListRow[];
@@ -156,12 +165,26 @@ export class SapPickerPanel {
 				keyfile: inputs.keyfile,
 			});
 		} catch (err) {
-			// SapPickerImportError gives a tight stderr-first-line message
-			// already; surface it verbatim and forget the cached password
-			// so a re-open re-prompts (likely wrong password).
-			this.kpMasterPassword = undefined;
 			const msg = err instanceof SapPickerImportError ? err.message : errorMsg(err);
 			logger.error('sap-picker', 'list-structured failed', err);
+
+			// gokeepasslib reports a wrong master password as
+			// "HMAC-SHA256 of header mismatching" (sometimes preceded by
+			// "Wrong password?"). Evict the cached secret so the next
+			// refresh re-prompts cleanly instead of looping. Any other
+			// error keeps the cache so a transient mcp-ctl ENOENT or
+			// landscape-parse failure does not force re-entry.
+			const looksLikeWrongPassword =
+				msg.includes('HMAC-SHA256') ||
+				msg.toLowerCase().includes('wrong password');
+			if (looksLikeWrongPassword) {
+				await this.forgetMasterPassword(inputs.kdbxPath);
+				await this.postError(
+					`KeePass master password rejected by ${inputs.kdbxPath}. Click Refresh to re-enter.`,
+				);
+				return null;
+			}
+
 			await this.postError(`Failed to load SAP systems: ${msg}`);
 			return null;
 		}
@@ -247,20 +270,75 @@ export class SapPickerPanel {
 	}
 
 	/**
-	 * Returns the KeePass master password — from cache on second+ call
-	 * per panel lifetime, or via vscode.window.showInputBox on first
-	 * call. Returns null on operator cancel.
+	 * SecretStorage key for the KeePass master password. Per-KDBX so an
+	 * operator with multiple vaults gets per-vault caching. Kept as a
+	 * function (not const) so the kdbx path is supplied at call-time —
+	 * resolveInputs() owns the path-resolution logic.
 	 */
-	private async resolveMasterPassword(): Promise<string | null> {
+	private static kpPasswordKey(kdbxPath: string): string {
+		return `mcpGateway/sapPicker/kpMasterPassword/${kdbxPath}`;
+	}
+
+	/**
+	 * Resolve the KeePass master password. Lookup order:
+	 *   1. In-memory cache (this.kpMasterPassword) — set on prior call
+	 *      this panel session.
+	 *   2. SecretStorage at mcpGateway/sapPicker/kpMasterPassword/${kdbx}.
+	 *      Survives panel close + Reload Window + VSCode restart.
+	 *   3. vscode.window.showInputBox prompt — written back to BOTH the
+	 *      in-memory cache and SecretStorage so subsequent refreshes /
+	 *      Reload Window do not re-prompt.
+	 *
+	 * Returns null on operator cancel.
+	 *
+	 * Eviction is wired separately: loadSnapshot() calls
+	 * `forgetMasterPassword(kdbxPath)` when mcp-ctl reports a wrong-
+	 * password (HMAC mismatch) so the next refresh re-prompts cleanly
+	 * instead of looping on the same stale entry.
+	 */
+	private async resolveMasterPassword(kdbxPath: string): Promise<string | null> {
 		if (this.kpMasterPassword !== undefined) { return this.kpMasterPassword; }
+
+		const key = SapPickerPanel.kpPasswordKey(kdbxPath);
+		const stored = await this.secrets.get(key);
+		if (stored !== undefined && stored !== '') {
+			this.kpMasterPassword = stored;
+			logger.info('sap-picker', `KeePass master password loaded from SecretStorage (${key})`);
+			return stored;
+		}
+
 		const pw = await vscode.window.showInputBox({
-			prompt: 'KeePass master password (for SAP Picker)',
+			prompt: 'KeePass master password (for SAP Picker) — saved to OS keychain after first entry',
 			password: true,
 			ignoreFocusOut: true,
 		});
 		if (pw === undefined || pw === '') { return null; }
 		this.kpMasterPassword = pw;
+		try {
+			await this.secrets.store(key, pw);
+			logger.info('sap-picker', `KeePass master password persisted to SecretStorage (${key})`);
+		} catch (err) {
+			// Non-fatal: in-memory cache still works for this session.
+			logger.warn('sap-picker', `failed to persist KP master password to SecretStorage: ${errorMsg(err)}`);
+		}
 		return pw;
+	}
+
+	/**
+	 * Evict the cached master password for kdbxPath from BOTH the in-
+	 * memory cache and SecretStorage. Called when mcp-ctl reports an
+	 * HMAC mismatch (wrong-password indicator from gokeepasslib) so the
+	 * next refresh re-prompts instead of looping on the stale entry.
+	 */
+	private async forgetMasterPassword(kdbxPath: string): Promise<void> {
+		this.kpMasterPassword = undefined;
+		const key = SapPickerPanel.kpPasswordKey(kdbxPath);
+		try {
+			await this.secrets.delete(key);
+			logger.info('sap-picker', `evicted KP master password from SecretStorage (${key})`);
+		} catch (err) {
+			logger.warn('sap-picker', `failed to evict KP master password: ${errorMsg(err)}`);
+		}
 	}
 
 	/**

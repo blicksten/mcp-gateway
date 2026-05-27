@@ -997,6 +997,30 @@ function registerCommands(
 			context.extensionUri,
 			client,
 			cache,
+			context.secrets,
+		);
+	}));
+
+	push(vscode.commands.registerCommand('mcpGateway.forgetSapPickerPassword', async () => {
+		// Operator-facing escape hatch: when the KDBX master password
+		// changes (or the operator wants to forget it for any reason),
+		// they don't have to go hunting for the SecretStorage entry.
+		// Iterates every key prefix mcpGateway/sapPicker/kpMasterPassword/*
+		// is not possible with vscode.SecretStorage (no list API), so
+		// we evict only the currently-configured kdbxPath. Operators
+		// with multiple vaults run this once per vault.
+		const cfg = vscode.workspace.getConfiguration('mcpGateway');
+		const kdbxPath = cfg.get<string>('keepassPath', '').trim();
+		if (!kdbxPath) {
+			void vscode.window.showWarningMessage(
+				'mcpGateway.keepassPath is not set — nothing to forget.',
+			);
+			return;
+		}
+		const key = `mcpGateway/sapPicker/kpMasterPassword/${kdbxPath}`;
+		await context.secrets.delete(key);
+		void vscode.window.showInformationMessage(
+			`Forgot SAP Picker KeePass password for ${kdbxPath}. Next picker open will re-prompt.`,
 		);
 	}));
 
