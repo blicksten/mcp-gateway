@@ -248,3 +248,120 @@ export async function listPickerRows(opts: PickerListOptions): Promise<PickerLis
 		child.stdin.write('\n', () => child.stdin?.end());
 	});
 }
+
+/** Output JSON shape from `python sap-credentials.py <SID> --stdin --db X
+ *  [--client C]` — matches the team-local sap-credentials.py PowerShell
+ *  contract (the file at scripts/sap-credentials.py L11-21).
+ *  VSP_<SID>_PASSWORD is keyed dynamically per-SID. */
+export interface SapCredentials {
+	SAP_LOGON_NAME?: string;
+	SAP_USER?: string;
+	SAP_PASSWORD?: string;
+	SAP_CLIENT?: string;
+	SAP_LANGUAGE?: string;
+	[k: string]: string | undefined;
+}
+
+export interface FetchCredsOptions {
+	sid: string;
+	/** Optional KP entry client selector when multiple entries share SID. */
+	client?: string;
+	scriptPath: string;
+	kdbxPath: string;
+	masterPassword: Buffer;
+	pythonPath?: string;
+	timeoutMs?: number;
+}
+
+/** Per-SID creds fetch. Same shape + script as
+ *  claude-team-control/vscode-dashboard CredentialManager._runScript
+ *  (services/credential-manager.ts L408-493). Spawns python with the
+ *  SID argument, pipes master password Buffer to stdin, parses JSON
+ *  object {SAP_LOGON_NAME, SAP_USER, SAP_PASSWORD, SAP_CLIENT,
+ *  SAP_LANGUAGE, VSP_<SID>_PASSWORD}.
+ *
+ *  SapPickerPanel calls this BEFORE addServer per row so the env array
+ *  on the new server config contains the SAP credentials — daemon spawns
+ *  vsp.exe / sap-gui-server with the env in place, login succeeds, no
+ *  "stdio connect: EOF" failure. */
+export async function fetchSapCredentials(opts: FetchCredsOptions): Promise<SapCredentials> {
+	const pythonPath = opts.pythonPath ?? 'python';
+	const args = [opts.scriptPath, opts.sid, '--stdin', '--db', opts.kdbxPath];
+	if (opts.client && opts.client.length > 0) {
+		args.push('--client', opts.client);
+	}
+	const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+	return new Promise<SapCredentials>((resolve, reject) => {
+		let settled = false;
+		const stdoutChunks: Buffer[] = [];
+		const stderrChunks: Buffer[] = [];
+
+		const child = spawn(pythonPath, args, {
+			shell: false,
+			stdio: ['pipe', 'pipe', 'pipe'],
+			windowsHide: true,
+		});
+
+		const settle = (fn: () => void) => {
+			if (settled) { return; }
+			settled = true;
+			clearTimeout(timer);
+			fn();
+		};
+
+		const timer = setTimeout(() => {
+			if (child.exitCode === null) { child.kill(); }
+			settle(() => reject(new SapPickerImportError(
+				`sap-credentials.py(${opts.sid}) timed out after ${timeoutMs}ms`,
+			)));
+		}, timeoutMs);
+
+		child.stdout?.on('data', (c: Buffer) => stdoutChunks.push(c));
+		child.stderr?.on('data', (c: Buffer) => stderrChunks.push(c));
+
+		child.on('error', (err) => {
+			settle(() => reject(new SapPickerImportError(
+				`sap-credentials.py(${opts.sid}) spawn error: ${err.message}`,
+			)));
+		});
+
+		child.on('close', (code) => {
+			if (code !== 0) {
+				const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
+				const stderrHead = stderr.split(/\r?\n/, 1)[0] ?? '';
+				const wrongPassword = stderr.includes('Wrong master password');
+				settle(() => reject(new SapPickerImportError(
+					`sap-credentials.py(${opts.sid}) failed${stderrHead ? ': ' + stderrHead : ''}`,
+					code ?? undefined,
+					wrongPassword,
+				)));
+				return;
+			}
+			try {
+				const raw = JSON.parse(Buffer.concat(stdoutChunks).toString('utf8').trim());
+				if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+					settle(() => reject(new SapPickerImportError(
+						`sap-credentials.py(${opts.sid}) output not a JSON object`,
+					)));
+					return;
+				}
+				settle(() => resolve(raw as SapCredentials));
+			} catch (err) {
+				settle(() => reject(new SapPickerImportError(
+					`sap-credentials.py(${opts.sid}) JSON parse failed: ${(err as Error).message}`,
+				)));
+			}
+		});
+
+		if (!child.stdin) {
+			settle(() => reject(new SapPickerImportError('python child has no stdin')));
+			return;
+		}
+		child.stdin.on('error', (err) => {
+			settle(() => reject(new SapPickerImportError(`stdin write failed: ${err.message}`)));
+		});
+		child.stdin.write(opts.masterPassword);
+		child.stdin.write('\n', () => child.stdin?.end());
+	});
+}

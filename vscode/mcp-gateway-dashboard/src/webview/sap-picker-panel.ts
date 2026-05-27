@@ -33,7 +33,14 @@ import {
 	resetFailedRowsForRetry,
 	runWithConcurrency,
 } from '../sap-picker-state';
-import { listPickerRows, resolveSapCredentialsPy, SapPickerImportError, type PickerListRow } from '../sap-picker-importer';
+import {
+	listPickerRows,
+	fetchSapCredentials,
+	resolveSapCredentialsPy,
+	SapPickerImportError,
+	type PickerListRow,
+	type SapCredentials,
+} from '../sap-picker-importer';
 import { buildSapPickerHtml } from './sap-picker-html';
 import { logger } from '../logger';
 
@@ -103,6 +110,11 @@ export class SapPickerPanel {
 	 *  the current panel session — suppresses the dialog until panel
 	 *  reopen so we don't ask after every refresh. */
 	private rememberDeclinedThisSession = false;
+
+	/** Inputs (kdbxPath / pythonPath / scriptPath) cached after a
+	 *  successful loadSnapshot — runOneOp reads them to spawn
+	 *  sap-credentials.py per row for credential injection on Apply. */
+	private lastInputs?: PickerInputs;
 
 	private constructor(
 		panel: vscode.WebviewPanel,
@@ -178,6 +190,7 @@ export class SapPickerPanel {
 	private async loadSnapshot(): Promise<PickerSnapshot | null> {
 		const inputs = this.resolveInputs();
 		if (!inputs) { return null; }
+		this.lastInputs = inputs;
 
 		// Mirror the team-local CredentialManager retry loop: up to 3
 		// password attempts (SecretStorage on attempt 1, prompt on
@@ -857,7 +870,13 @@ export class SapPickerPanel {
 
 		try {
 			if (op.kind === 'add') {
-				await this.client.addServer(op.serverName, op.config ?? {});
+				// Enrich config with per-SID SAP credentials BEFORE add.
+				// Without env vars vsp.exe / sap-gui-server EOF on
+				// initialize (SAP login fails). Matches team-local
+				// dashboard's CredentialManager.getCredentials -> spawn
+				// flow: fetch creds from KP per SID, then start server.
+				const enrichedConfig = await this.enrichConfigWithCreds(op);
+				await this.client.addServer(op.serverName, enrichedConfig);
 				this.applyEvent({ kind: 'add_ok', rowKey: op.rowKey, component: op.component });
 				// Poll /health to see whether the new entry transitions to running
 				// or fails to start. 5 s deadline matches spike §3.4 acceptance.
@@ -913,6 +932,67 @@ export class SapPickerPanel {
 	 *  deadline elapses. Returns 'running' / 'error' / 'timeout'. The
 	 *  HealthResponse shape exposes total counts not per-server status, so
 	 *  we cross-reference with /servers via the cache when available. */
+	/**
+	 * Fetch SAP credentials per SID via sap-credentials.py and merge
+	 * them into the addServer config as env vars. Without this, daemon
+	 * spawns vsp.exe / sap-gui-server with no SAP_PASSWORD etc. and
+	 * the process EOFs on initialize (operator-reported 2026-05-27:
+	 * "Applied 0, failed 6").
+	 *
+	 * Returns the original config if credential fetch fails — the
+	 * server still gets added but in error state, matching the pre-
+	 * fix behaviour so the operator sees the row in the daemon list
+	 * with a clear last_error.
+	 */
+	private async enrichConfigWithCreds(op: BatchOp): Promise<Record<string, unknown>> {
+		const baseConfig = (op.config ?? {}) as Record<string, unknown>;
+		const row = this.rows.find((x) => x.key === op.rowKey);
+		if (!row) { return baseConfig; }
+		if (!this.lastInputs) {
+			logger.warn('sap-picker', `enrichConfig(${op.serverName}): no lastInputs — cred fetch skipped`);
+			return baseConfig;
+		}
+		if (!this.kpMasterPasswordBuf) {
+			logger.warn('sap-picker', `enrichConfig(${op.serverName}): no master password buf — cred fetch skipped`);
+			return baseConfig;
+		}
+
+		let creds: SapCredentials;
+		try {
+			creds = await fetchSapCredentials({
+				sid: row.snapshot.sid,
+				client: row.snapshot.client,
+				scriptPath: this.lastInputs.scriptPath,
+				kdbxPath: this.lastInputs.kdbxPath,
+				masterPassword: this.kpMasterPasswordBuf,
+				pythonPath: this.lastInputs.pythonPath,
+			});
+		} catch (err) {
+			logger.warn('sap-picker',
+				`enrichConfig(${op.serverName}): sap-credentials.py failed: ${errorMsg(err)}`);
+			return baseConfig;
+		}
+
+		// Build env array: "KEY=VALUE" strings, the daemon's
+		// ServerConfig.Env shape. Skip empty / undefined values so the
+		// daemon doesn't surface bogus empty env vars.
+		const envFromBase = Array.isArray(baseConfig.env) ? (baseConfig.env as unknown[]) : [];
+		const envOut: string[] = [];
+		for (const e of envFromBase) {
+			if (typeof e === 'string') { envOut.push(e); }
+		}
+		for (const [k, v] of Object.entries(creds)) {
+			if (typeof v !== 'string') { continue; }
+			if (v.length === 0) { continue; }
+			envOut.push(`${k}=${v}`);
+		}
+
+		logger.info('sap-picker',
+			`enrichConfig(${op.serverName}): added ${envOut.length} env vars (${Object.keys(creds).filter(k => typeof creds[k] === 'string').join(',')})`);
+
+		return { ...baseConfig, env: envOut };
+	}
+
 	private async pollServerRunning(name: string, timeoutMs: number): Promise<'running' | 'error' | 'timeout'> {
 		const deadline = Date.now() + timeoutMs;
 		while (Date.now() < deadline) {
