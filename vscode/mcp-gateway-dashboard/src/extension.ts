@@ -86,11 +86,81 @@ export interface IGatewayClient {
 	dispose?(): void;
 }
 
+/**
+ * Auto-migrate SAP Picker settings from legacy mcpDashboard.* keys to
+ * mcpGateway.* on extension activation. Idempotent: only fills empty
+ * mcpGateway.* targets, never overwrites a deliberate operator setting.
+ * Runs silently — no user prompts, no dialogs. Logs every write so the
+ * Output channel records the migration.
+ *
+ * Why on activation: operators reported 2026-05-27 that even after we
+ * shipped fallback chains (resolveDefaults reading both mcpGateway.* and
+ * mcpDashboard.*), the Settings webview still showed empty inputs and
+ * Apply still surfaced "configuration missing" — they wanted the values
+ * actually written to settings.json so they were visible everywhere.
+ * Running this at activate() means by the time the operator opens the
+ * Settings panel or SAP Picker, the keys are populated.
+ */
+async function autoMigrateSapDefaults(): Promise<void> {
+	const dash = vscode.workspace.getConfiguration('mcpDashboard');
+	const gate = vscode.workspace.getConfiguration('mcpGateway');
+	const writes: { key: string; value: unknown }[] = [];
+	const isEmpty = (v: unknown): boolean =>
+		v === undefined || v === null || (typeof v === 'string' && v.trim().length === 0);
+
+	const stage = (gatewayKey: string, dashKey: string): void => {
+		if (!isEmpty(gate.get<unknown>(gatewayKey))) { return; }
+		const dashVal = dash.get<string>(dashKey, '');
+		if (isEmpty(dashVal)) { return; }
+		writes.push({ key: gatewayKey, value: dashVal.trim() });
+	};
+
+	stage('defaultVspCommand', 'vibingPath');
+	stage('defaultGuiUvProject', 'sapGuiPath');
+	stage('uvPath', 'uvPath');
+	stage('keepassPath', 'keepassDbPath');
+
+	// defaultGuiMode: schema-default is 'uv' (since v1.33.14). Don't
+	// touch unless the operator explicitly set 'exec' — leave their
+	// preference intact.
+
+	// sap-credentials.py path derived from mcpDashboard.orchestratorPath.
+	if (isEmpty(gate.get<unknown>('sapCredentialsPyPath'))) {
+		const orchPath = (dash.get<string>('orchestratorPath', '') ?? '').trim();
+		if (!isEmpty(orchPath)) {
+			const sep = process.platform === 'win32' ? '\\' : '/';
+			const cleaned = orchPath.replace(/\\/g, '/').replace(/\/+$/, '');
+			const scriptPath = cleaned + '/../scripts/sap-credentials.py';
+			const normalised = process.platform === 'win32'
+				? scriptPath.replace(/\//g, sep)
+				: scriptPath;
+			writes.push({ key: 'sapCredentialsPyPath', value: normalised });
+		}
+	}
+
+	if (writes.length === 0) { return; }
+	for (const w of writes) {
+		try {
+			await gate.update(w.key, w.value, vscode.ConfigurationTarget.Global);
+		} catch (err) {
+			// Silent — auto-migration must never throw to userland. The
+			// Settings panel's Fill SAP Defaults button provides an
+			// interactive retry path.
+			void err;
+		}
+	}
+}
+
 export function activate(
 	context: vscode.ExtensionContext,
 	injectedClient?: IGatewayClient,
 	injectedDaemon?: DaemonManager,
 ): void {
+	// Fire-and-forget migration at the start of activate() — before any
+	// command/view registration that might read these settings. Async so
+	// it does not delay activation.
+	void autoMigrateSapDefaults();
+
 	const config = vscode.workspace.getConfiguration('mcpGateway');
 	const apiUrl = config.get<string>('apiUrl', 'http://localhost:8765');
 	const rawInterval = config.get<number>('pollInterval', 5000);
@@ -1002,6 +1072,16 @@ function registerCommands(
 			client,
 			cache,
 			context.secrets,
+		);
+	}));
+
+	push(vscode.commands.registerCommand('mcpGateway.fillSapDefaultsNow', async () => {
+		// One-click migration from palette — same writes as
+		// autoMigrateSapDefaults but operator-facing toast on completion
+		// so they get confirmation. Idempotent.
+		await autoMigrateSapDefaults();
+		void vscode.window.showInformationMessage(
+			'SAP Picker defaults written to user settings.json (from mcpDashboard.* legacy keys). Open Settings to review.',
 		);
 	}));
 

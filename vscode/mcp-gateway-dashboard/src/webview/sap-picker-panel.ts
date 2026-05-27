@@ -406,28 +406,54 @@ export class SapPickerPanel {
 	 * CredentialManager._doOfferToRemember.
 	 */
 	private async offerToRememberIfNeeded(kdbxPath: string): Promise<void> {
-		if (this.rememberDeclinedThisSession) { return; }
-		if (!this.kpMasterPasswordBuf) { return; }
+		if (this.rememberDeclinedThisSession) {
+			logger.info('sap-picker', 'offer-to-remember: skipped (declined this session)');
+			return;
+		}
+		if (!this.kpMasterPasswordBuf) {
+			logger.info('sap-picker', 'offer-to-remember: skipped (no in-memory password)');
+			return;
+		}
 		const key = SapPickerPanel.kpPasswordKey(kdbxPath);
+		let existingNonEmpty = false;
 		try {
 			const existing = await this.secrets.get(key);
-			if (existing !== undefined) { return; } // already saved
+			// Treat empty stored entries as "not saved" so a leftover
+			// blank from v1.33.9-era auto-save doesn't silently suppress
+			// the offer dialog. Operator-reported 2026-05-27: they
+			// never saw the dialog despite typing the password fresh.
+			existingNonEmpty = typeof existing === 'string' && existing.length > 0;
 		} catch (err) {
 			logger.warn('sap-picker', `offer-to-remember: secrets.get failed: ${errorMsg(err)}`);
 			return;
 		}
+		if (existingNonEmpty) {
+			logger.info('sap-picker', `offer-to-remember: skipped (already in SecretStorage at ${key})`);
+			return;
+		}
+		// MODAL dialog so the operator cannot miss it (toasts go to the
+		// notification tray and can be dismissed without reading).
+		logger.info('sap-picker', `offer-to-remember: firing modal dialog for ${key}`);
 		const choice = await vscode.window.showInformationMessage(
-			'Remember KeePass password? (stored in Windows Credential Manager / OS keychain)',
+			'Remember KeePass master password for next time? It will be stored encrypted in your OS keychain (Windows Credential Manager / macOS Keychain / Linux libsecret).',
+			{ modal: true, detail: `Vault: ${kdbxPath}\n\nClick Yes to skip the prompt on future SAP Picker opens. Click No to keep entering it manually each time.` },
 			'Yes', 'No',
 		);
 		if (choice === 'Yes' && this.kpMasterPasswordBuf) {
 			try {
 				await this.secrets.store(key, this.kpMasterPasswordBuf.toString('utf8'));
 				logger.info('sap-picker', `KeePass master password persisted to SecretStorage (${key})`);
+				void vscode.window.showInformationMessage(
+					'KeePass password saved — next SAP Picker open will skip the prompt.',
+				);
 			} catch (err) {
 				logger.warn('sap-picker', `failed to persist KP master password: ${errorMsg(err)}`);
+				void vscode.window.showWarningMessage(
+					`Failed to save KeePass password to keychain: ${errorMsg(err)}`,
+				);
 			}
 		} else {
+			logger.info('sap-picker', `offer-to-remember: operator chose "${choice ?? 'dismissed'}"`);
 			this.rememberDeclinedThisSession = true;
 		}
 	}

@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.33.15",
+  "version": "1.33.16",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -147,6 +147,11 @@
         "command": "mcpGateway.forgetSapPickerPassword",
         "title": "MCP Gateway: Forget SAP Picker KeePass Password",
         "icon": "$(key)"
+      },
+      {
+        "command": "mcpGateway.fillSapDefaultsNow",
+        "title": "MCP Gateway: Fill SAP Defaults Now (from mcpDashboard.*)",
+        "icon": "$(symbol-property)"
       },
       {
         "command": "mcpGateway.openImportClaude",
