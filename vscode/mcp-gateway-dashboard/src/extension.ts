@@ -156,11 +156,6 @@ export function activate(
 	injectedClient?: IGatewayClient,
 	injectedDaemon?: DaemonManager,
 ): void {
-	// Fire-and-forget migration at the start of activate() — before any
-	// command/view registration that might read these settings. Async so
-	// it does not delay activation.
-	void autoMigrateSapDefaults();
-
 	const config = vscode.workspace.getConfiguration('mcpGateway');
 	const apiUrl = config.get<string>('apiUrl', 'http://localhost:8765');
 	const rawInterval = config.get<number>('pollInterval', 5000);

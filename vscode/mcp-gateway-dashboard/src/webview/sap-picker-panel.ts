@@ -1,4 +1,7 @@
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 /** Cyrillic-character regex — same as
@@ -295,23 +298,126 @@ export class SapPickerPanel {
 	 *   - defaultGuiMode: 'uv' is the verified-working path; 'exec' is for
 	 *     setups where a single binary handles both VSP + GUI.
 	 */
+	/**
+	 * Resolve SAP launcher defaults with a 4-layer fallback chain so
+	 * the Apply path NEVER skips ops because of an opaque
+	 * getConfiguration cache miss:
+	 *
+	 *   1. vscode.workspace.getConfiguration('mcpGateway').get(key)
+	 *   2. vscode.workspace.getConfiguration('mcpDashboard').get(legacy)
+	 *   3. settings.json read DIRECTLY off disk (bypasses VSCode cache)
+	 *      key: mcpGateway.<X>
+	 *   4. settings.json read DIRECTLY off disk
+	 *      key: mcpDashboard.<legacy>
+	 *
+	 * Layer 3+4 exists because operators reported 2026-05-27 that
+	 * getConfiguration returned empty values for keys that were
+	 * present in settings.json. Reading the file directly is brutal
+	 * but reliable.
+	 */
 	private static resolveDefaults(): PickerDefaults {
 		const g = vscode.workspace.getConfiguration('mcpGateway');
 		const d = vscode.workspace.getConfiguration('mcpDashboard');
+
 		const trim = (s: string | undefined): string | undefined => {
 			const t = (s ?? '').trim();
 			return t.length === 0 ? undefined : t;
 		};
-		return {
-			vspCommand: trim(g.get<string>('defaultVspCommand', ''))
-				?? trim(d.get<string>('vibingPath', '')),
-			guiUvProject: trim(g.get<string>('defaultGuiUvProject', ''))
-				?? trim(d.get<string>('sapGuiPath', '')),
-			uvPath: trim(g.get<string>('uvPath', ''))
-				?? trim(d.get<string>('uvPath', '')),
-			// Schema default is 'uv'; only fall back to 'uv' on absent.
-			defaultGuiMode: trim(g.get<string>('defaultGuiMode', '')) ?? 'uv',
+
+		// Layer 3+4 — read settings.json from disk. Lazy + cached for
+		// this single resolveDefaults() call (re-runs per Apply pick
+		// up fresh edits).
+		const jsonSettings = SapPickerPanel.readSettingsJsonDirect();
+		const fromJson = (fullKey: string): string | undefined => {
+			const v = jsonSettings[fullKey];
+			if (typeof v !== 'string') { return undefined; }
+			const t = v.trim();
+			return t.length === 0 ? undefined : t;
 		};
+
+		const resolved: PickerDefaults = {
+			vspCommand: trim(g.get<string>('defaultVspCommand', ''))
+				?? trim(d.get<string>('vibingPath', ''))
+				?? fromJson('mcpGateway.defaultVspCommand')
+				?? fromJson('mcpDashboard.vibingPath'),
+			guiUvProject: trim(g.get<string>('defaultGuiUvProject', ''))
+				?? trim(d.get<string>('sapGuiPath', ''))
+				?? fromJson('mcpGateway.defaultGuiUvProject')
+				?? fromJson('mcpDashboard.sapGuiPath'),
+			uvPath: trim(g.get<string>('uvPath', ''))
+				?? trim(d.get<string>('uvPath', ''))
+				?? fromJson('mcpGateway.uvPath')
+				?? fromJson('mcpDashboard.uvPath'),
+			defaultGuiMode: trim(g.get<string>('defaultGuiMode', ''))
+				?? fromJson('mcpGateway.defaultGuiMode')
+				?? 'uv',
+		};
+
+		logger.info('sap-picker',
+			`resolveDefaults: vsp=${JSON.stringify(resolved.vspCommand)} ` +
+			`guiUv=${JSON.stringify(resolved.guiUvProject)} ` +
+			`uv=${JSON.stringify(resolved.uvPath)} ` +
+			`mode=${JSON.stringify(resolved.defaultGuiMode)}`,
+		);
+		return resolved;
+	}
+
+	/**
+	 * Read VSCode user settings.json off disk and JSON.parse it
+	 * (stripping line + block comments first — VSCode's editor accepts
+	 * JSON5 comments). Returns an empty object on any failure.
+	 *
+	 * Used as a defence-in-depth fallback when getConfiguration() does
+	 * not surface a setting that is in fact present in the file.
+	 */
+	private static readSettingsJsonDirect(): Record<string, unknown> {
+		const candidates: string[] = [];
+		// Windows: %APPDATA%\Code\User\settings.json
+		const appData = process.env.APPDATA;
+		if (appData) {
+			candidates.push(path.join(appData, 'Code', 'User', 'settings.json'));
+		}
+		// macOS / Linux fallback locations.
+		const home = os.homedir();
+		candidates.push(path.join(home, '.config', 'Code', 'User', 'settings.json'));
+		candidates.push(path.join(home, 'Library', 'Application Support', 'Code', 'User', 'settings.json'));
+
+		for (const p of candidates) {
+			try {
+				if (!fs.existsSync(p)) { continue; }
+				const text = fs.readFileSync(p, 'utf8');
+				// Strip JSON5 comments before parsing — VSCode's editor
+				// allows // and /* */ in settings.json.
+				const stripped = text
+					.replace(/\/\*[\s\S]*?\*\//g, '')
+					.split('\n')
+					.map(line => {
+						// Strip // comments but be careful about //
+						// inside string literals. Simple heuristic: count
+						// unescaped quotes before //; odd count = inside
+						// string, leave alone.
+						const dblSlash = line.indexOf('//');
+						if (dblSlash < 0) { return line; }
+						let inString = false;
+						let escape = false;
+						for (let i = 0; i < dblSlash; i++) {
+							const ch = line[i];
+							if (escape) { escape = false; continue; }
+							if (ch === '\\') { escape = true; continue; }
+							if (ch === '"') { inString = !inString; }
+						}
+						return inString ? line : line.substring(0, dblSlash);
+					})
+					.join('\n');
+				const parsed = JSON.parse(stripped);
+				if (parsed && typeof parsed === 'object') {
+					return parsed as Record<string, unknown>;
+				}
+			} catch (err) {
+				logger.warn('sap-picker', `readSettingsJsonDirect(${p}) failed: ${errorMsg(err)}`);
+			}
+		}
+		return {};
 	}
 
 	/**
