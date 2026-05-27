@@ -518,6 +518,7 @@ export class SapPickerPanel {
 		});
 
 		const defaults = SapPickerPanel.resolveDefaults();
+		logger.info('sap-picker', `resolved defaults: vsp=${JSON.stringify(defaults.vspCommand)} guiUv=${JSON.stringify(defaults.guiUvProject)} uv=${JSON.stringify(defaults.uvPath)} mode=${JSON.stringify(defaults.defaultGuiMode)}`);
 		const { ops, skipped } = buildOpsListWithDefaults(this.rows, defaults);
 		// Filter to retry-only failed rows when onlyFailed is set: keep an op
 		// only if its rowKey/component is currently in a failed status.
@@ -535,8 +536,14 @@ export class SapPickerPanel {
 			if (skipped.length > 0 && !onlyFailed) {
 				const lines = skipped.slice(0, 4).map(s => `  - ${s.rowKey} ${s.component}: ${s.reason}`);
 				const more = skipped.length > 4 ? `\n  …and ${skipped.length - 4} more` : '';
+				const resolvedDump =
+					`\n\nResolved defaults at apply time:\n` +
+					`  mcpGateway.defaultVspCommand or mcpDashboard.vibingPath -> ${defaults.vspCommand ?? '(empty)'}\n` +
+					`  mcpGateway.defaultGuiUvProject or mcpDashboard.sapGuiPath -> ${defaults.guiUvProject ?? '(empty)'}\n` +
+					`  mcpGateway.uvPath or mcpDashboard.uvPath -> ${defaults.uvPath ?? '(empty)'}\n` +
+					`  mcpGateway.defaultGuiMode -> ${defaults.defaultGuiMode ?? '(empty)'}`;
 				await this.postError(
-					`Apply skipped ${skipped.length} change(s) because configuration is missing:\n${lines.join('\n')}${more}`,
+					`Apply skipped ${skipped.length} change(s) because configuration is missing:\n${lines.join('\n')}${more}${resolvedDump}`,
 				);
 				return;
 			}
