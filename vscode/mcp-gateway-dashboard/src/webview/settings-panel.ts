@@ -433,19 +433,79 @@ export class SettingsPanel {
 }
 
 function readScalar(key: string): unknown {
-	// Use namespace-explicit getConfiguration(ns).get(sub) — observed
-	// 2026-05-27 that getConfiguration().get('mcpGateway.defaultVspCommand')
-	// returned undefined even when settings.json had the value, while
-	// getConfiguration('mcpGateway').get('defaultVspCommand') returned it
-	// correctly. The dotted-key form is documented but not reliable on
-	// machine-scope settings declared by extensions that lazily activate.
+	// 3-layer read:
+	//   1. getConfiguration(ns).get(sub) — namespace-explicit form
+	//   2. getConfiguration().get(fullKey) — flat-dotted form
+	//   3. settings.json read directly off disk — bypasses VSCode cache
+	//
+	// Operator-reported 2026-05-27 that the webview rendered EMPTY
+	// inputs for keys CONFIRMED present in settings.json. Even
+	// namespace-explicit getConfiguration returned undefined for
+	// machine-scope mcpGateway.* keys in some sessions. Layer 3 is
+	// belt-and-suspenders: read the file directly so the webview
+	// always reflects the truth on disk.
 	const dot = key.indexOf('.');
-	if (dot < 0) {
-		return vscode.workspace.getConfiguration().get<unknown>(key);
+	if (dot >= 0) {
+		const ns = key.substring(0, dot);
+		const sub = key.substring(dot + 1);
+		const v1 = vscode.workspace.getConfiguration(ns).get<unknown>(sub);
+		if (v1 !== undefined && v1 !== '') { return v1; }
 	}
-	const ns = key.substring(0, dot);
-	const sub = key.substring(dot + 1);
-	return vscode.workspace.getConfiguration(ns).get<unknown>(sub);
+	const v2 = vscode.workspace.getConfiguration().get<unknown>(key);
+	if (v2 !== undefined && v2 !== '') { return v2; }
+	if (dot >= 0) {
+		const fromDisk = readSettingsJsonValue(key);
+		if (fromDisk !== undefined) { return fromDisk; }
+	}
+	return v2;
+}
+
+function readSettingsJsonValue(fullKey: string): unknown {
+	// Dynamic require so we don't add a top-level node:fs import (kept
+	// minimal — sap-picker-panel uses the same pattern).
+	const fsSync = require('node:fs') as typeof import('node:fs');
+	const candidates: string[] = [];
+	const appData = process.env.APPDATA;
+	if (appData) { candidates.push(path.join(appData, 'Code', 'User', 'settings.json')); }
+	const home = os.homedir();
+	candidates.push(path.join(home, '.config', 'Code', 'User', 'settings.json'));
+	candidates.push(path.join(home, 'Library', 'Application Support', 'Code', 'User', 'settings.json'));
+	for (const p of candidates) {
+		try {
+			if (!fsSync.existsSync(p)) { continue; }
+			const text: string = fsSync.readFileSync(p, 'utf8');
+			let cleaned = text;
+			while (true) {
+				const a = cleaned.indexOf('/*');
+				if (a < 0) { break; }
+				const b = cleaned.indexOf('*/', a + 2);
+				if (b < 0) { break; }
+				cleaned = cleaned.substring(0, a) + cleaned.substring(b + 2);
+			}
+			const lines = cleaned.split('\n').map((line: string) => {
+				const i = line.indexOf('//');
+				if (i < 0) { return line; }
+				let inStr = false;
+				let esc = false;
+				for (let j = 0; j < i; j++) {
+					const c = line[j];
+					if (esc) { esc = false; continue; }
+					if (c === '\\') { esc = true; continue; }
+					if (c === '"') { inStr = !inStr; }
+				}
+				return inStr ? line : line.substring(0, i);
+			});
+			const parsed = JSON.parse(lines.join('\n'));
+			if (parsed && typeof parsed === 'object') {
+				const v = (parsed as Record<string, unknown>)[fullKey];
+				if (typeof v === 'string' && v.trim().length === 0) { return undefined; }
+				return v;
+			}
+		} catch (err) {
+			logger.warn('settings-panel', `readSettingsJsonValue(${p}) failed: ${errorMsg(err)}`);
+		}
+	}
+	return undefined;
 }
 
 /** Build the `defaultUri` for `showOpenDialog`, following the R-17 fallback
