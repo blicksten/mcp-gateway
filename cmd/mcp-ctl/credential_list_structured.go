@@ -96,7 +96,11 @@ func runCredentialListStructured(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	kpEntries, err := sapcreds.ListEntries(kdbxPath, string(password), keyfile)
+	// Pass password as []byte directly to mirror credential_import's known-
+	// good path. The earlier string round-trip via ListEntries showed an
+	// HMAC-SHA256 mismatch on the operator's KDBX (Cyrillic master, KDBX4,
+	// 2026-05-27); ListEntriesBytes skips the conversion to rule that out.
+	kpEntries, err := sapcreds.ListEntriesBytes(kdbxPath, password, keyfile)
 	if err != nil {
 		return err
 	}

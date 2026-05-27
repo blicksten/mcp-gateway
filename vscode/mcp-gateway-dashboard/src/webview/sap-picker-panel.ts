@@ -1,6 +1,4 @@
 import * as crypto from 'node:crypto';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 /** Cyrillic-character regex — same as
@@ -30,17 +28,21 @@ import {
 	resetFailedRowsForRetry,
 	runWithConcurrency,
 } from '../sap-picker-state';
-import { listPickerRows, SapPickerImportError, type PickerListRow } from '../sap-picker-importer';
+import { listPickerRows, resolveSapCredentialsPy, SapPickerImportError, type PickerListRow } from '../sap-picker-importer';
 import { buildSapPickerHtml } from './sap-picker-html';
 import { logger } from '../logger';
 
-/** Where the picker reads landscape + KP from, plus the resolved mcp-ctl
- *  executable. Built once per refresh() call from workspace configuration. */
+/** Where the picker reads KP from + which python interpreter + script to
+ *  run. Built once per refresh() call from workspace configuration.
+ *  Landscape XML is intentionally absent — the python-pykeepass path
+ *  does not consult the landscape for SID listing (matches the team-
+ *  local CredentialManager.listAllEntries behaviour). Reintroduce a
+ *  landscape spawn if/when the hybrid "available but no creds" rows
+ *  are needed again. */
 interface PickerInputs {
-	mcpCtlPath: string;
 	kdbxPath: string;
-	landscapePath: string;
-	keyfile?: string;
+	pythonPath: string;
+	scriptPath: string;
 }
 
 /** Wire shape for what the webview sends back on Apply / Retry. The host
@@ -193,25 +195,23 @@ export class SapPickerPanel {
 			let rows: PickerListRow[];
 			try {
 				rows = await listPickerRows({
-					mcpCtlPath: inputs.mcpCtlPath,
 					kdbxPath: inputs.kdbxPath,
-					landscapePath: inputs.landscapePath,
 					masterPassword: this.kpMasterPasswordBuf!,
-					keyfile: inputs.keyfile,
+					scriptPath: inputs.scriptPath,
+					pythonPath: inputs.pythonPath,
 				});
 			} catch (err) {
 				const msg = err instanceof SapPickerImportError ? err.message : errorMsg(err);
-				logger.error('sap-picker', `list-structured failed (attempt ${attempt})`, err);
+				logger.error('sap-picker', `sap-credentials.py failed (attempt ${attempt})`, err);
 
-				// gokeepasslib reports a wrong master password as
-				// "HMAC-SHA256 of header mismatching" (sometimes
-				// preceded by "Wrong password?"). On match: evict
-				// BOTH in-memory and SecretStorage, then retry the
-				// loop with a fresh prompt. Other errors break out.
-				const looksLikeWrongPassword =
-					msg.includes('HMAC-SHA256') ||
-					msg.toLowerCase().includes('wrong password');
-				if (looksLikeWrongPassword) {
+				// sap-credentials.py + pykeepass returns "Wrong master
+				// password" on stderr on auth fail; SapPickerImportError
+				// surfaces that as the wrongPassword flag. Evict both
+				// caches + retry the loop.
+				const wrongPassword =
+					(err instanceof SapPickerImportError && err.wrongPassword === true) ||
+					msg.toLowerCase().includes('wrong master password');
+				if (wrongPassword) {
 					await this.forgetSavedPassword(inputs.kdbxPath);
 					if (attempt === MAX_PASSWORD_ATTEMPTS) {
 						await this.postError(
@@ -220,6 +220,15 @@ export class SapPickerPanel {
 						return null;
 					}
 					continue;
+				}
+
+				// pykeepass-not-installed: surface the install hint.
+				if (err instanceof SapPickerImportError && err.pykeepassMissing) {
+					await this.postError(
+						'pykeepass is not installed. Run: pip install pykeepass. ' +
+						'Then click Refresh.',
+					);
+					return null;
 				}
 
 				await this.postError(`Failed to load SAP systems: ${msg}`);
@@ -254,69 +263,20 @@ export class SapPickerPanel {
 			return null;
 		}
 
-		// Landscape path: explicit setting wins; otherwise fall back to
-		// the SAP Logon default %APPDATA%/SAP/Common/SAPUILandscape.xml
-		// (Windows). Non-Windows operators must set it explicitly.
-		let landscapePath = cfg.get<string>('sapLandscapePath', '').trim();
-		if (!landscapePath) {
-			const appData = process.env.APPDATA;
-			if (!appData) {
-				void this.postError(
-					'SAP Picker needs mcpGateway.sapLandscapePath set ' +
-					'(no APPDATA env var to derive the default from).',
-				);
-				return null;
-			}
-			landscapePath = path.join(appData, 'SAP', 'Common', 'SAPUILandscape.xml');
+		const scriptPath = resolveSapCredentialsPy();
+		if (!scriptPath) {
+			void this.postError(
+				'SAP Picker needs sap-credentials.py. Set mcpGateway.sapCredentialsPyPath, ' +
+				'or set mcpDashboard.orchestratorPath (team-local convention — script is ' +
+				'looked up at ${orchestratorPath}/../scripts/sap-credentials.py).',
+			);
+			return null;
 		}
 
-		const mcpCtlPath = this.resolveMcpCtlPath(cfg);
-		logger.info('sap-picker', `using mcp-ctl at ${mcpCtlPath}`);
+		const pythonPath = cfg.get<string>('pythonPath', '').trim() || 'python';
+		logger.info('sap-picker', `using python "${pythonPath}" + script "${scriptPath}" + kdbx "${kdbxPath}"`);
 
-		return { mcpCtlPath, kdbxPath, landscapePath };
-	}
-
-	/**
-	 * Resolve which mcp-ctl binary to spawn. Strict order:
-	 *   1. mcpGateway.mcpCtlPath if set AND the file exists on disk.
-	 *   2. Sibling of mcpGateway.daemonPath (mcp-ctl(.exe) in same dir).
-	 *      mcp-ctl ships next to the daemon in every release artefact,
-	 *      and the user's daemon path is reliably set since the daemon
-	 *      runs.
-	 *   3. Bare "mcp-ctl" → execFile resolves via PATH.
-	 *
-	 * Why the file-exists check on (1): a stale or out-of-band binary at
-	 * ~/go/bin/mcp-ctl.exe on PATH can shadow the configured path when
-	 * cfg.get returns empty for any reason (machine-scope read miss,
-	 * profile mismatch, settings.json typo). The old binary did not have
-	 * `credential list-structured` and surfaces the SAP Picker as
-	 * "unknown flag: --kdbx" — observed 2026-05-26.
-	 */
-	private resolveMcpCtlPath(cfg: vscode.WorkspaceConfiguration): string {
-		const explicit = cfg.get<string>('mcpCtlPath', '').trim();
-		if (explicit && fs.existsSync(explicit)) {
-			return explicit;
-		}
-		if (explicit) {
-			logger.warn('sap-picker', `mcpGateway.mcpCtlPath does not exist on disk: ${explicit}`);
-		}
-
-		const daemonPath = cfg.get<string>('daemonPath', '').trim();
-		if (daemonPath) {
-			const dir = path.dirname(daemonPath);
-			const candidates = [path.join(dir, 'mcp-ctl.exe'), path.join(dir, 'mcp-ctl')];
-			for (const c of candidates) {
-				if (fs.existsSync(c)) {
-					logger.info('sap-picker', `mcpCtlPath empty/missing — falling back to daemon sibling: ${c}`);
-					return c;
-				}
-			}
-		}
-
-		// Last resort. execFile will probe PATH; on Windows the resolution
-		// includes %PATHEXT%. Behaviour matches legacy mcp-ctl invocations
-		// from runKeepassImport.
-		return 'mcp-ctl';
+		return { kdbxPath, pythonPath, scriptPath };
 	}
 
 	/**

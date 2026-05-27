@@ -1,116 +1,163 @@
 /**
- * SAP Picker importer — spawns `mcp-ctl credential list-structured --json`
- * with argv-array exec (no shell) and parses the result into picker rows.
+ * SAP Picker importer — spawns `python <sap-credentials.py> --list-all
+ * --stdin --db <kdbx>` and parses the JSON output.
  *
- * Why this exists separately from the daemon's /api/v1/sap/picker-snapshot
- * endpoint: the daemon has no slot for the KeePass master password and
- * intentionally never sees it. Password lives in the operator's head and
- * is supplied at SapPickerPanel.refresh() time via vscode.window.showInputBox,
- * then piped to mcp-ctl's stdin (--password-stdin). The daemon endpoint
- * is a T-A.1 contract stub that returns empty rows — we bypass it entirely.
+ * VERBATIM PORT of claude-team-control/vscode-dashboard's
+ * CredentialManager.listAllEntries (services/credential-manager.ts L131-217).
+ * The earlier mcp-ctl + gokeepasslib path rejected the operator's KDBX
+ * with HMAC-SHA256 mismatch despite a 100%-correct master password
+ * (reported 2026-05-27). pykeepass (Python) opens the SAME KDBX with
+ * the SAME password without issue — verified live by the operator on
+ * 2026-05-27. Switching to the proven pipeline.
  *
- * Security invariants (mirror keepass-importer.ts T12B.3):
- *   - execFile with an argv array; the shell never sees user-controlled
- *     paths (kdbx, landscape).
- *   - Master password piped via stdin (--password-stdin), never on argv
- *     or in env.
- *   - child stdout / stderr are NEVER logged. stdout carries the SID/user
- *     intersection; stderr may echo paths or KeePass warnings.
- *   - maxBuffer set explicitly so an oversized landscape ∪ KP intersection
- *     cannot exhaust extension-host memory.
+ * Security invariants (mirror team-local + keepass-importer):
+ *   - spawn with explicit argv (shell:false) — no shell expansion.
+ *   - Master password Buffer piped DIRECTLY to stdin (no string concat,
+ *     no execFile default-encoding pass-through). Trailing newline
+ *     written separately so the Python `sys.stdin.readline().rstrip('\n')`
+ *     bounds correctly.
+ *   - child stdout/stderr captured as Buffer; stdout parsed as JSON
+ *     once and discarded. stderr surfaces first line only on non-zero
+ *     exit; never logged to user-visible toasts (may contain paths).
  *
- * Output JSON contract (matches Go `structuredRow` in
- * cmd/mcp-ctl/credential_list_structured.go):
- *
- *   [{ "sid": "ABA", "client": "800", "user": "NAUMOV", "kpMissing": false }, ...]
+ * Script discovery:
+ *   1. mcpGateway.sapCredentialsPyPath setting if set explicitly.
+ *   2. Derived from mcpDashboard.orchestratorPath (the team-local
+ *      dashboard's setting — most operators already have it set):
+ *        ${orchestratorPath}/../scripts/sap-credentials.py
+ *   3. Hard-coded conventional path
+ *      ~/claude-workspace/claude-team-control/scripts/sap-credentials.py
+ *      as last resort (matches the standard operator-machine layout).
  */
 
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { spawn } from 'node:child_process';
+import * as vscode from 'vscode';
 
-/** Maximum stdout+stderr buffer size (1 MB — same envelope as keepass-importer). */
+/** Output buffer cap. 1 MiB matches keepass-importer + team-local — a
+ *  KDBX with so many entries that JSON exceeds 1 MiB is pathological. */
 const MAX_BUFFER = 1 << 20;
 
-/** Default spawn timeout for mcp-ctl. Landscape XML parsing + KDBX decode
- *  on a typical operator vault is well under 10 s; 30 s leaves headroom
- *  for slow corporate fileshares (Include URLs may point at UNC paths). */
-const DEFAULT_TIMEOUT_MS = 30_000;
+/** Spawn timeout. team-local listAllEntries uses 15 s; we match. */
+const DEFAULT_TIMEOUT_MS = 15_000;
 
-/** Mirrors Go structuredRow (cmd/mcp-ctl/credential_list_structured.go:13).
- *  Field names match the JSON tag casing, NOT Go field names — this is the
- *  wire shape. */
+/** Row shape returned to the caller. Same fields the previous mcp-ctl-
+ *  backed implementation exposed, so SapPickerPanel.augmentWithCache
+ *  is unchanged. */
 export interface PickerListRow {
 	sid: string;
 	client: string;
 	user: string;
+	/** Always false in the python-pykeepass path — every returned row
+	 *  IS a KP entry. The hybrid-with-landscape intersection that set
+	 *  this to true for landscape-only SIDs lived in the old mcp-ctl
+	 *  path; reintroduce it via a separate landscape spawn if/when the
+	 *  operator surface needs "available but no creds" rows again. */
 	kpMissing: boolean;
 }
 
 export interface PickerListOptions {
-	mcpCtlPath: string;        // absolute path or "mcp-ctl" (resolved via PATH)
-	kdbxPath: string;          // absolute path to the KeePass vault
-	landscapePath: string;     // absolute path to SAPUILandscape.xml
-	/** Buffer (not string!) so non-ASCII passwords are written to stdin
-	 *  byte-for-byte without any default-encoding pass through Node's
-	 *  Writable stream. Matches claude-team-control/vscode-dashboard
-	 *  CredentialManager._runScript pattern. */
+	/** Absolute path to the KDBX. */
+	kdbxPath: string;
+	/** Master password as Buffer — written byte-for-byte to stdin. */
 	masterPassword: Buffer;
-	keyfile?: string;
+	/** Absolute path to sap-credentials.py — resolved by
+	 *  resolveSapCredentialsPy() in SapPickerPanel. */
+	scriptPath: string;
+	/** Python interpreter to spawn. Defaults to "python" (resolved via
+	 *  PATH) — matches the team-local invocation. Override via
+	 *  mcpGateway.pythonPath setting when "python" isn't on PATH or
+	 *  refers to the wrong interpreter. */
+	pythonPath?: string;
 	timeoutMs?: number;
 }
 
-/** Raised by listPickerRows on any failure. Keeps child stderr out of message. */
 export class SapPickerImportError extends Error {
-	constructor(message: string, public readonly exitCode?: number) {
+	constructor(
+		message: string,
+		public readonly exitCode?: number,
+		/** Set when the stderr first line contains "Wrong master password" —
+		 *  signals SapPickerPanel to evict the SecretStorage entry and
+		 *  re-prompt. */
+		public readonly wrongPassword?: boolean,
+		/** Set when stderr mentions pykeepass — actionable hint that the
+		 *  Python module is missing. */
+		public readonly pykeepassMissing?: boolean,
+	) {
 		super(message);
 		this.name = 'SapPickerImportError';
 	}
 }
 
 /**
- * Spawn mcp-ctl and return the parsed picker rows.
+ * Resolve sap-credentials.py path from settings + filesystem probes.
+ * Returns null if no candidate exists.
  *
- * Failure modes:
- *   - ENOENT on mcp-ctl: SapPickerImportError("mcp-ctl: not found ...")
- *   - landscape parse error: non-zero exit, stderr first line surfaced
- *   - wrong KeePass password: non-zero exit, stderr first line surfaced
- *   - JSON parse failure: SapPickerImportError("output was not valid JSON ...")
- *
- * Caller (SapPickerPanel) maps these to webview banner messages.
+ * Priority:
+ *   1. mcpGateway.sapCredentialsPyPath (explicit override)
+ *   2. ${mcpDashboard.orchestratorPath}/../scripts/sap-credentials.py
+ *      (team-local convention; operator usually has orchestratorPath set)
+ *   3. ~/claude-workspace/claude-team-control/scripts/sap-credentials.py
  */
-export async function listPickerRows(opts: PickerListOptions): Promise<PickerListRow[]> {
-	const args = [
-		'credential', 'list-structured',
-		'--kdbx', opts.kdbxPath,
-		'--landscape', opts.landscapePath,
-		'--password-stdin',
-	];
-	if (opts.keyfile) {
-		args.push('--keyfile', opts.keyfile);
+export function resolveSapCredentialsPy(): string | null {
+	const gatewayCfg = vscode.workspace.getConfiguration('mcpGateway');
+	const explicit = gatewayCfg.get<string>('sapCredentialsPyPath', '').trim();
+	if (explicit && fs.existsSync(explicit)) {
+		return explicit;
 	}
 
+	const dashCfg = vscode.workspace.getConfiguration('mcpDashboard');
+	const orchPath = dashCfg.get<string>('orchestratorPath', '').trim();
+	if (orchPath) {
+		const derived = path.resolve(orchPath, '..', 'scripts', 'sap-credentials.py');
+		if (fs.existsSync(derived)) {
+			return derived;
+		}
+	}
+
+	const conventional = path.join(
+		os.homedir(),
+		'claude-workspace',
+		'claude-team-control',
+		'scripts',
+		'sap-credentials.py',
+	);
+	if (fs.existsSync(conventional)) {
+		return conventional;
+	}
+
+	return null;
+}
+
+/**
+ * Run python sap-credentials.py --list-all --stdin and return parsed
+ * picker rows. Buffer pipe for the password — same shape as
+ * claude-team-control/vscode-dashboard CredentialManager.listAllEntries.
+ *
+ * Failure modes:
+ *   - "Wrong master password" in stderr → SapPickerImportError with
+ *     wrongPassword=true; caller evicts SecretStorage + retries.
+ *   - "pykeepass" in stderr → SapPickerImportError with
+ *     pykeepassMissing=true; caller surfaces an install hint.
+ *   - Other non-zero exit → generic SapPickerImportError with the
+ *     stderr first line; never includes stdout (may contain user/SID).
+ */
+export async function listPickerRows(opts: PickerListOptions): Promise<PickerListRow[]> {
+	const pythonPath = opts.pythonPath ?? 'python';
+	const args = [opts.scriptPath, '--list-all', '--stdin', '--db', opts.kdbxPath];
 	const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-	const stdout: string = await new Promise((resolve, reject) => {
-		// MCP_GATEWAY_AUTH_TOKEN blanked — same precaution as keepass-importer.
-		// `credential list-structured` does not hit the authed daemon either.
-		const childEnv = { ...process.env, MCP_GATEWAY_AUTH_TOKEN: '' };
-
-		// spawn (not execFile) so we can write the password as a Buffer
-		// directly to stdin — mirrors claude-team-control/vscode-dashboard
-		// CredentialManager._runScript. execFile + string-concat
-		// `pw + '\n'` routes through Node's Writable default encoding,
-		// which can byte-differ from the buffer's raw bytes for non-ASCII
-		// passwords (the symptom: HMAC-SHA256 mismatch on a correct
-		// Cyrillic master password — reported 2026-05-27).
+	return new Promise<PickerListRow[]>((resolve, reject) => {
 		let settled = false;
 		const stdoutChunks: Buffer[] = [];
 		const stderrChunks: Buffer[] = [];
 
-		const child = spawn(opts.mcpCtlPath, args, {
+		const child = spawn(pythonPath, args, {
 			shell: false,
 			stdio: ['pipe', 'pipe', 'pipe'],
 			windowsHide: true,
-			env: childEnv,
 		});
 
 		const settle = (fn: () => void) => {
@@ -123,7 +170,7 @@ export async function listPickerRows(opts: PickerListOptions): Promise<PickerLis
 		const timer = setTimeout(() => {
 			if (child.exitCode === null) { child.kill(); }
 			settle(() => reject(new SapPickerImportError(
-				`mcp-ctl (${opts.mcpCtlPath}) timed out after ${timeoutMs}ms`,
+				`python (${pythonPath}) timed out after ${timeoutMs}ms`,
 			)));
 		}, timeoutMs);
 
@@ -132,72 +179,72 @@ export async function listPickerRows(opts: PickerListOptions): Promise<PickerLis
 
 		child.on('error', (err) => {
 			settle(() => reject(new SapPickerImportError(
-				`mcp-ctl (${opts.mcpCtlPath}) spawn error: ${err.message}`,
+				`python (${pythonPath}) spawn error: ${err.message}`,
 			)));
 		});
 
 		child.on('close', (code) => {
 			if (Buffer.concat(stdoutChunks).length > MAX_BUFFER) {
 				settle(() => reject(new SapPickerImportError(
-					`mcp-ctl (${opts.mcpCtlPath}) stdout exceeded ${MAX_BUFFER}-byte cap`,
+					`python stdout exceeded ${MAX_BUFFER}-byte cap`,
 				)));
 				return;
 			}
 			if (code !== 0) {
-				const stderrHead = Buffer.concat(stderrChunks).toString('utf8').split(/\r?\n/, 1)[0] ?? '';
+				const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
+				const stderrHead = stderr.split(/\r?\n/, 1)[0] ?? '';
+				const wrongPassword = stderr.includes('Wrong master password');
+				const pykeepassMissing = stderr.toLowerCase().includes('pykeepass');
 				settle(() => reject(new SapPickerImportError(
-					`mcp-ctl (${opts.mcpCtlPath}) failed${stderrHead ? ': ' + stderrHead : ''}`,
+					`sap-credentials.py failed${stderrHead ? ': ' + stderrHead : ''}`,
 					code ?? undefined,
+					wrongPassword,
+					pykeepassMissing,
 				)));
 				return;
 			}
-			settle(() => resolve(Buffer.concat(stdoutChunks).toString('utf8')));
+			try {
+				const raw = JSON.parse(Buffer.concat(stdoutChunks).toString('utf8').trim());
+				if (!Array.isArray(raw)) {
+					settle(() => reject(new SapPickerImportError(
+						'sap-credentials.py output is not a JSON array',
+					)));
+					return;
+				}
+				const rows: PickerListRow[] = [];
+				for (const r of raw) {
+					if (!r || typeof r !== 'object') { continue; }
+					const obj = r as Record<string, unknown>;
+					if (typeof obj.sid !== 'string' || obj.sid.length === 0) { continue; }
+					rows.push({
+						sid: obj.sid,
+						client: typeof obj.client === 'string' ? obj.client : '',
+						user: typeof obj.user === 'string' ? obj.user : '',
+						kpMissing: false,
+					});
+				}
+				settle(() => resolve(rows));
+			} catch (err) {
+				settle(() => reject(new SapPickerImportError(
+					`sap-credentials.py output JSON parse failed: ${(err as Error).message}`,
+				)));
+			}
 		});
 
 		if (!child.stdin) {
-			settle(() => reject(new SapPickerImportError('mcp-ctl child has no stdin pipe')));
+			settle(() => reject(new SapPickerImportError('python child has no stdin pipe')));
 			return;
 		}
 		child.stdin.on('error', (err) => {
 			settle(() => reject(new SapPickerImportError(`stdin write failed: ${err.message}`)));
 		});
-		// Write password Buffer DIRECTLY (byte-for-byte, no string
-		// re-encoding), then a separate newline write — same shape as
-		// claude-team-control/vscode-dashboard:
-		//   proc.stdin.write(masterPasswordBuf);
-		//   proc.stdin.write("\n", () => proc.stdin.end());
-		// Go readPasswordStdin needs the trailing newline to bound
-		// bufio.Reader.ReadBytes('\n').
+		// VERBATIM from team-local CredentialManager.listAllEntries L211-212:
+		//   proc.stdin?.write(this._masterPasswordBuf!);
+		//   proc.stdin?.write("\n", () => proc.stdin?.end());
+		// Buffer goes directly, newline as separate string write that
+		// closes stdin in the callback so Python's
+		// sys.stdin.readline().rstrip('\n') terminates immediately.
 		child.stdin.write(opts.masterPassword);
 		child.stdin.write('\n', () => child.stdin?.end());
 	});
-
-	let payload: unknown;
-	try {
-		payload = JSON.parse(stdout);
-	} catch {
-		throw new SapPickerImportError('mcp-ctl output was not valid JSON (contract mismatch?)');
-	}
-
-	if (!Array.isArray(payload)) {
-		throw new SapPickerImportError('mcp-ctl JSON top-level is not an array');
-	}
-
-	const rows: PickerListRow[] = [];
-	for (const r of payload) {
-		if (!r || typeof r !== 'object') { continue; }
-		const obj = r as Record<string, unknown>;
-		// Defensive: missing fields → row excluded. The Go side always
-		// emits all four fields, but a future contract bump should not
-		// crash the picker.
-		if (typeof obj.sid !== 'string' || obj.sid.length === 0) { continue; }
-		rows.push({
-			sid: obj.sid,
-			client: typeof obj.client === 'string' ? obj.client : '',
-			user: typeof obj.user === 'string' ? obj.user : '',
-			kpMissing: obj.kpMissing === true,
-		});
-	}
-
-	return rows;
 }

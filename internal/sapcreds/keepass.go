@@ -30,7 +30,16 @@ type Entry struct {
 // Returns keepass.ErrNoCredentials (wrapped) when neither a password nor a
 // keyfile is supplied. Returns a decode error when the password is wrong.
 func ListEntries(kdbxPath, password, keyfilePath string) ([]Entry, error) {
-	db, err := keepass.OpenDatabase(kdbxPath, []byte(password), keyfilePath)
+	return ListEntriesBytes(kdbxPath, []byte(password), keyfilePath)
+}
+
+// ListEntriesBytes is the []byte-keyed variant. Use this when the caller
+// already holds the password as []byte to avoid a string round-trip. The
+// credential_import.go path (known-good on the operator's KDBX) passes
+// []byte directly to keepass.OpenDatabase — this entrypoint mirrors that
+// shape exactly so credential list-structured can do the same.
+func ListEntriesBytes(kdbxPath string, password []byte, keyfilePath string) ([]Entry, error) {
+	db, err := keepass.OpenDatabase(kdbxPath, password, keyfilePath)
 	if err != nil {
 		return nil, err
 	}
