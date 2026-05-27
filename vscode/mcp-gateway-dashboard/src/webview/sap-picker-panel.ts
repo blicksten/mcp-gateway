@@ -979,6 +979,17 @@ export class SapPickerPanel {
 		} catch (err) {
 			logger.warn('sap-picker',
 				`enrichConfig(${op.serverName}): sap-credentials.py failed: ${errorMsg(err)}`);
+			// Sonnet LOW (PAL fallback review 2026-05-27): re-throw on
+			// wrong-password so the batch surfaces a clear "wrong KP
+			// password" error instead of silently adding the server in
+			// error state. Operator gets actionable diagnostic.
+			if (err instanceof SapPickerImportError && err.wrongPassword) {
+				await this.forgetSavedPassword(this.lastInputs.kdbxPath);
+				throw new Error(
+					'KeePass master password rejected by sap-credentials.py for SID ' +
+					row.snapshot.sid + '. Re-open SAP Picker to re-enter (current session pwd cache cleared).',
+				);
+			}
 			return baseConfig;
 		}
 
