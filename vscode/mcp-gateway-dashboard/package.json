@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.33.13",
+  "version": "1.33.14",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -442,7 +442,19 @@
         "mcpGateway.sapLandscapePath": {
           "type": "string",
           "default": "",
-          "description": "Path to SAPUILandscape.xml for the SAP Picker. Empty resolves to %APPDATA%/SAP/Common/SAPUILandscape.xml on Windows (the SAP Logon default).",
+          "description": "[SAP Picker] Path to SAP Logon's SAPUILandscape.xml — the file SAP GUI generates when you add systems via 'Add System' in SAP Logon. Empty = auto-resolve to %APPDATA%/SAP/Common/SAPUILandscape.xml (the SAP Logon default on Windows; typically what you want).",
+          "scope": "machine"
+        },
+        "mcpGateway.sapCredentialsPyPath": {
+          "type": "string",
+          "default": "",
+          "description": "[SAP Picker] Path to sap-credentials.py — the Python script that opens your KDBX via pykeepass and lists SAP entries. Empty = auto-derive from mcpDashboard.orchestratorPath (looks for {orchestratorPath}/../scripts/sap-credentials.py); falls back to ~/claude-workspace/claude-team-control/scripts/sap-credentials.py. Set this only if you have the script in a non-standard location.",
+          "scope": "machine"
+        },
+        "mcpGateway.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "[SAP Picker] Python interpreter used to run sap-credentials.py. Empty = 'python' on PATH (matches team-local dashboard convention). Set to a full path (e.g. C:\\Python313\\python.exe) only if 'python' resolves to the wrong interpreter or pykeepass is installed in a non-default Python.",
           "scope": "machine"
         },
         "mcpGateway.marketplaceJsonPath": {
@@ -504,29 +516,29 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "description": "Default VSP executable used by SAP Picker / quick-add when no per-row override is set. Path or PATH-resolved name."
+          "description": "[SAP Picker] Full path to vibing-steampunk.exe (vsp.exe) — the VSP MCP server binary launched when you Add a SAP system in the picker. Empty = auto-fallback to mcpDashboard.vibingPath. Example: C:\\Users\\you\\claude-workspace\\vibing-steampunk\\vsp.exe"
         },
         "mcpGateway.defaultGuiUvProject": {
           "type": "string",
           "default": "",
           "scope": "machine",
-          "description": "Default uv project path used by the SAP-GUI server when defaultGuiMode = 'uv'. Empty = none."
+          "description": "[SAP Picker] Path to the sap-gui-control project directory (the folder, not a file). Used to spawn the SAP-GUI MCP server via 'uv run --project <this path> sap-gui-server'. Empty = auto-fallback to mcpDashboard.sapGuiPath. Example: C:\\Users\\you\\claude-workspace\\sap-gui-control"
         },
         "mcpGateway.defaultGuiMode": {
           "type": "string",
           "enum": [
-            "exec",
-            "uv"
+            "uv",
+            "exec"
           ],
-          "default": "exec",
+          "default": "uv",
           "scope": "machine",
-          "description": "How the SAP-GUI server is launched: 'exec' (direct executable) or 'uv' (uv-run from defaultGuiUvProject)."
+          "description": "[SAP Picker] How the SAP-GUI MCP server is launched. 'uv' (recommended) = 'uv run --project <defaultGuiUvProject> sap-gui-server' — matches team-local dashboard convention. 'exec' = invoke defaultVspCommand directly as both VSP and GUI launcher (use only when you have a single binary handling both)."
         },
         "mcpGateway.uvPath": {
           "type": "string",
           "default": "",
           "scope": "machine",
-          "description": "Path to the uv binary (empty = use PATH). Used when defaultGuiMode = 'uv'."
+          "description": "[SAP Picker] Full path to the uv binary (e.g. C:\\Users\\you\\AppData\\Local\\Microsoft\\WinGet\\Packages\\astral-sh.uv_*\\uv.exe). Empty = auto-fallback to mcpDashboard.uvPath, then 'uv' on PATH. Required when defaultGuiMode = 'uv'."
         }
       }
     }

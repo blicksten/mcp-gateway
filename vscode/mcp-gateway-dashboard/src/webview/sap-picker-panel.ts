@@ -275,10 +275,43 @@ export class SapPickerPanel {
 			return null;
 		}
 
+		// mcpGateway.pythonPath wins; falls back to bare 'python' on PATH
+		// (matches the team-local dashboard's CredentialManager.spawn call).
 		const pythonPath = cfg.get<string>('pythonPath', '').trim() || 'python';
 		logger.info('sap-picker', `using python "${pythonPath}" + script "${scriptPath}" + kdbx "${kdbxPath}"`);
 
 		return { kdbxPath, pythonPath, scriptPath };
+	}
+
+	/**
+	 * Resolve the SAP-launcher defaults from settings, with fallback to
+	 * the legacy mcpDashboard.* keys (most operators have those set from
+	 * team-local dashboard). Schema-default 'uv' is the typical choice.
+	 *
+	 * Why each setting matters (for the package.json description copy):
+	 *   - defaultVspCommand: where vsp.exe is. Spawned for VSP rows on Apply.
+	 *   - defaultGuiUvProject: sap-gui-control source dir. Used by uv run.
+	 *   - uvPath: uv binary that runs sap-gui-server from the project dir.
+	 *   - defaultGuiMode: 'uv' is the verified-working path; 'exec' is for
+	 *     setups where a single binary handles both VSP + GUI.
+	 */
+	private static resolveDefaults(): PickerDefaults {
+		const g = vscode.workspace.getConfiguration('mcpGateway');
+		const d = vscode.workspace.getConfiguration('mcpDashboard');
+		const trim = (s: string | undefined): string | undefined => {
+			const t = (s ?? '').trim();
+			return t.length === 0 ? undefined : t;
+		};
+		return {
+			vspCommand: trim(g.get<string>('defaultVspCommand', ''))
+				?? trim(d.get<string>('vibingPath', '')),
+			guiUvProject: trim(g.get<string>('defaultGuiUvProject', ''))
+				?? trim(d.get<string>('sapGuiPath', '')),
+			uvPath: trim(g.get<string>('uvPath', ''))
+				?? trim(d.get<string>('uvPath', '')),
+			// Schema default is 'uv'; only fall back to 'uv' on absent.
+			defaultGuiMode: trim(g.get<string>('defaultGuiMode', '')) ?? 'uv',
+		};
 	}
 
 	/**
@@ -558,28 +591,6 @@ export class SapPickerPanel {
 		}
 
 		await this.runBatch(filteredOps);
-	}
-
-	/** Resolve the picker's default VSP/GUI launcher settings, with
-	 *  fallback to the legacy mcpDashboard.* keys the team-local
-	 *  dashboard uses (most operators have those set already, so we
-	 *  reuse them without forcing a second round of configuration). */
-	private static resolveDefaults(): PickerDefaults {
-		const g = vscode.workspace.getConfiguration('mcpGateway');
-		const d = vscode.workspace.getConfiguration('mcpDashboard');
-		const trim = (s: string | undefined): string | undefined => {
-			const t = (s ?? '').trim();
-			return t.length === 0 ? undefined : t;
-		};
-		return {
-			vspCommand: trim(g.get<string>('defaultVspCommand', ''))
-				?? trim(d.get<string>('vibingPath', '')),
-			guiUvProject: trim(g.get<string>('defaultGuiUvProject', ''))
-				?? trim(d.get<string>('sapGuiPath', '')),
-			uvPath: trim(g.get<string>('uvPath', ''))
-				?? trim(d.get<string>('uvPath', '')),
-			defaultGuiMode: trim(g.get<string>('defaultGuiMode', '')) ?? 'uv',
-		};
 	}
 
 	private opTargetsFailedRow(op: BatchOp): boolean {
