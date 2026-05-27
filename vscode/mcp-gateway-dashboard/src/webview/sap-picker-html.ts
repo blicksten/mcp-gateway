@@ -133,7 +133,12 @@ let applying = false;
 
 // --- Pure helpers (mirrors of sap-picker-state.ts subset) ---
 
-function rowKey(row) { return row.client ? row.sid + '-' + row.client : row.sid; }
+function rowKey(row) {
+  var user = row.user || '';
+  if (!row.client && !user) return row.sid;
+  if (!user) return row.sid + '-' + row.client;
+  return row.sid + '-' + row.client + '-' + user;
+}
 function expandKey(sid, client, component) { return sid + '-' + client + '-' + component; }
 function categorize(row) {
   if (row.kpMissing) { return 'no-credentials'; }

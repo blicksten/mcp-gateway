@@ -47,9 +47,33 @@ function rs(over: Partial<RowState> & { snapshot: PickerSnapshotRow }): RowState
 }
 
 describe('sap-picker-state — keys + names', () => {
-	it('rowKey collapses empty client to bare SID', () => {
+	it('rowKey collapses bare SID when no client + no user', () => {
 		assert.strictEqual(rowKey(snapRow({ sid: 'DEV', client: '' })), 'DEV');
 		assert.strictEqual(rowKey(snapRow({ sid: 'DEV', client: '100' })), 'DEV-100');
+	});
+
+	it('rowKey includes user so multi-login SIDs do not collapse (2026-05-27)', () => {
+		// Real-world case: KP has two entries for SID Q26 — users
+		// "naumov" and "naumov1". Without user in the key both rows
+		// would collapse to "Q26-800" and the second row would be lost.
+		assert.strictEqual(
+			rowKey(snapRow({ sid: 'Q26', client: '800', user: 'naumov' })),
+			'Q26-800-naumov',
+		);
+		assert.strictEqual(
+			rowKey(snapRow({ sid: 'Q26', client: '800', user: 'naumov1' })),
+			'Q26-800-naumov1',
+		);
+		// Distinct users → distinct rowKeys.
+		assert.notStrictEqual(
+			rowKey(snapRow({ sid: 'Q26', client: '800', user: 'naumov' })),
+			rowKey(snapRow({ sid: 'Q26', client: '800', user: 'naumov1' })),
+		);
+		// No client + user → empty middle field is intentional.
+		assert.strictEqual(
+			rowKey(snapRow({ sid: 'DEV', client: '', user: 'naumov' })),
+			'DEV--naumov',
+		);
 	});
 
 	it('serverName composes vsp and sap-gui prefixes', () => {

@@ -21,9 +21,11 @@ import {
 	type RowOverride,
 	type BatchOp,
 	type LifecycleEvent,
+	type PickerDefaults,
 	serverName,
 	initRowsFromSnapshot,
 	buildOpsList,
+	buildOpsListWithDefaults,
 	transitionRow,
 	resetFailedRowsForRetry,
 	runWithConcurrency,
@@ -515,18 +517,62 @@ export class SapPickerPanel {
 			};
 		});
 
-		const ops = buildOpsList(this.rows);
+		const defaults = SapPickerPanel.resolveDefaults();
+		const { ops, skipped } = buildOpsListWithDefaults(this.rows, defaults);
 		// Filter to retry-only failed rows when onlyFailed is set: keep an op
 		// only if its rowKey/component is currently in a failed status.
 		const filteredOps = onlyFailed ? ops.filter((op) => this.opTargetsFailedRow(op)) : ops;
+
+		// 2026-05-27 fix: previously buildOpsList silently dropped any
+		// add-op whose override.vspCommand / override.guiCommand was
+		// empty. Operators reported "I clicked Apply and nothing
+		// happened" because the override is empty unless they expand
+		// the row and type a command. Now we (a) fill from settings
+		// defaults in buildOpsListWithDefaults, and (b) surface any
+		// remaining skipped ops as a clear banner so the operator
+		// knows what setting is missing.
 		if (filteredOps.length === 0) {
+			if (skipped.length > 0 && !onlyFailed) {
+				const lines = skipped.slice(0, 4).map(s => `  - ${s.rowKey} ${s.component}: ${s.reason}`);
+				const more = skipped.length > 4 ? `\n  …and ${skipped.length - 4} more` : '';
+				await this.postError(
+					`Apply skipped ${skipped.length} change(s) because configuration is missing:\n${lines.join('\n')}${more}`,
+				);
+				return;
+			}
 			await this.postApplied(0, 0, onlyFailed
 				? 'No failed rows to retry.'
 				: 'No changes to apply.');
 			return;
 		}
 
+		if (skipped.length > 0) {
+			logger.warn('sap-picker', `Apply skipped ${skipped.length} op(s) due to missing config`);
+		}
+
 		await this.runBatch(filteredOps);
+	}
+
+	/** Resolve the picker's default VSP/GUI launcher settings, with
+	 *  fallback to the legacy mcpDashboard.* keys the team-local
+	 *  dashboard uses (most operators have those set already, so we
+	 *  reuse them without forcing a second round of configuration). */
+	private static resolveDefaults(): PickerDefaults {
+		const g = vscode.workspace.getConfiguration('mcpGateway');
+		const d = vscode.workspace.getConfiguration('mcpDashboard');
+		const trim = (s: string | undefined): string | undefined => {
+			const t = (s ?? '').trim();
+			return t.length === 0 ? undefined : t;
+		};
+		return {
+			vspCommand: trim(g.get<string>('defaultVspCommand', ''))
+				?? trim(d.get<string>('vibingPath', '')),
+			guiUvProject: trim(g.get<string>('defaultGuiUvProject', ''))
+				?? trim(d.get<string>('sapGuiPath', '')),
+			uvPath: trim(g.get<string>('uvPath', ''))
+				?? trim(d.get<string>('uvPath', '')),
+			defaultGuiMode: trim(g.get<string>('defaultGuiMode', '')) ?? 'uv',
+		};
 	}
 
 	private opTargetsFailedRow(op: BatchOp): boolean {

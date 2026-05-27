@@ -94,9 +94,19 @@ export interface BatchOp {
 	config?: Record<string, unknown>;
 }
 
-/** Stable key for a (sid, client) pair. Empty client collapses to bare SID. */
+/** Stable key for a row. Includes user so multiple KP entries for the
+ *  same (sid, client) — e.g. SID Q26 with users "naumov" and "naumov1"
+ *  (observed 2026-05-27) — get distinct rows instead of collapsing.
+ *  Format:
+ *    sid                 — no client, no user
+ *    sid-client          — client, no user
+ *    sid--user           — no client, user (empty middle is intentional)
+ *    sid-client-user     — both present (typical case) */
 export function rowKey(snapshot: PickerSnapshotRow): string {
-	return snapshot.client ? `${snapshot.sid}-${snapshot.client}` : snapshot.sid;
+	const user = snapshot.user ?? '';
+	if (!snapshot.client && !user) { return snapshot.sid; }
+	if (!user) { return `${snapshot.sid}-${snapshot.client}`; }
+	return `${snapshot.sid}-${snapshot.client}-${user}`;
 }
 
 /** Compose the gateway server name for (component, sid, client). Stays in
@@ -151,43 +161,129 @@ export function applyFilter(rows: RowState[], filter: FilterFlags, search: strin
 	});
 }
 
-/** Diff registered-vs-desired into a flat BatchOp list. Skips `kpMissing`
- *  rows entirely (defence-in-depth: the UI disables their checkboxes, this
- *  layer rejects any change that slips through a tampered DOM). Skips add
- *  ops without a command — caller handles surfacing the validation error. */
-export function buildOpsList(rows: RowState[]): BatchOp[] {
+/** Defaults pulled from workspace settings — applied as a fallback when
+ *  the row-level override does not supply the field. Caller resolves
+ *  these once before buildOpsList runs. */
+export interface PickerDefaults {
+	/** mcpGateway.defaultVspCommand OR mcpDashboard.vibingPath (legacy). */
+	vspCommand?: string;
+	/** mcpGateway.defaultGuiUvProject OR mcpDashboard.sapGuiPath (legacy). */
+	guiUvProject?: string;
+	/** mcpGateway.uvPath OR mcpDashboard.uvPath (legacy). */
+	uvPath?: string;
+	/** mcpGateway.defaultGuiMode — 'uv' wraps the GUI launcher with
+	 *  `uv run --project <guiUvProject> sap-gui-server`; any other value
+	 *  treats defaultVspCommand as the literal GUI command. */
+	defaultGuiMode?: string;
+}
+
+/** Per-op outcome from buildOpsList — useful when the caller needs to
+ *  surface "skipped because X is missing" instead of silently swallowing
+ *  the operator's Apply intent (2026-05-27 user report: clicking Apply
+ *  did nothing because the override commands were empty). */
+export interface BuildOpsResult {
+	ops: BatchOp[];
+	skipped: { rowKey: string; component: Component; reason: string }[];
+}
+
+/** Diff registered-vs-desired into a flat BatchOp list, with defaults
+ *  pulled from settings used as a fallback when override is empty. Skips
+ *  `kpMissing` rows entirely (defence-in-depth: the UI disables their
+ *  checkboxes, this layer rejects any change that slips through a
+ *  tampered DOM). Skipped add ops surface in result.skipped with a
+ *  human-readable reason so the panel can show a clear banner. */
+export function buildOpsListWithDefaults(rows: RowState[], defaults: PickerDefaults): BuildOpsResult {
 	const ops: BatchOp[] = [];
+	const skipped: BuildOpsResult['skipped'] = [];
+
 	for (const r of rows) {
 		if (r.snapshot.kpMissing) { continue; }
 		const { sid, client } = r.snapshot;
+
 		// VSP delta
 		if (r.desired.vsp !== r.snapshot.registered.vsp) {
 			const name = serverName('vsp', sid, client);
 			if (r.desired.vsp) {
-				if (!r.override.vspCommand) { continue; }
-				ops.push({
-					kind: 'add', component: 'vsp', rowKey: r.key, serverName: name,
-					config: { command: r.override.vspCommand },
-				});
+				const cmd = (r.override.vspCommand && r.override.vspCommand.trim())
+					|| (defaults.vspCommand && defaults.vspCommand.trim())
+					|| '';
+				if (!cmd) {
+					skipped.push({
+						rowKey: r.key,
+						component: 'vsp',
+						reason: 'VSP command not set — fill the row override or mcpGateway.defaultVspCommand',
+					});
+				} else {
+					ops.push({
+						kind: 'add', component: 'vsp', rowKey: r.key, serverName: name,
+						config: { command: cmd },
+					});
+				}
 			} else {
 				ops.push({ kind: 'remove', component: 'vsp', rowKey: r.key, serverName: name });
 			}
 		}
+
 		// GUI delta
 		if (r.desired.gui !== r.snapshot.registered.gui) {
 			const name = serverName('gui', sid, client);
 			if (r.desired.gui) {
-				if (!r.override.guiCommand) { continue; }
-				ops.push({
-					kind: 'add', component: 'gui', rowKey: r.key, serverName: name,
-					config: { command: r.override.guiCommand },
-				});
+				// uv mode (spike §3.5 buildConfig): launch via
+				//   uv run --project <guiUvProject> sap-gui-server
+				// Override.guiCommand wins when present. Otherwise
+				// build from uvPath + guiUvProject if both available.
+				const overrideCmd = r.override.guiCommand && r.override.guiCommand.trim();
+				const overrideProject = (r.override.guiUvProject && r.override.guiUvProject.trim())
+					|| (defaults.guiUvProject && defaults.guiUvProject.trim())
+					|| '';
+				const uv = defaults.uvPath && defaults.uvPath.trim();
+				let config: Record<string, unknown> | undefined;
+				let reason = '';
+				if (overrideCmd) {
+					config = { command: overrideCmd };
+				} else if (defaults.defaultGuiMode === 'uv' && uv && overrideProject) {
+					config = {
+						command: uv,
+						args: ['run', '--project', overrideProject, 'sap-gui-server'],
+					};
+				} else if (defaults.vspCommand && defaults.vspCommand.trim() && defaults.defaultGuiMode !== 'uv') {
+					// Same launcher as VSP when not in uv mode (common
+					// when one binary handles both component flavours).
+					config = { command: defaults.vspCommand.trim() };
+				} else {
+					if (defaults.defaultGuiMode === 'uv') {
+						if (!uv) {
+							reason = 'GUI uv mode needs mcpGateway.uvPath';
+						} else if (!overrideProject) {
+							reason = 'GUI uv mode needs mcpGateway.defaultGuiUvProject';
+						} else {
+							reason = 'GUI command not resolved';
+						}
+					} else {
+						reason = 'GUI command not set — fill the row override, or set mcpGateway.defaultGuiMode=uv + mcpGateway.uvPath + mcpGateway.defaultGuiUvProject';
+					}
+				}
+				if (config) {
+					ops.push({
+						kind: 'add', component: 'gui', rowKey: r.key, serverName: name,
+						config,
+					});
+				} else {
+					skipped.push({ rowKey: r.key, component: 'gui', reason });
+				}
 			} else {
 				ops.push({ kind: 'remove', component: 'gui', rowKey: r.key, serverName: name });
 			}
 		}
 	}
-	return ops;
+
+	return { ops, skipped };
+}
+
+/** Legacy signature kept for the existing test suite. Drops skipped
+ *  ops silently — new callers should use buildOpsListWithDefaults. */
+export function buildOpsList(rows: RowState[]): BatchOp[] {
+	return buildOpsListWithDefaults(rows, {}).ops;
 }
 
 /** Initial RowState[] seeded from a snapshot. Desired = current registered. */

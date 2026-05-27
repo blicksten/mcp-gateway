@@ -636,11 +636,15 @@ function registerCommands(
 		cache.refresh(); // Re-fetch from API; all providers update via onDidRefresh.
 	}));
 
-	push(vscode.commands.registerCommand('mcpGateway.openSettings', () => {
-		void vscode.commands.executeCommand(
-			'workbench.action.openSettings',
-			'@ext:mcp-gateway.mcp-gateway-dashboard',
-		);
+	push(vscode.commands.registerCommand('mcpGateway.openSettings', async () => {
+		// Route to the webview SettingsPanel (Browse buttons for paths,
+		// validation, change-detection) rather than VSCode's native
+		// settings UI. The native UI has plain text inputs for every
+		// path setting — operators reported 2026-05-27 they could not
+		// pick folders (mcpGateway.defaultGuiUvProject etc.) from there.
+		// SettingsPanel renders kind:'path' fields with a Browse button
+		// wired through showOpenDialog.
+		await SettingsPanel.createOrShow(context.extensionUri, {});
 	}));
 
 	push(vscode.commands.registerCommand('mcpGateway.showClaudeCodeIntegration', () => {
