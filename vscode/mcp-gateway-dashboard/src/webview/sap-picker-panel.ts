@@ -348,21 +348,30 @@ export class SapPickerPanel {
 			return t.length === 0 ? undefined : t;
 		};
 
+		// Settings.json FIRST for path-shaped values. Operator reported
+		// 2026-05-27 that the picker passed command="uv" (relative) to
+		// daemon, which rejected it as "must be an absolute path". Root
+		// cause: mcpDashboard.uvPath has schema-default "uv" (relative),
+		// so getConfiguration returned "uv" instead of the operator's
+		// absolute path from settings.json. nullish coalescing (??)
+		// accepts "uv" as a valid value and never falls through to file
+		// read. Fix: file-read is layer 1 for path-shaped keys; only
+		// fall back to getConfiguration when file says nothing.
 		const resolved: PickerDefaults = {
-			vspCommand: trim(g.get<string>('defaultVspCommand', ''))
-				?? trim(d.get<string>('vibingPath', ''))
-				?? fromJson('mcpGateway.defaultVspCommand')
-				?? fromJson('mcpDashboard.vibingPath'),
-			guiUvProject: trim(g.get<string>('defaultGuiUvProject', ''))
-				?? trim(d.get<string>('sapGuiPath', ''))
-				?? fromJson('mcpGateway.defaultGuiUvProject')
-				?? fromJson('mcpDashboard.sapGuiPath'),
-			uvPath: trim(g.get<string>('uvPath', ''))
-				?? trim(d.get<string>('uvPath', ''))
-				?? fromJson('mcpGateway.uvPath')
-				?? fromJson('mcpDashboard.uvPath'),
-			defaultGuiMode: trim(g.get<string>('defaultGuiMode', ''))
-				?? fromJson('mcpGateway.defaultGuiMode')
+			vspCommand: fromJson('mcpGateway.defaultVspCommand')
+				?? fromJson('mcpDashboard.vibingPath')
+				?? trim(g.get<string>('defaultVspCommand', ''))
+				?? trim(d.get<string>('vibingPath', '')),
+			guiUvProject: fromJson('mcpGateway.defaultGuiUvProject')
+				?? fromJson('mcpDashboard.sapGuiPath')
+				?? trim(g.get<string>('defaultGuiUvProject', ''))
+				?? trim(d.get<string>('sapGuiPath', '')),
+			uvPath: fromJson('mcpGateway.uvPath')
+				?? fromJson('mcpDashboard.uvPath')
+				?? trim(g.get<string>('uvPath', ''))
+				?? trim(d.get<string>('uvPath', '')),
+			defaultGuiMode: fromJson('mcpGateway.defaultGuiMode')
+				?? trim(g.get<string>('defaultGuiMode', ''))
 				?? 'uv',
 		};
 
