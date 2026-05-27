@@ -67,6 +67,16 @@ export class SettingsPanel {
 		this.disposables.push(this.panel.webview.onDidReceiveMessage((msg: unknown) => {
 			void this.handleMessage(msg);
 		}));
+		// Reactive refresh: when an mcpGateway.* or mcpDashboard.* setting
+		// changes outside the panel (e.g. via Fill Defaults config.update,
+		// editing settings.json directly, or another extension) re-render
+		// so the inputs show the current values. Without this the panel
+		// shows stale values until the operator closes + reopens it.
+		this.disposables.push(vscode.workspace.onDidChangeConfiguration((ev) => {
+			if (ev.affectsConfiguration('mcpGateway') || ev.affectsConfiguration('mcpDashboard')) {
+				this.render();
+			}
+		}));
 	}
 
 	static async createOrShow(extensionUri: vscode.Uri, deps: PanelDeps = {}): Promise<SettingsPanel> {
@@ -116,6 +126,7 @@ export class SettingsPanel {
 			case 'browse': await this.handleBrowse(m.key, m.currentValue); break;
 			case 'save': await this.handleSave(m.changes); break;
 			case 'importFromMcpDashboard': await this.handleImport(); break;
+			case 'fillDefaults': await this.handleFillDefaults(); break;
 			case 'cancel': this.dispose(); break;
 			default: break;
 		}
@@ -220,6 +231,88 @@ export class SettingsPanel {
 			logger.error('settings-panel', 'restart daemon failed', err);
 			void vscode.window.showErrorMessage(`Restart failed: ${errorMsg(err)}`);
 		}
+	}
+
+	/**
+	 * Write SAP Picker defaults from `mcpDashboard.*` legacy keys directly
+	 * to user settings (`mcpGateway.*`) via config.update — bypasses the
+	 * staged-changes UX so the operator gets immediate persistence.
+	 * Unlike handleImport (which only stages and waits for Save), this
+	 * is one-click. After write completes, refresh the webview so the
+	 * new values render in the inputs.
+	 *
+	 * Always fills the 5 SAP Picker keys + sets defaultGuiMode='uv'
+	 * (overwrites even if existing has a stale 'exec'). KeePass +
+	 * sap-credentials.py paths are derived from mcpDashboard.* if not
+	 * already set on mcpGateway.*.
+	 */
+	private async handleFillDefaults(): Promise<void> {
+		const dash = vscode.workspace.getConfiguration('mcpDashboard');
+		const gate = vscode.workspace.getConfiguration('mcpGateway');
+		const writes: { key: string; value: unknown }[] = [];
+
+		const pushIf = (key: string, value: unknown): void => {
+			if (typeof value !== 'string' || value.trim().length === 0) { return; }
+			writes.push({ key, value: value.trim() });
+		};
+
+		// SAP Picker launcher trio.
+		pushIf('defaultVspCommand', dash.get<string>('vibingPath', ''));
+		pushIf('defaultGuiUvProject', dash.get<string>('sapGuiPath', ''));
+		pushIf('uvPath', dash.get<string>('uvPath', ''));
+		// uv is the verified-working mode (team-local dashboard parity).
+		writes.push({ key: 'defaultGuiMode', value: 'uv' });
+
+		// KeePass path — most operators have mcpDashboard.keepassDbPath set.
+		// Only fill mcpGateway.keepassPath when empty (don't trample a
+		// deliberate override).
+		if (typeof gate.get<unknown>('keepassPath') !== 'string'
+			|| (gate.get<string>('keepassPath', '').trim().length === 0)) {
+			pushIf('keepassPath', dash.get<string>('keepassDbPath', ''));
+		}
+
+		// sap-credentials.py — derive from orchestratorPath.
+		const orchPath = (dash.get<string>('orchestratorPath', '') ?? '').trim();
+		if (orchPath
+			&& (typeof gate.get<unknown>('sapCredentialsPyPath') !== 'string'
+				|| gate.get<string>('sapCredentialsPyPath', '').trim().length === 0)) {
+			const scriptPath = orchPath.replace(/\\/g, '/').replace(/\/+$/, '')
+				+ '/../scripts/sap-credentials.py';
+			// Normalise back to OS separator (Windows backslashes here).
+			pushIf('sapCredentialsPyPath',
+				process.platform === 'win32'
+					? scriptPath.replace(/\//g, '\\')
+					: scriptPath);
+		}
+
+		if (writes.length === 0) {
+			void vscode.window.showInformationMessage(
+				'Fill Defaults: nothing to write — mcpDashboard.* legacy settings are empty or already mirrored.',
+			);
+			return;
+		}
+
+		const errors: string[] = [];
+		for (const w of writes) {
+			try {
+				await gate.update(w.key, w.value, vscode.ConfigurationTarget.Global);
+			} catch (err) {
+				errors.push(`${w.key}: ${errorMsg(err)}`);
+			}
+		}
+
+		if (errors.length > 0) {
+			void vscode.window.showErrorMessage(
+				`Fill Defaults: ${writes.length - errors.length} ok, ${errors.length} failed:\n${errors.join('\n')}`,
+			);
+		} else {
+			void vscode.window.showInformationMessage(
+				`Fill Defaults: wrote ${writes.length} setting(s) to user settings.json. Reload the SAP Picker to apply.`,
+			);
+		}
+
+		// Refresh the webview with the now-current values.
+		this.render();
 	}
 
 	private async handleImport(): Promise<void> {
@@ -340,7 +433,19 @@ export class SettingsPanel {
 }
 
 function readScalar(key: string): unknown {
-	return vscode.workspace.getConfiguration().get<unknown>(key);
+	// Use namespace-explicit getConfiguration(ns).get(sub) — observed
+	// 2026-05-27 that getConfiguration().get('mcpGateway.defaultVspCommand')
+	// returned undefined even when settings.json had the value, while
+	// getConfiguration('mcpGateway').get('defaultVspCommand') returned it
+	// correctly. The dotted-key form is documented but not reliable on
+	// machine-scope settings declared by extensions that lazily activate.
+	const dot = key.indexOf('.');
+	if (dot < 0) {
+		return vscode.workspace.getConfiguration().get<unknown>(key);
+	}
+	const ns = key.substring(0, dot);
+	const sub = key.substring(dot + 1);
+	return vscode.workspace.getConfiguration(ns).get<unknown>(sub);
 }
 
 /** Build the `defaultUri` for `showOpenDialog`, following the R-17 fallback

@@ -109,7 +109,8 @@ section.hidden { display: none; }
   <h1>MCP Gateway — Settings</h1>
   <div class="toolbar">
     <input type="text" id="search" placeholder="Filter settings…" autocomplete="off" spellcheck="false">
-    <button type="button" id="btnImport" class="secondary" title="Import paths from mcpDashboard">Import paths from mcpDashboard</button>
+    <button type="button" id="btnImport" class="secondary" title="Stage paths from mcpDashboard.* (review + Save manually)">Import paths from mcpDashboard</button>
+    <button type="button" id="btnFillDefaults" title="One-click: write SAP Picker defaults (vibingPath, sapGuiPath, uvPath, mode=uv, keepassDbPath, sap-credentials.py) directly to user settings — no manual Save needed">Fill SAP defaults</button>
   </div>
   <div id="banner" class="banner" role="alert"></div>
 </header>
@@ -318,6 +319,9 @@ function cssEscape(s) {
 $('search').addEventListener('input', applyFilter);
 $('btnImport').addEventListener('click', () => {
   vscode.postMessage({ type: 'importFromMcpDashboard' });
+});
+$('btnFillDefaults').addEventListener('click', () => {
+  vscode.postMessage({ type: 'fillDefaults' });
 });
 $('btnSave').addEventListener('click', () => {
   if (!dirty) { setStatus('Nothing to save'); return; }
