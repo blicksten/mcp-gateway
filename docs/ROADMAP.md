@@ -1,5 +1,23 @@
 # MCP Gateway — Roadmap
 
+## ⚠️ Active pipeline — feature-64baca01 step 9 (doc-writer) — RESUME
+
+**Status:** doc-writer **artefacts shipped** in commit `eeded16` (README "Disconnect resilience" subsection + ROADMAP `StatusUnreachable` row below). Pipeline step 9 remains `in_progress` in orchestrator state because `complete_step` rejected the close call from this session with `spawn_token required` — the step lease was issued to a parallel session driver and is enforced cross-session by `Project & Pipeline Isolation` rule.
+
+**Resume instructions** (next session that holds the lease, OR operator manually):
+
+1. Call `mcp__orchestrator__complete_step(pipeline_id="feature-64baca01", step_output=<doc-writer output>)` from the lease-holding driver session. The doc-writer artefact reference is `git log --oneline d69ce81..eeded16 -- README.md docs/ROADMAP.md` — both files modified, commit `eeded16` co-authored by Porfiry.
+2. Verification evidence to embed in the close call: `git show eeded16 --stat` → `README.md +12 -1, docs/ROADMAP.md +1 -0`. Test proof: doc-only change, no code-review applicable (PAL SKIP per CLAUDE.md doc-only convention).
+3. If the lease cannot be reacquired, the fallback is `pipeline_ops(action="cancel", pipeline_id="feature-64baca01", reason="step 9 doc-writer artefacts shipped in eeded16, lease held by abandoned parallel session")` — requires explicit operator GO per `Session Stop Protocol` cancel-is-destructive rule.
+4. Orphan-scan in a session ≥72h after `2026-05-28T14:23:17Z` (`in_progress_step_started_at`) will auto-cancel via low-risk path (HEAD contains the lineage commits `cd931db → 526f515 → d69ce81 → eeded16`, nothing unpushed beyond the local main branch).
+
+**Known deferred follow-up (per qa-lead step 7 + final step 8 closure):**
+- MEDIUM: integration tests for slow-poll cycle (`TestMaybeProbeUnreachable_ReachableTriggersStart`, `TestUnreachableProbe_DoesNotIncrementRestartCount`, `TestCheckOne_RunningToUnreachable_OnPingPlusTCPFail`, `TestBackendSupervisor_UnreachableEarlyReturn`, E2E recovery).
+- MEDIUM: TS UI unit tests for warning icon / yellow-not-red bucket / sap-status-bar glyph.
+- MEDIUM: PAL consensus on Q1 (new-status vs reason-field) + Q2 (TCP classifier shape) per R-7 of architect plan.
+
+---
+
 ## ⚠️ Active audit — audit-e7618c9c (resume in next session)
 
 **Pipeline:** `audit-e7618c9c` step 2/4 (specialist-auditor fan-out). Audit scope at `docs/REVIEW-AUDIT.md` (6 scopes A-F).
