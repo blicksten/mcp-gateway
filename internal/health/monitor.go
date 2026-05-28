@@ -447,16 +447,42 @@ func (m *Monitor) checkOne(ctx context.Context, entry models.ServerEntry) {
 // attemptRestart tries to restart a server, respecting the circuit breaker.
 func (m *Monitor) attemptRestart(ctx context.Context, name string) {
 	// F2 fix: when the suture supervisor (P1.5 step 2) is active, IT owns
-	// restart policy. Monitor's role here becomes observational — we still
-	// track failures and mark degraded in checkOne, but we DO NOT issue an
-	// independent Restart call. Suture's Serve loop will see the session end
-	// and restart via its FailureBackoff=15s policy. Without this guard, two
-	// Restart paths race (suture + Monitor) and the Manager's `starting`
-	// guard surfaces transient errors.
+	// restart policy IN NORMAL CASES. Monitor's role here becomes
+	// observational — we still track failures and mark degraded in
+	// checkOne, but we usually DO NOT issue an independent Restart call.
+	// Suture's Serve loop will see the session end and restart via its
+	// FailureBackoff=15s policy. Without this guard, two Restart paths
+	// race (suture + Monitor) and the Manager's `starting` guard
+	// surfaces transient errors.
+	//
+	// EXCEPTION — stale-session recovery (2026-05-25): when consecutive
+	// failures cross 2× the normal threshold and the supervisor has
+	// clearly NOT acted, the monitor MUST issue lm.Restart directly to
+	// force session refresh. Typical trigger: VPN flap leaves an
+	// in-memory MCP session that pings fail on, but suture's Serve() is
+	// still "alive" because the session object is technically not torn
+	// down — suture only restarts on Serve() return, not on ping
+	// failures. Without this exception the backend stays StatusDegraded
+	// forever and the operator must manually POST /api/v1/servers/{name}
+	// /restart. See docs/PLAN-unreachable-handling.md (post-feature
+	// follow-up).
 	if m.lm.SupervisorActive() {
-		m.logger.Info("backend health failure detected; restart deferred to supervisor",
-			"server", name)
-		return
+		m.mu.Lock()
+		state := m.getOrCreateState(name)
+		failures := state.consecutiveFailures
+		m.mu.Unlock()
+		if failures < 2*m.ConsecutiveFailureThreshold {
+			m.logger.Info("backend health failure detected; restart deferred to supervisor",
+				"server", name, "consecutive_failures", failures)
+			return
+		}
+		m.logger.Warn(
+			"supervisor inactive on persistent ping failures; forcing monitor-initiated restart (stale-session recovery)",
+			"server", name,
+			"consecutive_failures", failures,
+			"threshold", 2*m.ConsecutiveFailureThreshold,
+		)
+		// Fall through to the monitor-driven restart path below.
 	}
 
 	m.mu.Lock()

@@ -70,3 +70,48 @@ func TestMonitor_AttemptRestart_RestartCalledWhenSupervisorInactive(t *testing.T
 	assert.True(t, lm.restartCalled,
 		"Restart MUST be called when supervisor is not active (legacy restart path)")
 }
+
+// TestMonitor_AttemptRestart_StaleSessionForcesRestartWhenSupervisorActive
+// (2026-05-25 stale-session recovery): when consecutiveFailures crosses
+// 2× threshold AND supervisor is active, the monitor MUST force a Restart
+// directly. Closes the VPN-flap zombie-degraded gap where suture's Serve()
+// does not return on in-memory MCP session staleness.
+func TestMonitor_AttemptRestart_StaleSessionForcesRestartWhenSupervisorActive(t *testing.T) {
+	lm := &f2MockLM{supervisorActive: true}
+	mon := NewMonitor(lm, 0, nil)
+	mon.RestartBackoffBase = 0
+	mon.CircuitBreakerThreshold = 1000
+	// Default ConsecutiveFailureThreshold = 3, so 2× = 6.
+
+	// Prime state with consecutiveFailures = 2*threshold (the exact
+	// crossover the new code uses as the stale-session signal).
+	mon.mu.Lock()
+	state := mon.getOrCreateState("test-srv")
+	state.consecutiveFailures = 2 * mon.ConsecutiveFailureThreshold
+	mon.mu.Unlock()
+
+	mon.attemptRestart(context.Background(), "test-srv")
+
+	assert.True(t, lm.restartCalled,
+		"Restart MUST be called when consecutiveFailures >= 2× threshold even with supervisor active (stale-session recovery)")
+}
+
+// TestMonitor_AttemptRestart_BelowStaleThresholdStillDefersToSupervisor:
+// just-below the 2× threshold, the legacy F2 deferral must still hold so
+// supervisor remains the primary restart driver for transient failures.
+func TestMonitor_AttemptRestart_BelowStaleThresholdStillDefersToSupervisor(t *testing.T) {
+	lm := &f2MockLM{supervisorActive: true}
+	mon := NewMonitor(lm, 0, nil)
+	mon.RestartBackoffBase = 0
+
+	mon.mu.Lock()
+	state := mon.getOrCreateState("test-srv")
+	// One below the 2× crossover.
+	state.consecutiveFailures = 2*mon.ConsecutiveFailureThreshold - 1
+	mon.mu.Unlock()
+
+	mon.attemptRestart(context.Background(), "test-srv")
+
+	assert.False(t, lm.restartCalled,
+		"Restart MUST NOT be called below the 2× threshold (supervisor still owns the path)")
+}
