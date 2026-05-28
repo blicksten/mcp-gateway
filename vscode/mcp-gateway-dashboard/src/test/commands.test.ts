@@ -387,17 +387,21 @@ describe('Commands', () => {
 	});
 
 	describe('mcpGateway.openSettings', () => {
-		it('dispatches workbench.action.openSettings with extension filter', async () => {
+		it('opens the SettingsPanel webview (Phase C — moved off native settings UI)', async () => {
+			// Production contract change (extension.ts:704-712): the command no
+			// longer dispatches workbench.action.openSettings — native UI has
+			// plain text inputs for every path setting, operators (2026-05-27)
+			// could not pick folders. Now routes to the webview SettingsPanel
+			// which renders kind:'path' fields with a Browse button.
+			const before = mockWebviewPanels.length;
 			await commands.get('mcpGateway.openSettings')!();
-			const settingsCalls = dispatchedCommands.filter(
-				(c) => c.id === 'workbench.action.openSettings',
-			);
-			assert.equal(settingsCalls.length, 1, 'expected exactly one openSettings dispatch');
-			assert.deepStrictEqual(
-				settingsCalls[0].args,
-				['@ext:mcp-gateway.mcp-gateway-dashboard'],
-			);
+			const newPanels = mockWebviewPanels.slice(before);
+			assert.equal(newPanels.length, 1, 'expected one new webview panel');
+			assert.equal(newPanels[0].viewType, 'mcpSettings');
 			assert.deepStrictEqual(mockCalls.errorMessages, []);
+			// Cleanup singleton for subsequent tests.
+			const { SettingsPanel } = require('../webview/settings-panel');
+			SettingsPanel._reset?.();
 		});
 	});
 

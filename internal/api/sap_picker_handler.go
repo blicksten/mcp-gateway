@@ -21,7 +21,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"time"
+
+	"mcp-gateway/internal/sapname"
 )
 
 // sapBatchTTL is the auto-release timeout for an idle SAP batch. A client
@@ -83,14 +86,53 @@ type SAPBatchEndResponse struct {
 	OK bool `json:"ok"`
 }
 
-// handleSAPPickerSnapshot returns the picker view (T-A.1 contract; T-A.3
-// + T-A.4 will populate Rows from the landscape parser × KeePass
-// extraction × hybrid intersection layers).
+// handleSAPPickerSnapshot returns the picker view. Until T-A.3 landscape
+// and T-A.4 KeePass data sources are wired, the snapshot enumerates the
+// currently-registered SAP servers in the gateway config and groups them
+// by (SID, Client). This lets the Picker UI show registration + runtime
+// status for everything the user already has — even if landscape/KP
+// rows are missing — so "running systems disappear from the picker" is
+// no longer the default symptom.
 func (s *Server) handleSAPPickerSnapshot(w http.ResponseWriter, _ *http.Request) {
+	type rowKey struct{ sid, client string }
+	rows := make(map[rowKey]*SAPPickerRow)
+
+	for _, e := range s.lm.Entries() {
+		p, ok := sapname.ParseServerName(e.Name)
+		if !ok {
+			continue
+		}
+		k := rowKey{sid: p.SID, client: p.Client}
+		r, exists := rows[k]
+		if !exists {
+			r = &SAPPickerRow{SID: p.SID, Client: p.Client}
+			rows[k] = r
+		}
+		switch p.Kind {
+		case "vsp":
+			r.Registered.VSP = true
+			r.Status.VSP = string(e.Status)
+		case "sap-gui":
+			r.Registered.GUI = true
+			r.Status.GUI = string(e.Status)
+		}
+	}
+
+	out := make([]SAPPickerRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, *r)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].SID != out[j].SID {
+			return out[i].SID < out[j].SID
+		}
+		return out[i].Client < out[j].Client
+	})
+
 	writeJSON(w, http.StatusOK, SAPPickerSnapshot{
-		Rows: []SAPPickerRow{},
+		Rows: out,
 		Warnings: []string{
-			"picker data sources not yet wired (T-A.3 landscape + T-A.4 KeePass pending)",
+			"snapshot from registered-servers fallback; T-A.3 landscape + T-A.4 KeePass enrichment still pending",
 		},
 	})
 }

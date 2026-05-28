@@ -765,7 +765,7 @@ describe('Daemon commands (integration)', () => {
 		const { activate } = await import('../extension');
 		const { getRegisteredCommands } = await import('./mock-vscode');
 		const subs: { dispose(): void }[] = [];
-		const daemon = new DaemonManager(client as any, '', output as any, mockSpawn);
+		const daemon = new DaemonManager(client as any, '', output as any, mockSpawn, { raceDetectDelayMs: 0 });
 		activate({ subscriptions: subs } as any, client as any, daemon);
 
 		// Wait for auto-start to complete (fires on activate), then stop so command can re-start.
@@ -801,7 +801,7 @@ describe('Daemon commands (integration)', () => {
 		const { activate } = await import('../extension');
 		const { getRegisteredCommands } = await import('./mock-vscode');
 		const subs: { dispose(): void }[] = [];
-		const daemon = new DaemonManager(client as any, '', output as any, mockSpawn);
+		const daemon = new DaemonManager(client as any, '', output as any, mockSpawn, { raceDetectDelayMs: 0 });
 		activate({ subscriptions: subs } as any, client as any, daemon);
 
 		await daemon.start();

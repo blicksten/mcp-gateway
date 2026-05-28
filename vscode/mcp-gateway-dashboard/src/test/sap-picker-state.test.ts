@@ -48,8 +48,10 @@ function rs(over: Partial<RowState> & { snapshot: PickerSnapshotRow }): RowState
 
 describe('sap-picker-state — keys + names', () => {
 	it('rowKey collapses bare SID when no client + no user', () => {
-		assert.strictEqual(rowKey(snapRow({ sid: 'DEV', client: '' })), 'DEV');
-		assert.strictEqual(rowKey(snapRow({ sid: 'DEV', client: '100' })), 'DEV-100');
+		// snapRow defaults user='TEST', so the bare-SID + bare-user case must
+		// override both to '' — otherwise the "no user" claim is not exercised.
+		assert.strictEqual(rowKey(snapRow({ sid: 'DEV', client: '', user: '' })), 'DEV');
+		assert.strictEqual(rowKey(snapRow({ sid: 'DEV', client: '100', user: '' })), 'DEV-100');
 	});
 
 	it('rowKey includes user so multi-login SIDs do not collapse (2026-05-27)', () => {

@@ -180,6 +180,11 @@
         "command": "mcpGateway.renameServer",
         "title": "Rename Server",
         "icon": "$(edit)"
+      },
+      {
+        "command": "mcpGateway.removeSapSystem",
+        "title": "Remove SAP System (both VSP + GUI)",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -318,28 +323,63 @@
         },
         {
           "command": "mcpGateway.restartSapVsp",
-          "when": "view == mcpSapSystems && viewItem =~ /^(sap-(running|stopped|error|degraded|disabled|starting|restarting)|sap-group-|sap-vsp-)/",
+          "when": "view == mcpSapSystems && viewItem =~ /^(sap-(running|stopped|error|degraded|disabled|starting|restarting)|sap-group-.+-(vsp|vspgui)$|sap-vsp-)/",
           "group": "1_lifecycle"
         },
         {
           "command": "mcpGateway.restartSapGui",
-          "when": "view == mcpSapSystems && viewItem =~ /^(sap-(running|stopped|error|degraded|disabled|starting|restarting)|sap-group-|sap-gui-)/",
+          "when": "view == mcpSapSystems && viewItem =~ /^(sap-(running|stopped|error|degraded|disabled|starting|restarting)|sap-group-.+-(gui|vspgui)$|sap-gui-)/",
           "group": "1_lifecycle"
         },
         {
           "command": "mcpGateway.showSapVspLogs",
-          "when": "view == mcpSapSystems && viewItem =~ /^(sap-(running|stopped|error|degraded|disabled|starting|restarting)|sap-group-|sap-vsp-)/",
+          "when": "view == mcpSapSystems && viewItem =~ /^(sap-(running|stopped|error|degraded|disabled|starting|restarting)|sap-group-.+-(vsp|vspgui)$|sap-vsp-)/",
           "group": "2_info"
         },
         {
           "command": "mcpGateway.showSapGuiLogs",
-          "when": "view == mcpSapSystems && viewItem =~ /^(sap-(running|stopped|error|degraded|disabled|starting|restarting)|sap-group-|sap-gui-)/",
+          "when": "view == mcpSapSystems && viewItem =~ /^(sap-(running|stopped|error|degraded|disabled|starting|restarting)|sap-group-.+-(gui|vspgui)$|sap-gui-)/",
           "group": "2_info"
         },
         {
           "command": "mcpGateway.showSapDetail",
           "when": "view == mcpSapSystems && viewItem =~ /^(sap-(running|stopped|error|degraded|disabled|starting|restarting)|sap-group-|sap-vsp-|sap-gui-)/",
           "group": "2_info"
+        },
+        {
+          "command": "mcpGateway.startServer",
+          "when": "view == mcpSapSystems && viewItem =~ /^sap-(vsp|gui)-(disabled|stopped)$/",
+          "group": "1_lifecycle"
+        },
+        {
+          "command": "mcpGateway.stopServer",
+          "when": "view == mcpSapSystems && viewItem =~ /^sap-(vsp|gui)-(running|degraded)$/",
+          "group": "1_lifecycle"
+        },
+        {
+          "command": "mcpGateway.restartServer",
+          "when": "view == mcpSapSystems && viewItem =~ /^sap-(vsp|gui)-(running|degraded|error|stopped)$/",
+          "group": "1_lifecycle"
+        },
+        {
+          "command": "mcpGateway.resetCircuit",
+          "when": "view == mcpSapSystems && viewItem =~ /^sap-(vsp|gui)-(error|degraded)$/",
+          "group": "1_lifecycle"
+        },
+        {
+          "command": "mcpGateway.showLogs",
+          "when": "view == mcpSapSystems && viewItem =~ /^sap-(vsp|gui)-/",
+          "group": "2_info"
+        },
+        {
+          "command": "mcpGateway.removeServer",
+          "when": "view == mcpSapSystems && viewItem =~ /^sap-(vsp|gui)-(stopped|disabled|error|running|degraded)$/",
+          "group": "9_remove"
+        },
+        {
+          "command": "mcpGateway.removeSapSystem",
+          "when": "view == mcpSapSystems && viewItem =~ /^sap-group-.+-(vsp|gui|vspgui)$/",
+          "group": "9_remove"
         },
         {
           "command": "mcpGateway.showSapDetail",
@@ -402,8 +442,8 @@
         },
         "mcpGateway.slashCommandsEnabled": {
           "type": "boolean",
-          "default": false,
-          "description": "Auto-generate .claude/commands/<server>.md files when servers start or stop."
+          "default": true,
+          "description": "Auto-generate .claude/commands/<server>.md files when servers start or stop. SAP servers (vsp-/sap-gui-) get team-local-style paired files <sid>-<client>-vsp.md + <sid>-<client>-gui.md."
         },
         "mcpGateway.slashCommandsPath": {
           "type": "string",
@@ -455,6 +495,22 @@
           "default": "",
           "description": "[SAP Picker] Path to sap-credentials.py — the Python script that opens your KDBX via pykeepass and lists SAP entries. Empty = auto-derive from mcpDashboard.orchestratorPath (looks for {orchestratorPath}/../scripts/sap-credentials.py); falls back to ~/claude-workspace/claude-team-control/scripts/sap-credentials.py. Set this only if you have the script in a non-standard location.",
           "scope": "machine"
+        },
+        "mcpGateway.sapAdtUrlTemplate": {
+          "type": "string",
+          "default": "http://sap{sid_lower}.ebydos.local:50000",
+          "description": "[SAP Picker] Template for SAP_URL env var injected into vsp-* servers on Picker Apply. Tokens: {sid_lower} (3-char SID lowercased, e.g. q26), {sid_upper}. vsp.exe needs SAP_URL or it exits with 'SAP URL is required' on stdio initialize. Override per-system via mcpGateway.sapAdtUrls."
+        },
+        "mcpGateway.sapAdtUrls": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": { "type": "string" },
+          "description": "[SAP Picker] Per-system SAP_URL overrides. Keys are '<SID>-<CLIENT>' or '<SID>', values are HTTP endpoints (e.g. {\"Q26-100\": \"http://sapq26.ebydos.local:50000\"}). When set, wins over sapAdtUrlTemplate."
+        },
+        "mcpGateway.sapEnableTransports": {
+          "type": "boolean",
+          "default": true,
+          "description": "[SAP Picker] Inject SAP_ENABLE_TRANSPORTS=true into vsp-* env on Picker Apply. Required for vsp ListTransports/GetTransport tools — without it vsp returns 'transports not enabled'."
         },
         "mcpGateway.pythonPath": {
           "type": "string",

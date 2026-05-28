@@ -72,11 +72,21 @@ describe('SapSystemItem (flat mode)', () => {
 });
 
 describe('SapSystemItem (hierarchical mode)', () => {
-	it('uses sap-group-<status> contextValue and is collapsible', () => {
+	it('uses sap-group-<status>-vspgui when both components present and is collapsible', () => {
 		const item = new SapSystemItem(makeSystem(), true);
-		assert.strictEqual(item.contextValue, 'sap-group-running');
+		assert.strictEqual(item.contextValue, 'sap-group-running-vspgui');
 		assert.strictEqual(item.collapsibleState, 1); // Collapsed
 		assert.strictEqual(item.hierarchical, true);
+	});
+
+	it('uses sap-group-<status>-vsp suffix when only vsp present', () => {
+		const item = new SapSystemItem(makeSystem({ gui: undefined }), true);
+		assert.strictEqual(item.contextValue, 'sap-group-running-vsp');
+	});
+
+	it('uses sap-group-<status>-gui suffix when only gui present', () => {
+		const item = new SapSystemItem(makeSystem({ vsp: undefined }), true);
+		assert.strictEqual(item.contextValue, 'sap-group-running-gui');
 	});
 
 	it('carries the same tooltip whether hierarchical or not', () => {

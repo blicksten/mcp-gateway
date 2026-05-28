@@ -11,6 +11,7 @@ import { resolveCatalogDir } from './catalog-path';
 import type { ServerDataCache, CacheRefreshPayload } from './server-data-cache';
 import type { ServerView } from './types';
 import { SERVER_NAME_RE } from './validation';
+import { parseServerName as parseSapName } from './sap-name-grammar.gen';
 import { logger } from './logger';
 
 // Phase 16.9 T16.9.3 — disclaimer lines sit BELOW the MARKER but above
@@ -323,6 +324,17 @@ export class SlashCommandGenerator implements vscode.Disposable {
 	}
 
 	private async buildContent(server: ServerView): Promise<string> {
+		// SAP path: vsp-<SID>(-<Client>) and sap-gui-<SID>(-<Client>) get a
+		// purpose-specific template (mirrors claude-team-control vscode-dashboard
+		// SapSystemManager._updateCommands pattern: each file points at a single
+		// SAP system + component, references the MCP server via @<name>).
+		// Bypasses the catalog lookup — catalog entries for SAP names are
+		// unexpected; if anyone adds one, this still wins for clarity.
+		const sapBody = this.buildSapTemplate(server);
+		if (sapBody !== null) {
+			return `${HEADER}\n${sapBody}`;
+		}
+
 		await this.ensureCatalogLoaded();
 		const cmdEntry = this.findCommandEntry(server.name);
 		if (!cmdEntry) {
@@ -339,6 +351,37 @@ export class SlashCommandGenerator implements vscode.Disposable {
 		// skeleton does. Operator edits BELOW line 1 are silently overwritten
 		// on the next regeneration — documented known limitation (D3, README).
 		return `${HEADER}\n${body}`;
+	}
+
+	/**
+	 * Return SAP-specific template body or null when the server is not SAP.
+	 * Mirrors claude-team-control vscode-dashboard SapSystemManager._updateCommands:
+	 * one file per (SID, Client, component) with @<server-name> reference so
+	 * Claude Code auto-completion surfaces the right MCP server for the system.
+	 */
+	private buildSapTemplate(server: ServerView): string | null {
+		const parsed = parseSapName(server.name);
+		if (parsed === null) { return null; }
+		const sysKey = parsed.client ? `${parsed.sid}-${parsed.client}` : parsed.sid;
+		const kindLabel = parsed.kind === 'vsp' ? 'VSP (ADT/ABAP)' : 'SAP GUI scripting';
+		const purpose = parsed.kind === 'vsp'
+			? '- Use **@' + server.name + '** for ABAP/ADT operations (read source, edit, activate, unit tests, ATC, transports).'
+			: '- Use **@' + server.name + '** for SAP GUI interactions (transactions, screen scraping, ALV read, form fill).';
+		return [
+			DISCLAIMER_LINE_2,
+			DISCLAIMER_LINE_3,
+			`# ${server.name}`,
+			'',
+			`**SAP System:** ${sysKey}`,
+			`**Component:** ${kindLabel}`,
+			`**Status:** ${server.status}`,
+			'',
+			'## Usage',
+			'',
+			`You are working on SAP system **${sysKey}**.`,
+			purpose,
+			'',
+		].join('\n');
 	}
 
 	private skeletonTemplate(server: ServerView): string {

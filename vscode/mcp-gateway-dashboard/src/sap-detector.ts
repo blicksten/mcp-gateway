@@ -59,20 +59,32 @@ export function computeSapStatus(system: SapSystem): ServerStatus {
 	const vspStatus = system.vsp?.status;
 	const guiStatus = system.gui?.status;
 
-	if (!vspStatus) { return 'stopped'; }
-	if (vspStatus === 'disabled') { return 'disabled'; }
-	if (vspStatus === 'error') { return 'error'; }
-	if (vspStatus === 'stopped') { return 'stopped'; }
+	// Single-component install: follow the present component.
+	// TST gui-only running → 'running' (green), not 'stopped' (red).
+	// DEV vsp-only running → 'running'.
+	if (!vspStatus && !guiStatus) { return 'stopped'; }
+	if (!vspStatus) { return guiStatus!; }
+	if (!guiStatus) { return vspStatus; }
 
-	// VSP is running/starting/restarting.
-	if (!guiStatus) { return vspStatus; } // GUI optional — follow VSP
-	// Only degrade when VSP is stable (running). During VSP startup/restart,
-	// a stopped/errored GUI is normal sequencing — not degradation.
-	if (vspStatus === 'running' &&
-		(guiStatus === 'error' || guiStatus === 'degraded' || guiStatus === 'stopped')) {
-		return 'degraded';
-	}
-	return vspStatus; // Both healthy, or VSP still booting — follow VSP
+	// Both components present — symmetric composite.
+	// One running + the other anything-but-running → 'degraded' (yellow).
+	const vspRunning = vspStatus === 'running';
+	const guiRunning = guiStatus === 'running';
+	if (vspRunning && guiRunning) { return 'running'; }
+	if (vspRunning !== guiRunning) { return 'degraded'; }
+
+	// Neither running — surface the more severe state.
+	const severity: Record<ServerStatus, number> = {
+		error: 5,
+		unreachable: 4,
+		stopped: 3,
+		disabled: 2,
+		degraded: 1,
+		starting: 0,
+		restarting: 0,
+		running: 0,
+	};
+	return severity[vspStatus] >= severity[guiStatus] ? vspStatus : guiStatus;
 }
 
 /**

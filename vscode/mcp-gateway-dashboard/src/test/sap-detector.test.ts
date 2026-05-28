@@ -89,28 +89,42 @@ describe('computeSapStatus', () => {
 		assert.equal(computeSapStatus(mkSystem('running', 'stopped')), 'degraded');
 	});
 
-	it('VSP starting, GUI stopped → starting (boot sequence, not degraded)', () => {
-		assert.equal(computeSapStatus(mkSystem('starting', 'stopped')), 'starting');
+	it('VSP starting, GUI stopped → degraded (one running side missing; severity surfaces "stopped" beats "starting")', () => {
+		// New symmetric rule: neither side is "running" → fall through to severity comparison.
+		// stopped (3) > starting (0) → stopped.
+		assert.equal(computeSapStatus(mkSystem('starting', 'stopped')), 'stopped');
 	});
 
-	it('VSP restarting, GUI stopped → restarting (boot sequence, not degraded)', () => {
-		assert.equal(computeSapStatus(mkSystem('restarting', 'stopped')), 'restarting');
+	it('VSP restarting, GUI stopped → stopped (severity)', () => {
+		assert.equal(computeSapStatus(mkSystem('restarting', 'stopped')), 'stopped');
 	});
 
-	it('VSP error → error', () => {
-		assert.equal(computeSapStatus(mkSystem('error', 'running')), 'error');
+	it('VSP error, GUI running → degraded (one runs, the other does not = yellow)', () => {
+		assert.equal(computeSapStatus(mkSystem('error', 'running')), 'degraded');
 	});
 
-	it('VSP stopped → stopped', () => {
-		assert.equal(computeSapStatus(mkSystem('stopped', 'running')), 'stopped');
+	it('VSP stopped, GUI running → degraded', () => {
+		assert.equal(computeSapStatus(mkSystem('stopped', 'running')), 'degraded');
 	});
 
-	it('VSP disabled → disabled', () => {
+	it('VSP disabled, no GUI → disabled (single-component install follows vsp)', () => {
 		assert.equal(computeSapStatus(mkSystem('disabled')), 'disabled');
 	});
 
-	it('no VSP → stopped', () => {
-		assert.equal(computeSapStatus(mkSystem(undefined, 'running')), 'stopped');
+	it('no VSP, GUI running → running (TST-style gui-only install)', () => {
+		assert.equal(computeSapStatus(mkSystem(undefined, 'running')), 'running');
+	});
+
+	it('no VSP, GUI error → error', () => {
+		assert.equal(computeSapStatus(mkSystem(undefined, 'error')), 'error');
+	});
+
+	it('no GUI, VSP error → error (single-component DEV-style follows vsp)', () => {
+		assert.equal(computeSapStatus(mkSystem('error')), 'error');
+	});
+
+	it('neither component → stopped (defensive)', () => {
+		assert.equal(computeSapStatus(mkSystem()), 'stopped');
 	});
 });
 

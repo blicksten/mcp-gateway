@@ -1,4 +1,4 @@
-import '../mock-vscode';
+﻿import '../mock-vscode';
 import { strict as assert } from 'node:assert';
 import { describe, it, beforeEach, afterEach } from 'mocha';
 import {
@@ -113,7 +113,7 @@ describe('SapPickerPanel', () => {
 	it('opens a webview, fetches snapshot, posts init with rows + warnings', async () => {
 		const snap: PickerSnapshot = {
 			rows: [
-				{ sid: 'DEV', client: '100', user: 'ALICE', kpMissing: false, registered: { vsp: false, gui: false }, status: { vsp: '', gui: '' } },
+				{ sid: 'DEV', client: '100', user: '', kpMissing: false, registered: { vsp: false, gui: false }, status: { vsp: '', gui: '' } },
 			],
 			warnings: ['picker data sources not yet wired'],
 		};
@@ -131,9 +131,9 @@ describe('SapPickerPanel', () => {
 		assert.deepStrictEqual(init.warnings, ['picker data sources not yet wired']);
 	});
 
-	it('apply flow: beginBatch → addServer → endBatch (in order)', async () => {
+	it('apply flow: beginBatch â†’ addServer â†’ endBatch (in order)', async () => {
 		const snap: PickerSnapshot = {
-			rows: [{ sid: 'DEV', client: '100', user: 'ALICE', kpMissing: false, registered: { vsp: false, gui: false }, status: { vsp: '', gui: '' } }],
+			rows: [{ sid: 'DEV', client: '100', user: '', kpMissing: false, registered: { vsp: false, gui: false }, status: { vsp: '', gui: '' } }],
 			warnings: [],
 		};
 		const client = makeClient(snap);
@@ -187,7 +187,7 @@ describe('SapPickerPanel', () => {
 
 	it('endSapBatch is called even when addServer throws', async () => {
 		const snap: PickerSnapshot = {
-			rows: [{ sid: 'DEV', client: '100', user: 'A', kpMissing: false, registered: { vsp: false, gui: false }, status: { vsp: '', gui: '' } }],
+			rows: [{ sid: 'DEV', client: '100', user: '', kpMissing: false, registered: { vsp: false, gui: false }, status: { vsp: '', gui: '' } }],
 			warnings: [],
 		};
 		const client = makeClient(snap);
@@ -207,7 +207,7 @@ describe('SapPickerPanel', () => {
 
 	it('R-28 orphan: removeServer error containing "orphan" surfaces removed_with_orphan status', async () => {
 		const snap: PickerSnapshot = {
-			rows: [{ sid: 'DEV', client: '100', user: 'A', kpMissing: false, registered: { vsp: true, gui: false }, status: { vsp: 'running', gui: '' } }],
+			rows: [{ sid: 'DEV', client: '100', user: '', kpMissing: false, registered: { vsp: true, gui: false }, status: { vsp: 'running', gui: '' } }],
 			warnings: [],
 		};
 		const client = makeClient(snap);
@@ -232,13 +232,13 @@ describe('SapPickerPanel', () => {
 
 	it('forceKill cancel branch (showWarningMessage returns undefined) does not call removeServer', async () => {
 		const snap: PickerSnapshot = {
-			rows: [{ sid: 'DEV', client: '100', user: 'A', kpMissing: false, registered: { vsp: true, gui: false }, status: { vsp: 'running', gui: '' } }],
+			rows: [{ sid: 'DEV', client: '100', user: '', kpMissing: false, registered: { vsp: true, gui: false }, status: { vsp: 'running', gui: '' } }],
 			warnings: [],
 		};
 		const client = makeClient(snap);
 		const cache = await freshCache([]);
-		// dialogResponses.showWarningMessage defaults to undefined → user
-		// dismissed dialog → panel must NOT proceed to removeServer.
+		// dialogResponses.showWarningMessage defaults to undefined â†’ user
+		// dismissed dialog â†’ panel must NOT proceed to removeServer.
 		await SapPickerPanel.createOrShow(FAKE_URI, client, cache, new MockSecretStorage() as any);
 		await flush();
 		const panel = latestPanel();
@@ -251,7 +251,7 @@ describe('SapPickerPanel', () => {
 
 	it('forceKill confirm branch (user clicks "Force kill") calls removeServer and surfaces removed status', async () => {
 		const snap: PickerSnapshot = {
-			rows: [{ sid: 'DEV', client: '100', user: 'A', kpMissing: false, registered: { vsp: true, gui: false }, status: { vsp: 'running', gui: '' } }],
+			rows: [{ sid: 'DEV', client: '100', user: '', kpMissing: false, registered: { vsp: true, gui: false }, status: { vsp: 'running', gui: '' } }],
 			warnings: [],
 		};
 		const client = makeClient(snap);
@@ -275,7 +275,7 @@ describe('SapPickerPanel', () => {
 
 	it('forceKill confirm branch surfaces postError when removeServer throws', async () => {
 		const snap: PickerSnapshot = {
-			rows: [{ sid: 'DEV', client: '100', user: 'A', kpMissing: false, registered: { vsp: true, gui: false }, status: { vsp: 'running', gui: '' } }],
+			rows: [{ sid: 'DEV', client: '100', user: '', kpMissing: false, registered: { vsp: true, gui: false }, status: { vsp: 'running', gui: '' } }],
 			warnings: [],
 		};
 		const client = makeClient(snap);
@@ -294,12 +294,12 @@ describe('SapPickerPanel', () => {
 
 	it('refresh re-fetches the snapshot and replays init', async () => {
 		const snap1: PickerSnapshot = {
-			rows: [{ sid: 'DEV', client: '100', user: 'A', kpMissing: false, registered: { vsp: false, gui: false }, status: { vsp: '', gui: '' } }],
+			rows: [{ sid: 'DEV', client: '100', user: '', kpMissing: false, registered: { vsp: false, gui: false }, status: { vsp: '', gui: '' } }],
 			warnings: [],
 		};
 		const snap2: PickerSnapshot = {
 			rows: [
-				{ sid: 'DEV', client: '100', user: 'A', kpMissing: false, registered: { vsp: false, gui: false }, status: { vsp: '', gui: '' } },
+				{ sid: 'DEV', client: '100', user: '', kpMissing: false, registered: { vsp: false, gui: false }, status: { vsp: '', gui: '' } },
 				{ sid: 'QAS', client: '200', user: 'B', kpMissing: false, registered: { vsp: false, gui: false }, status: { vsp: '', gui: '' } },
 			],
 			warnings: [],

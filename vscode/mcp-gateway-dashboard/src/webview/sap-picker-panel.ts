@@ -41,8 +41,10 @@ import {
 	type PickerListRow,
 	type SapCredentials,
 } from '../sap-picker-importer';
+import { parseSapServerName } from '../sap-detector';
 import { buildSapPickerHtml } from './sap-picker-html';
 import { logger } from '../logger';
+import type { ServerView } from '../types';
 
 /** Where the picker reads KP from + which python interpreter + script to
  *  run. Built once per refresh() call from workspace configuration.
@@ -189,7 +191,14 @@ export class SapPickerPanel {
 	 */
 	private async loadSnapshot(): Promise<PickerSnapshot | null> {
 		const inputs = this.resolveInputs();
-		if (!inputs) { return null; }
+		// When KP path isn't configured (no keepassPath or no sap-credentials.py),
+		// fall back to a daemon-snapshot path. C-9 daemon picker-snapshot patch
+		// (2026-05-27) returns registered SAP servers from /api/v1/sap/picker-snapshot
+		// so the picker still shows what the operator already has, even before
+		// they wire KeePass for adding new systems.
+		if (!inputs) {
+			return this.loadSnapshotFromDaemonOrCache();
+		}
 		this.lastInputs = inputs;
 
 		// Mirror the team-local CredentialManager retry loop: up to 3
@@ -274,20 +283,16 @@ export class SapPickerPanel {
 		const cfg = vscode.workspace.getConfiguration('mcpGateway');
 		const kdbxPath = cfg.get<string>('keepassPath', '').trim();
 		if (!kdbxPath) {
-			void this.postError(
-				'SAP Picker needs mcpGateway.keepassPath set to your KDBX file. ' +
-				'Open Settings → mcp-gateway → KeePass.',
-			);
+			// Silent fallback to cache-only mode — caller (loadSnapshot) chooses
+			// loadSnapshotFromCacheOnly() instead of postError-then-bail. The
+			// status banner inside the cache-only snapshot warns the operator
+			// that KP enrichment is disabled.
 			return null;
 		}
 
 		const scriptPath = resolveSapCredentialsPy();
 		if (!scriptPath) {
-			void this.postError(
-				'SAP Picker needs sap-credentials.py. Set mcpGateway.sapCredentialsPyPath, ' +
-				'or set mcpDashboard.orchestratorPath (team-local convention — script is ' +
-				'looked up at ${orchestratorPath}/../scripts/sap-credentials.py).',
-			);
+			// Same fallback rationale as the no-keepassPath branch above.
 			return null;
 		}
 
@@ -623,6 +628,105 @@ export class SapPickerPanel {
 	 * the operator sees the same green/yellow/red indicators they see
 	 * in the backends tree.
 	 */
+	/**
+	 * KP-disabled snapshot path. Prefers the daemon REST endpoint
+	 * (`client.getSapPickerSnapshot()` — wired by C-9 patch to enumerate
+	 * registered SAP servers), falls back to building the snapshot from the
+	 * local server cache if the REST call fails or returns nothing. Either
+	 * way, every row is flagged `kpMissing=true` so Picker Apply skips
+	 * credential injection — operator must wire KP to add new systems.
+	 */
+	private async loadSnapshotFromDaemonOrCache(): Promise<PickerSnapshot> {
+		try {
+			if (typeof this.client.getSapPickerSnapshot === 'function') {
+				const raw = await this.client.getSapPickerSnapshot() as unknown;
+				const daemonSnap = SapPickerPanel.coerceDaemonSnapshot(raw);
+				if (daemonSnap && daemonSnap.rows.length > 0) {
+					// Pass daemon snapshot through unchanged. Whether KP enrichment
+					// is available is handled per-row at Apply time via
+					// enrichConfigWithCreds — if KP is not configured, that path
+					// returns baseConfig as-is and addServer relies on the
+					// operator-provided overrides (command / env from the row).
+					return daemonSnap;
+				}
+			}
+		} catch (err) {
+			logger.warn('sap-picker', `daemon picker-snapshot failed; cache fallback`, err);
+		}
+		return this.loadSnapshotFromCacheOnly();
+	}
+
+	/** Type-narrow the daemon response (signature is Promise<unknown> on the
+	 *  optional IGatewayClient.getSapPickerSnapshot interface). Returns null
+	 *  for malformed payloads — caller treats null as "use cache fallback". */
+	static coerceDaemonSnapshot(raw: unknown): PickerSnapshot | null {
+		if (!raw || typeof raw !== 'object') { return null; }
+		const obj = raw as Record<string, unknown>;
+		const rowsRaw = Array.isArray(obj.rows) ? obj.rows : [];
+		const warnings = Array.isArray(obj.warnings)
+			? obj.warnings.filter((w): w is string => typeof w === 'string')
+			: [];
+		const rows: PickerSnapshotRow[] = [];
+		for (const r of rowsRaw) {
+			if (!r || typeof r !== 'object') { continue; }
+			const o = r as Record<string, unknown>;
+			if (typeof o.sid !== 'string') { continue; }
+			const reg = (o.registered && typeof o.registered === 'object') ? o.registered as Record<string, unknown> : {};
+			const stat = (o.status && typeof o.status === 'object') ? o.status as Record<string, unknown> : {};
+			rows.push({
+				sid: o.sid,
+				client: typeof o.client === 'string' ? o.client : '',
+				user: typeof o.user === 'string' && o.user.length > 0 ? o.user : undefined,
+				kpMissing: o.kpMissing === true,
+				registered: { vsp: reg.vsp === true, gui: reg.gui === true },
+				status: { vsp: typeof stat.vsp === 'string' ? stat.vsp : '', gui: typeof stat.gui === 'string' ? stat.gui : '' },
+			});
+		}
+		return { rows, warnings };
+	}
+
+	/**
+	 * Build a snapshot purely from the live gateway server cache (no KP, no
+	 * landscape, no python spawn, no daemon REST). Last-resort fallback used
+	 * by loadSnapshotFromDaemonOrCache when the REST endpoint is unreachable
+	 * or returns zero rows.
+	 */
+	private loadSnapshotFromCacheOnly(): PickerSnapshot {
+		const servers = this.cache.getMcpServers();
+		type RowAcc = { sid: string; client: string; vsp?: ServerView; gui?: ServerView };
+		const byKey = new Map<string, RowAcc>();
+		for (const s of servers) {
+			const parsed = parseSapServerName(s.name);
+			if (!parsed) { continue; }
+			const sid = parsed.sid;
+			const client = parsed.client ?? '';
+			const key = `${sid}:${client}`;
+			let r = byKey.get(key);
+			if (!r) {
+				r = { sid, client };
+				byKey.set(key, r);
+			}
+			if (parsed.component === 'vsp') { r.vsp = s; }
+			else { r.gui = s; }
+		}
+		const rows: PickerSnapshotRow[] = [];
+		for (const r of byKey.values()) {
+			rows.push({
+				sid: r.sid,
+				client: r.client,
+				user: undefined,
+				kpMissing: true,
+				registered: { vsp: Boolean(r.vsp), gui: Boolean(r.gui) },
+				status: { vsp: r.vsp ? r.vsp.status : '', gui: r.gui ? r.gui.status : '' },
+			});
+		}
+		rows.sort((a, b) => a.sid === b.sid ? a.client.localeCompare(b.client) : a.sid.localeCompare(b.sid));
+		return {
+			rows,
+			warnings: ['KeePass not configured — showing registered SAP servers only. Add new systems via mcpGateway.keepassPath setting.'],
+		};
+	}
+
 	private augmentWithCache(wireRows: PickerListRow[]): PickerSnapshotRow[] {
 		const servers = this.cache.getMcpServers();
 		const byName = new Map(servers.map((s) => [s.name, s]));
@@ -1007,10 +1111,61 @@ export class SapPickerPanel {
 			envOut.push(`${k}=${v}`);
 		}
 
+		// VSP-only: inject SAP_URL + SAP_ENABLE_TRANSPORTS.
+		// Closes shipping defects C-4 (vsp.exe exits "SAP URL is required" on
+		// initialize when SAP_URL is missing) and C-3 (vsp ListTransports
+		// returns "transports not enabled" without SAP_ENABLE_TRANSPORTS=true).
+		// Resolution order for SAP_URL:
+		//   1. mcpGateway.sapAdtUrls[<SID>-<Client>]
+		//   2. mcpGateway.sapAdtUrls[<SID>]
+		//   3. mcpGateway.sapAdtUrlTemplate with {sid_lower}/{sid_upper} substitution
+		// Both vars only injected when missing from baseConfig — operator
+		// overrides via Settings remain authoritative.
+		if (op.component === 'vsp') {
+			const sapUrlExists = envOut.some((e) => e.startsWith('SAP_URL='));
+			if (!sapUrlExists) {
+				const sapUrl = SapPickerPanel.resolveSapUrl(row.snapshot.sid, row.snapshot.client);
+				if (sapUrl) {
+					envOut.push(`SAP_URL=${sapUrl}`);
+				}
+			}
+			const enableExists = envOut.some((e) => e.startsWith('SAP_ENABLE_TRANSPORTS='));
+			if (!enableExists) {
+				const cfg = vscode.workspace.getConfiguration('mcpGateway');
+				if (cfg.get<boolean>('sapEnableTransports', true)) {
+					envOut.push('SAP_ENABLE_TRANSPORTS=true');
+				}
+			}
+		}
+
 		logger.info('sap-picker',
 			`enrichConfig(${op.serverName}): added ${envOut.length} env vars (${Object.keys(creds).filter(k => typeof creds[k] === 'string').join(',')})`);
 
 		return { ...baseConfig, env: envOut };
+	}
+
+	/**
+	 * Resolve SAP_URL for a (SID, Client) pair from workspace settings.
+	 * Priority: per-system override (sapAdtUrls) → template (sapAdtUrlTemplate)
+	 *           → null (caller skips injection if null).
+	 * Pure / DI-friendly so tests can pin without spinning a real workspace.
+	 */
+	static resolveSapUrl(sid: string, client: string): string | null {
+		const cfg = vscode.workspace.getConfiguration('mcpGateway');
+		const overrides = cfg.get<Record<string, string>>('sapAdtUrls', {}) || {};
+		const compositeKey = client ? `${sid}-${client}` : sid;
+		if (typeof overrides[compositeKey] === 'string' && overrides[compositeKey].length > 0) {
+			return overrides[compositeKey];
+		}
+		if (typeof overrides[sid] === 'string' && overrides[sid].length > 0) {
+			return overrides[sid];
+		}
+		const tmpl = cfg.get<string>('sapAdtUrlTemplate', 'http://sap{sid_lower}.ebydos.local:50000');
+		if (!tmpl) { return null; }
+		const sidLower = sid.toLowerCase();
+		const sidUpper = sid.toUpperCase();
+		// Token substitution via split/join (CLAUDE.md regex discipline).
+		return tmpl.split('{sid_lower}').join(sidLower).split('{sid_upper}').join(sidUpper);
 	}
 
 	private async pollServerRunning(name: string, timeoutMs: number): Promise<'running' | 'error' | 'timeout'> {

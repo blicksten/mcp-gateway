@@ -100,7 +100,8 @@ export interface BatchOp {
  *  Format:
  *    sid                 — no client, no user
  *    sid-client          — client, no user
- *    sid--user           — no client, user (empty middle is intentional)
+ *    sid--user           — no client, user (empty middle is intentional
+ *                          so a Q26 user is never confused with a Q26 client)
  *    sid-client-user     — both present (typical case) */
 export function rowKey(snapshot: PickerSnapshotRow): string {
 	const user = snapshot.user ?? '';

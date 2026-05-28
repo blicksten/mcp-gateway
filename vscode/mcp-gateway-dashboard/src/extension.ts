@@ -1052,6 +1052,34 @@ function registerCommands(
 		logViewer.show(name);
 	}));
 
+	// Remove a SAP system: deletes BOTH vsp-* and sap-gui-* components (whichever
+	// exist) in a single confirm. Component-level remove uses the standard
+	// mcpGateway.removeServer command (SapComponentItem.server.name resolves
+	// correctly through the existing handler).
+	push(vscode.commands.registerCommand('mcpGateway.removeSapSystem', async (item?: SapSystemItem | SapComponentItem) => {
+		if (!item || !(item instanceof SapSystemItem)) { return; }
+		const sys = item.system;
+		const targets: string[] = [];
+		if (sys.vsp) { targets.push(sys.vsp.name); }
+		if (sys.gui) { targets.push(sys.gui.name); }
+		if (targets.length === 0) { return; }
+		const answer = await vscode.window.showWarningMessage(
+			`Remove SAP system "${sys.key}"? Deletes ${targets.length} server config(s): ${targets.join(', ')}. This cannot be undone.`,
+			{ modal: true },
+			'Remove',
+		);
+		if (answer !== 'Remove') { return; }
+		for (const name of targets) {
+			await guarded(name, 'remove SAP system', async () => {
+				try {
+					await client.removeServer(name);
+				} finally {
+					await credentialStore.deleteServerCredentials(name);
+				}
+			});
+		}
+	}));
+
 	push(vscode.commands.registerCommand('mcpGateway.addSapSystem', async () => {
 		await AddSapPanel.createOrShow(
 			context.extensionUri,

@@ -244,7 +244,9 @@ describe('SapTreeProvider', () => {
 			assert.strictEqual(roots.length, 1);
 			assert.ok(roots[0] instanceof SapSystemItem);
 			assert.strictEqual(roots[0].collapsibleState, 1); // Collapsed
-			assert.strictEqual(roots[0].contextValue, 'sap-group-running');
+			// Encodes both components present via -vspgui suffix so menu when-clauses
+			// can show both Restart VSP and Restart GUI on the parent row.
+			assert.strictEqual(roots[0].contextValue, 'sap-group-running-vspgui');
 
 			const children = provider.getChildren(roots[0]) as SapComponentItem[];
 			assert.strictEqual(children.length, 2);

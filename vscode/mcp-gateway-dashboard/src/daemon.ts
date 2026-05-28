@@ -37,6 +37,11 @@ export interface DaemonManagerOptions {
 	clearTimeout?: (h: ReturnType<typeof setTimeout>) => void;
 	/** Jitter source for backoff calculation; default Math.random. */
 	random?: () => number;
+	/** Delay (ms) between the first failed getHealth probe and the re-probe
+	 *  inside start(). Production default 2500ms — gives concurrent windows
+	 *  time to win the spawn race. Tests pass 0 to keep mocha within its
+	 *  default 2000ms per-test timeout. */
+	raceDetectDelayMs?: number;
 }
 
 /**
@@ -49,6 +54,11 @@ export class DaemonManager {
 	private readonly spawnFn: SpawnFn;
 	private disposed = false;
 	private starting = false;
+	/** Promise of the in-flight start() call so concurrent start() invocations
+	 *  await the same outcome instead of bailing with `false`. Fixes the race
+	 *  where activate() fires daemon.start() and a startDaemon command click
+	 *  before activate's spawn completes silently returns "already starting". */
+	private startingPromise: Promise<boolean> | undefined;
 	private stopping = false;
 	// AUDIT A-H1: mutex with start()/stop(). Without this, auto-start + user
 	// restart can race — REST shutdown kills daemon, then start() sees
@@ -71,6 +81,7 @@ export class DaemonManager {
 	private readonly _setTimeout: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
 	private readonly _clearTimeout: (h: ReturnType<typeof setTimeout>) => void;
 	private readonly _random: () => number;
+	private readonly raceDetectDelayMs: number;
 
 	// Supervisor runtime state
 	private spawnedAt: number | undefined;
@@ -104,6 +115,7 @@ export class DaemonManager {
 		this._setTimeout = options?.setTimeout ?? ((cb, ms) => setTimeout(cb, ms));
 		this._clearTimeout = options?.clearTimeout ?? ((h) => clearTimeout(h));
 		this._random = options?.random ?? Math.random;
+		this.raceDetectDelayMs = options?.raceDetectDelayMs ?? 2500;
 	}
 
 	/** Number of quick crashes tracked in the current rolling window. */
@@ -117,11 +129,29 @@ export class DaemonManager {
 	/** True when a scheduled restart timer is pending. */
 	get pendingRestartScheduled(): boolean { return this.restartTimer !== undefined; }
 
-	/** Start the daemon if it is not already running. Returns true if spawned. */
+	/** Start the daemon if it is not already running. Returns true if THIS
+	 *  call did the spawn; returns false if another call (in flight) won the
+	 *  race or if the daemon is already running. */
 	async start(): Promise<boolean> {
-		if (this.disposed || this.child || this.starting || this.restarting) { return false; }
+		if (this.disposed || this.child || this.restarting) { return false; }
+		// Concurrent start() while one is in flight (e.g. activate's auto-start
+		// racing with a startDaemon command click) — await the in-flight result
+		// so daemon.running reflects the post-spawn state on return, but
+		// return false because THIS call did not own the spawn. Preserves
+		// D6-01's "exactly one call returns true" contract.
+		if (this.starting && this.startingPromise) {
+			await this.startingPromise.catch(() => false);
+			return false;
+		}
 		this.starting = true;
+		this.startingPromise = this._doStart().finally(() => {
+			this.starting = false;
+			this.startingPromise = undefined;
+		});
+		return this.startingPromise;
+	}
 
+	private async _doStart(): Promise<boolean> {
 		try {
 			// Check if gateway is already reachable — no need to spawn.
 			// B-NEW-30: restart() sets `skipHealthFastPathOnce` after a
@@ -154,7 +184,9 @@ export class DaemonManager {
 					// see "still down", and all spawn — causing port-bind crashes
 					// (exit code 1) and a visible offline blip on every window reload.
 					if (this.disposed) { return false; }
-					await new Promise(resolve => setTimeout(resolve, 2500));
+					if (this.raceDetectDelayMs > 0) {
+						await new Promise(resolve => setTimeout(resolve, this.raceDetectDelayMs));
+					}
 					if (this.disposed) { return false; }
 					try {
 						await this.client.getHealth();
@@ -220,8 +252,11 @@ export class DaemonManager {
 			});
 
 			return true;
-		} finally {
-			this.starting = false;
+		} catch (err) {
+			// Spawn failures (e.g. ENOENT) bubble through the wrapped finally
+			// above so `this.starting` resets correctly. Re-raise so callers see
+			// the actual error rather than a misleading false.
+			throw err;
 		}
 	}
 
@@ -465,6 +500,13 @@ export class DaemonManager {
 		this.restartTimer = this._setTimeout(() => {
 			this.restartTimer = undefined;
 			if (this.disposed) { return; }
+			// After a known crash the child is dead — the getHealth fast-path
+			// and the 2.5s "concurrent-window race" wait inside start() are
+			// both meaningless and just delay the respawn (or in tests with a
+			// permissive mock client, skip the spawn entirely). Mirror the
+			// manual restart() path at line 395 by arming the flag here.
+			// Closes the "second spawn after backoff" gap in A1/A10..A14/A16.
+			this.skipHealthFastPathOnce = true;
 			void this.start().catch(err => logger.error('daemon', 'Auto-restart spawn failed', err));
 		}, delay);
 	}

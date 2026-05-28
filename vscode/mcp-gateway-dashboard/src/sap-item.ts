@@ -15,6 +15,20 @@ const STATUS_ICONS: Record<ServerStatus, string> = {
 	unreachable: 'warning',
 };
 
+/** Per-status ThemeColor — without this, codicons render in the default
+ *  tree foreground color (looks gray). Maps every status to a semantically
+ *  meaningful built-in workbench color so green/yellow/red are visible. */
+const STATUS_COLORS: Record<ServerStatus, string | undefined> = {
+	running: 'testing.iconPassed',          // green checkmark color
+	degraded: 'testing.iconQueued',         // yellow/orange
+	unreachable: 'testing.iconQueued',      // yellow/orange
+	error: 'testing.iconFailed',            // red
+	stopped: 'descriptionForeground',       // muted gray
+	disabled: 'descriptionForeground',      // muted gray
+	starting: 'testing.iconQueued',         // yellow while transitioning
+	restarting: 'testing.iconQueued',
+};
+
 const STATUS_DOTS: Record<ServerStatus, string> = {
 	running: '\u25CF',      // ●
 	stopped: '\u25CB',      // ○
@@ -51,7 +65,10 @@ export class SapSystemItem extends vscode.TreeItem {
 		const iconId = system.imported
 			? 'cloud-download'
 			: (STATUS_ICONS[system.status] ?? 'question');
-		this.iconPath = new vscode.ThemeIcon(iconId);
+		const colorId = system.imported ? undefined : STATUS_COLORS[system.status];
+		this.iconPath = colorId
+			? new vscode.ThemeIcon(iconId, new vscode.ThemeColor(colorId))
+			: new vscode.ThemeIcon(iconId);
 
 		// Description: component status dots (kept in hierarchical mode as a
 		// quick glance even when the children are collapsed).
@@ -97,14 +114,22 @@ export class SapSystemItem extends vscode.TreeItem {
 		// contextValue:
 		// - `sap-imported` — Phase 17.5 synthetic row, no daemon component;
 		//   package.json when-clauses exclude lifecycle actions on this tag.
-		// - `sap-group-<status>` — hierarchical parent of a daemon-backed system.
+		// - `sap-group-<status>-<presence>` — hierarchical parent. `<presence>` ∈
+		//   {vsp, gui, vspgui} encodes which components actually exist on this
+		//   system so menu when-clauses can hide irrelevant actions (e.g. don't
+		//   show "Restart GUI" on a vsp-only install like DEV-100).
 		// - `sap-<status>` — flat-mode daemon-backed row.
 		if (system.imported) {
 			this.contextValue = 'sap-imported';
+		} else if (hierarchical) {
+			const presence =
+				system.vsp && system.gui ? 'vspgui'
+				: system.vsp ? 'vsp'
+				: system.gui ? 'gui'
+				: 'none';
+			this.contextValue = `sap-group-${system.status}-${presence}`;
 		} else {
-			this.contextValue = hierarchical
-				? `sap-group-${system.status}`
-				: `sap-${system.status}`;
+			this.contextValue = `sap-${system.status}`;
 		}
 	}
 }
@@ -126,7 +151,10 @@ export class SapComponentItem extends vscode.TreeItem {
 		this.server = server;
 
 		const iconId = STATUS_ICONS[server.status] ?? 'question';
-		this.iconPath = new vscode.ThemeIcon(iconId);
+		const colorId = STATUS_COLORS[server.status];
+		this.iconPath = colorId
+			? new vscode.ThemeIcon(iconId, new vscode.ThemeColor(colorId))
+			: new vscode.ThemeIcon(iconId);
 
 		this.description = server.status;
 
