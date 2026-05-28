@@ -71,6 +71,13 @@ Largest single operational win: **stateful infrastructure servers** — orchestr
 
 **When a backend is temporarily unreachable** (e.g., VPN-dependent server with VPN off): the gateway keeps an empty stub for the backend. Claude Code sees the endpoint as "available with no tools" rather than "failed" — preventing the 44-second reconnect storm that would otherwise affect all active sessions. Once the backend becomes reachable again, the gateway reconnects automatically on the next health-monitor cycle.
 
+**`StatusUnreachable` — TCP-level vs protocol-level distinction.** Connection failures split into two buckets so transient network outages don't trigger the same crash-loop response as a genuinely broken backend:
+
+- **TCP-unreachable** (host down, DNS fail, `ECONNREFUSED`, `ENETUNREACH`, `EHOSTUNREACH`, Windows `connectex` no-route, dial timeout): classified by `internal/lifecycle/transport.go::IsTransportUnreachable`, routed to a new `StatusUnreachable` state. The supervisor returns `ErrDoNotRestart` — no exponential backoff, no restart counter increment. A slow-poll loop in `internal/health/monitor.go` (`maybeProbeUnreachable`) checks reachability every 60 s; the moment a TCP probe succeeds the backend transitions back to `StatusStarting` automatically. UI surfaces a yellow warning badge ("host offline — slow-polling every 60s") instead of the red error spinner.
+- **Protocol-level** failures (HTTP 4xx/5xx, TLS handshake error, MCP rejection, malformed JSON): the existing `StatusError` path applies — exponential backoff restart, circuit breaker after 5 in 300 s.
+
+Triggering case that drove this split: `pdap-docs` (HTTP backend at `10.149.207.124`, VPN-gated) previously cycled `StatusStarting → StatusError` continuously when the VPN was off, burning the restart budget on a network condition the gateway cannot fix. With `StatusUnreachable`, the backend sits quietly waiting for the host to come back; no operator action needed.
+
 ### Trade-offs
 
 - **Stateful backends shared across tabs.** If a backend keeps per-session state (Playwright browser, shell with `cwd`), all tabs share that state. Define named instances in the gateway config — `Servers` is a name-keyed map, so two entries `playwright-main` / `playwright-aux` with the same command and distinct `args`/`cwd`/`env` (e.g. separate `--user-data-dir`) are supported today — or leave stateful backends in classical `.mcp.json` alongside gateway (hybrid mode is fully supported).
