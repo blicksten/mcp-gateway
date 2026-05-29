@@ -615,7 +615,8 @@
     "pretest": "node scripts/check-zombie-dom.js",
     "test": "mocha --require ts-node/register --file 'src/test/setup.ts' --exit --timeout 10000 --retries 2 'src/test/**/*.test.ts'",
     "package": "vsce package --allow-missing-repository --out mcp-gateway-dashboard-latest.vsix",
-    "deploy": "npm run compile && npm run package && node scripts/install-vsix.js mcp-gateway-dashboard-latest.vsix",
+    "deploy": "node ../../scripts/deploy-all.js",
+    "deploy:ext-only": "npm run compile && npm run package && node scripts/install-vsix.js mcp-gateway-dashboard-latest.vsix",
     "vscode:prepublish": "npm run compile"
   },
   "dependencies": {

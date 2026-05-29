@@ -1,4 +1,14 @@
-.PHONY: test test-integration-windows test-integration-phase16 check-grammar grammar help
+.PHONY: deploy test test-integration-windows test-integration-phase16 check-grammar grammar help
+
+# Unified build + deploy + verify — THE canonical "ship my changes" command.
+# Rebuilds & reinstalls the Go daemon AND the VS Code extension, restarts the
+# daemon so the running process is the fresh binary, removes duplicate extension
+# installs, and verifies the live state matches what was just built. Eliminates
+# the "we tested a stale build" class of bug. See scripts/deploy-all.js header.
+#   make deploy                       full deploy (restarts daemon)
+#   node scripts/deploy-all.js --skip-daemon-restart   stage daemon, don't restart
+deploy:
+	node scripts/deploy-all.js
 
 # Default Go test path — unit + structural tiers. Covers the DACL
 # SHAPE on Windows (TestApplyTokenFilePerms_Windows_Structural) but
