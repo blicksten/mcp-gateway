@@ -1,10 +1,30 @@
 # MCP Gateway — Roadmap
 
+<!-- last-summary: 2026-05-29 -->
+
+## Documentation actualization (2026-05-29 — code-grounded)
+
+Empirical verification of every tracked plan against actual Go + TypeScript source (5-agent fan-out, `file:line` evidence; `go build ./...` exit=0; 325 Go test funcs across lifecycle/api/health, 50 TS test files). Drift corrected this pass:
+
+- **audit-dashboard Phases 9, 10, 11** — were `⏳ pending`, actually **LANDED 2026-05-02** (PID-recycle guard in `daemon.ts`, atomic-writes, async token cache in `auth-header.ts`). Track now COMPLETE (12/12 phases).
+- **debug-flicker Phases 3, 4B, Final** — were `⏳ pending`, actually **done** (Activate button execFile + log streaming code-verified; shipped via ext v1.7.3). Track COMPLETE.
+- **StatusUnreachable follow-ups** — 2 of 3 closed (integration + TS UI tests landed via `7a31d06`); PAL-consensus artifact + 1 named integration test still open (LOW-impact). See Released row note.
+
+**Confirmed genuinely OPEN (code = absent/skeleton):**
+- `PLAN-verification-protocol-author` — 6 audit scripts are SKELETON-ONLY (`SKELETON_DEFERRED`/`TODO`), `manifest.json` status `not_started`, 4 `impl_line=null` claims. Only `07-verdict-check.ps1` is real. Pipeline `planning-3839c889` cancelled.
+
+**Closed this pass (2026-05-30 — P2/P3 implementation):**
+- `PLAN-fanout-fixes` T1.3 dial-timeout — DONE: `internal/lifecycle/transport.go` `checkTCPReachable` + `internal/health/monitor.go` `probeReachable` now use `net.Dialer{Timeout: ...}` (belt-and-suspenders over the dialCtx deadline; Windows connectex cap).
+- `PLAN-fanout-fixes` T2.2 GOMEMLIMIT — DONE: `vscode/.../src/daemon.ts` spawn env sets `GOMEMLIMIT=536870912` (512 MiB soft heap cap). (T2.1 jitter / T2.3 ctx-propagation / Phase 6 sentinel remain as smaller fanout residuals, not in this pass.)
+- StatusUnreachable `TestCheckOne_RunningToUnreachable_OnPingPlusTCPFail` gap — CLOSED: added the production Running→Unreachable transition in `monitor.go` `checkOne` (a running HTTP backend whose host goes TCP-unreachable now slow-polls instead of restart-storming) + the named test + a reachable-but-failing counter-case. Gate: `go build`/`go vet` clean, `internal/health`+`internal/lifecycle` `go test` ok, ext `npm test` 1175 pass / 0 fail, VSIX 1.33.22 deployed; cross-tier (sonnet) CV APPROVED WITH COMMENTS (1 MEDIUM + 1 LOW, both closed via in-code invariant comments). Only the formal PAL-consensus artifact (Q1+Q2) remains administratively substituted.
+
+**Confirmed DELIVERED (previously OPEN in plan files):** `PLAN.md` 3 startup fixes (commit `02bf947`), `PLAN-refactor-0393974-findings` (commit `526f515`), `PLAN-unreachable-handling` core + TS badges.
+
 ## Pipeline status (2026-05-29 closure pass)
 
 **Closed pipelines (no action needed):**
 
-- `feature-64baca01` (StatusUnreachable) — **completed 2026-05-28 21:01** (9/9 steps + 3 CV gates PASS). All doc-writer artefacts in commits `cd931db → 526f515 → eeded16`. 3 MEDIUM follow-ups (integration tests for slow-poll cycle, TS UI unit tests, formal PAL consensus on Q1+Q2) tracked in the `StatusUnreachable` Released row below — non-blocking, scheduled for next-cycle test sprint.
+- `feature-64baca01` (StatusUnreachable) — **completed 2026-05-28 21:01** (9/9 steps + 3 CV gates PASS). All doc-writer artefacts in commits `cd931db → 526f515 → eeded16`. 3 MEDIUM follow-ups (integration tests for slow-poll cycle, TS UI unit tests, formal PAL consensus on Q1+Q2) tracked in the `StatusUnreachable` Released row below. **Code-verified 2026-05-29 actualization:** (1) integration tests — mostly LANDED (commit `7a31d06`): `TestMaybeProbeUnreachable_ReachableTriggersStart`, `..._DoesNotIncrementRestartCount`, `..._RecoveryE2E`, `TestBackendSupervisor_UnreachableEarlyReturn` all present; **`TestCheckOne_RunningToUnreachable_OnPingPlusTCPFail` remains ABSENT** (and the production `checkOne` Running→Unreachable transition it would cover does not exist — genuine open gap). (2) TS UI unit tests — LANDED: `src/test/status-bar-unreachable.test.ts` (5) + `sap-status-bar-unreachable.test.ts` (4) + backend-item badge tests. (3) formal PAL consensus on Q1+Q2 — **still NOT produced** (closed-as-substituted via `mcp__pal__precommit`; the consensus call hit the 300s ceiling / hollow-gate SKIP). Net: 2 of 3 follow-ups closed; 1 PAL-consensus artifact + 1 named integration test remain open (both LOW-impact).
 - `audit-e7618c9c` (Plan Audit, 6 scopes A–F) — **completed 2026-05-06**, retained as historical reference below (CRITICAL SE-01 detection.ts fix + HIGH F-A1 ldflags + HIGH SB-1 go:embed + HIGH SC-C-H1 cache preserve, all shipped).
 
 **Cancelled pipeline:**
@@ -275,9 +295,9 @@ Plan: `docs/PLAN-debug-flicker.md` (locked 2026-04-23, PAL `gpt-5.1-codex` think
 |---|-------|--------|
 | debug-flicker.1 | Fix cache flicker — `ServerDataCache.refresh()` now preserves last-known-good `cachedServers` on API errors (was wiped to `[]`). `_lastRefreshFailed=true` flag is kept so consumers still distinguish daemon-offline from genuinely empty lists. Fingerprint-based tree providers no longer re-fire during transient drops → no visible Backends/SAP Systems sidebar flicker. 21 `ServerDataCache` tests pass (added 3 new invariant tests + rewrote T3.10 cold-start). PAL `codereview` external expert gpt-5.1-codex → PASS, zero findings. | ✅ implemented 2026-04-23 |
 | debug-flicker.2 | Cold-start placeholder — new `PlaceholderTreeItem` (`contextValue='gateway-connecting'`, icon `$(sync~spin)`, label "Connecting to gateway…") surfaces at root of MCP Backends + SAP Systems views when `cache.lastRefreshFailed && servers.length===0`. Fingerprints extended with `P/N` prefix so state transitions fire the tree event even when both sides are empty-list. `SapTreeProvider` generic widened from `SapTreeNode` to `vscode.TreeItem` per PLAN's TS contract note (subtype-compatible, no union). 43/43 tree-provider tests pass (10 new integration + 5 new class + updated H/F marker). Full suite 599/33 (delta +16 passing / 0 new failures vs Phase-1 baseline). PAL `codereview` + `thinkdeep` (both gpt-5.1-codex, external, gate_mode=true) → **dual-PASS, zero findings**. Menu-clause Grep audit confirms `gateway-connecting` does not match any `viewItem ==` / `viewItem =~` clause in `package.json` — placeholder renders inert. | ✅ implemented 2026-04-24 |
-| debug-flicker.3 | Install Claude Code plugin end-to-end (operator steps). | ⏳ pending |
-| debug-flicker.4B | Wire "Activate for Claude Code" button to `child_process.execFile('mcp-ctl install-claude-code')` with webview log streaming + cancel. | ⏳ pending |
-| debug-flicker.Final | `npm run deploy` + PAL precommit + single commit bundling source + VSIX + plan/tasks/review artifacts. | ⏳ pending |
+| debug-flicker.3 | Install Claude Code plugin end-to-end (operator steps). | ✅ done — operator-mediated; superseded by `mcp-ctl install-claude-code` (Phase 16.8) which is the authoritative install flow |
+| debug-flicker.4B | Wire "Activate for Claude Code" button to `child_process.execFile('mcp-ctl install-claude-code')` with webview log streaming + cancel. | ✅ implemented 2026-04-24 — code-verified 2026-05-29: `defaultSpawnInstall` execFile + webview log streaming in `extension.ts` + `webview/claude-code-panel.ts`. PAL codereview + thinkdeep dual-PASS |
+| debug-flicker.Final | `npm run deploy` + PAL precommit + single commit bundling source + VSIX + plan/tasks/review artifacts. | ✅ done — shipped via ext v1.7.3 (and later activate-button fixes); **debug-flicker track COMPLETE** |
 
 ---
 

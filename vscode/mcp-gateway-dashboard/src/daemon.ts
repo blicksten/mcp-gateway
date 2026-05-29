@@ -216,6 +216,13 @@ export class DaemonManager {
 					stdio: ['ignore', 'pipe', 'pipe'],
 					detached: false,
 					windowsHide: true,
+					// GOMEMLIMIT (fanout-fixes T2.2): soft-cap the Go daemon heap at
+					// 512 MiB so a backend retry-storm cannot drive the daemon into
+					// an OOM crash. GOMEMLIMIT is a soft limit — the Go runtime
+					// runs GC more aggressively as the heap approaches it rather
+					// than hard-failing, so steady-state memory stays bounded
+					// without risking spurious OOM kills under legitimate load.
+					env: { ...process.env, GOMEMLIMIT: String(512 * 1024 * 1024) },
 				});
 			} catch (err) {
 				logger.error('daemon', 'Failed to spawn', err);

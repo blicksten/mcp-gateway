@@ -375,7 +375,11 @@ func (m *Monitor) probeReachable(ctx context.Context, rawURL string) bool {
 	addr := net.JoinHostPort(host, port)
 	dialCtx, cancel := context.WithTimeout(ctx, UnreachableProbeDialTimeout)
 	defer cancel()
-	conn, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", addr)
+	// DIAL-FIX-1 (fanout-fixes T1.3): Dialer.Timeout mirrors the dialCtx
+	// deadline so a Windows connectex to a black-holed host is capped at the
+	// OS level, not just by ctx cancellation. Same rationale as
+	// lifecycle.checkTCPReachable.
+	conn, err := (&net.Dialer{Timeout: UnreachableProbeDialTimeout}).DialContext(dialCtx, "tcp", addr)
 	if err != nil {
 		return false
 	}
@@ -437,6 +441,41 @@ func (m *Monitor) checkOne(ctx context.Context, entry models.ServerEntry) {
 		if entry.Status == models.StatusRunning {
 			m.lm.SetStatus(name, models.StatusDegraded, "MCP ping failed")
 		}
+		return
+	}
+
+	// Running-backend-lost-its-host transition (PLAN-unreachable-handling
+	// follow-up): before restart-storming, check whether the host is
+	// TCP-unreachable (e.g. VPN dropped mid-session). If so, route to
+	// StatusUnreachable slow-poll instead of the restart path — the same
+	// transport-vs-protocol distinction the lifecycle Start TCP pre-check
+	// makes at startup, now applied to a backend that WAS running and lost
+	// its host. Previously StatusUnreachable could only be entered at Start
+	// time; a live HTTP backend whose host vanished would restart-storm into
+	// StatusError instead. Only HTTP backends (Config.URL != "") can be
+	// unreachable; stdio backends fall straight through to restart.
+	//
+	// Concurrency (CV MEDIUM): probeReachable does a blocking TCP dial
+	// (UnreachableProbeDialTimeout) during the m.mu-unlocked window opened
+	// at the consecutiveFailures++ above. This is race-free because checkAll
+	// dispatches exactly one checkOne goroutine per server name per tick and
+	// wg.Wait()s before the next tick — so no second checkOne for the same
+	// name can mutate this serverState concurrently. The reset below is
+	// therefore an unconditional write under the re-lock, not a read-modify
+	// of a stale snapshot. Worst-case latency (CV LOW): if every HTTP backend
+	// loses its host at once (VPN drop), each goroutine blocks here for up to
+	// UnreachableProbeDialTimeout, bounded by the bulkhead permit count.
+	if entry.Config.URL != "" && !m.probeReachable(ctx, entry.Config.URL) {
+		m.logger.Warn("running backend host became unreachable; routing to slow-poll instead of restart",
+			"server", name, "consecutive_failures", failures)
+		// Reset consecutiveFailures so recovery starts clean. Do NOT touch
+		// restartCount/firstRestartAt — the Unreachable path is explicitly
+		// outside the circuit-breaker (see maybeProbeUnreachable).
+		m.mu.Lock()
+		state := m.getOrCreateState(name)
+		state.consecutiveFailures = 0
+		m.mu.Unlock()
+		m.lm.SetStatus(name, models.StatusUnreachable, "host unreachable (slow-polling)")
 		return
 	}
 

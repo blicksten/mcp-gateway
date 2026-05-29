@@ -131,7 +131,7 @@ FRONTEND (clients connect to gateway)     BACKEND (gateway connects to servers)
 
 ## Status
 
-**Daemon v1.9.0 + Extension 1.33.21** (Wave 2 of `sap-picker-and-import-mcp` + SAP Picker stabilization cycle)
+**Daemon v1.9.0 + Extension 1.33.22** (Wave 2 of `sap-picker-and-import-mcp` + SAP Picker stabilization cycle; fanout-fixes T1.3 dial-timeout + T2.2 GOMEMLIMIT + StatusUnreachable Running→Unreachable transition)
 — SAP Picker (Wave 1) and Import-from-Claude (Wave 2) complete on top of
 the v1.7.x daemon-lifecycle and v1.6.x Claude Code integration baselines.
 

@@ -247,6 +247,89 @@ func TestProbeReachable_URLPortResolution(t *testing.T) {
 	}
 }
 
+// TestCheckOne_RunningToUnreachable_OnPingPlusTCPFail verifies the
+// Running→Unreachable transition added as the PLAN-unreachable-handling
+// follow-up: a running HTTP backend whose MCP ping fails repeatedly AND whose
+// host is TCP-unreachable must be routed to StatusUnreachable (slow-poll), NOT
+// restart-stormed. This is the previously-missing entry into StatusUnreachable
+// from a live backend (it could only be entered at Start time before).
+//
+// Drives the REAL monitor.checkOne (not the checkOneWithMockPing helper) so
+// the production branch is exercised. The mock's Session() returns (nil,false)
+// → checkMCPPing fails on every call; the backend URL points at an unbound
+// local port → probeReachable returns false → the transition fires once the
+// consecutive-failure threshold is crossed.
+func TestCheckOne_RunningToUnreachable_OnPingPlusTCPFail(t *testing.T) {
+	port := unboundLocalPort(t)
+
+	mock := newMockLM()
+	entry := models.ServerEntry{
+		Name:   "http-backend",
+		Status: models.StatusRunning,
+		Config: models.ServerConfig{URL: fmt.Sprintf("http://127.0.0.1:%d/mcp", port)},
+	}
+	mock.addEntry(entry.Name, entry.Status, entry.Config)
+
+	tm := newTestableMonitor(mock) // ConsecutiveFailureThreshold = 3
+	ctx := context.Background()
+
+	// Ticks 1..2: below threshold → Degraded, no restart, no Unreachable yet.
+	tm.checkOne(ctx, entry)
+	tm.checkOne(ctx, entry)
+	assert.Equal(t, models.StatusDegraded, mock.lastStatus(entry.Name),
+		"below-threshold ping failures must mark Degraded, not Unreachable")
+	assert.Equal(t, 0, mock.getRestarts(), "no restart before threshold")
+
+	// Tick 3: threshold crossed + host TCP-unreachable → StatusUnreachable.
+	tm.checkOne(ctx, entry)
+	assert.Equal(t, models.StatusUnreachable, mock.lastStatus(entry.Name),
+		"running backend whose host is TCP-unreachable must route to slow-poll, not restart")
+	assert.Equal(t, 0, mock.getRestarts(),
+		"the Unreachable transition must NOT issue a Restart (that is the whole point)")
+
+	tm.mu.Lock()
+	state := tm.states[entry.Name]
+	require.NotNil(t, state)
+	assert.Equal(t, 0, state.restartCount,
+		"Unreachable transition is outside the circuit-breaker — restartCount must stay 0")
+	assert.Equal(t, 0, state.consecutiveFailures,
+		"consecutiveFailures must be reset so recovery starts clean")
+	assert.True(t, state.firstRestartAt.IsZero(),
+		"firstRestartAt must remain zero — no restart was attempted")
+	tm.mu.Unlock()
+}
+
+// TestCheckOne_RunningPingFailButReachable_Restarts is the counter-case that
+// proves the transport-vs-protocol distinction: when the host IS reachable
+// (TCP dial succeeds) but the MCP ping keeps failing, the backend is genuinely
+// flapping at the protocol layer — it must take the RESTART path, NOT
+// StatusUnreachable. Without this distinction the new branch would mask real
+// protocol bugs behind a "host offline" badge.
+func TestCheckOne_RunningPingFailButReachable_Restarts(t *testing.T) {
+	port, stop := listenLocal(t) // host is reachable (real listener)
+	defer stop()
+
+	mock := newMockLM()
+	entry := models.ServerEntry{
+		Name:   "http-backend",
+		Status: models.StatusRunning,
+		Config: models.ServerConfig{URL: fmt.Sprintf("http://127.0.0.1:%d/mcp", port)},
+	}
+	mock.addEntry(entry.Name, entry.Status, entry.Config)
+
+	tm := newTestableMonitor(mock) // threshold 3, RestartBackoffBase 0, SupervisorActive false
+	ctx := context.Background()
+
+	tm.checkOne(ctx, entry)
+	tm.checkOne(ctx, entry)
+	tm.checkOne(ctx, entry) // threshold crossed; host reachable → fall through to restart
+
+	assert.Equal(t, 1, mock.getRestarts(),
+		"reachable host + failing ping = protocol flap → must Restart, not go Unreachable")
+	assert.NotEqual(t, models.StatusUnreachable, mock.lastStatus(entry.Name),
+		"a reachable backend must never be marked Unreachable")
+}
+
 // TestMaybeProbeUnreachable_RecoveryE2E exercises the full recovery cycle:
 //  1. backend in StatusUnreachable, target port unbound — probe fails, no Start;
 //  2. operator brings the host back up (listener opens on the same port);

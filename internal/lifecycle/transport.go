@@ -96,7 +96,12 @@ func checkTCPReachable(ctx context.Context, rawURL string, timeout time.Duration
 	addr := net.JoinHostPort(host, port)
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	conn, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", addr)
+	// DIAL-FIX-1 (fanout-fixes T1.3): set Dialer.Timeout in addition to the
+	// dialCtx deadline. On Windows a connectex to a black-holed host can sit
+	// in the syscall longer than the ctx cancellation interrupts it; the
+	// Dialer.Timeout is the OS-level cap that guarantees the dial returns
+	// within the caller's budget instead of stalling the health loop.
+	conn, err := (&net.Dialer{Timeout: timeout}).DialContext(dialCtx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("host unreachable %s: %w", addr, err)
 	}

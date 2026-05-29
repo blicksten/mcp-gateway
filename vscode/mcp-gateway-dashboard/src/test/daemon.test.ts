@@ -343,6 +343,28 @@ describe('DaemonManager', () => {
 			(mockChild as any).emit('exit', 0, null);
 		});
 
+		it('spawn passes GOMEMLIMIT=512MiB in env (fanout-fixes T2.2 OOM soft-cap)', async () => {
+			let capturedOpts: any;
+			const c = createMockClient(false);
+			c.getHealth = async () => { throw new Error('offline'); }; // force spawn path
+			const spawn = ((_cmd: string, _args: string[], opts: any) => {
+				capturedOpts = opts;
+				return mockChild;
+			}) as unknown as SpawnFn;
+			daemon = new DaemonManager(c as any, 'mcp-gateway', output as any, spawn);
+
+			const r = await daemon.start();
+			assert.strictEqual(r, true, 'offline daemon must spawn');
+			assert.ok(capturedOpts, 'spawn options must be passed');
+			assert.ok(capturedOpts.env, 'spawn options must include an env map');
+			assert.strictEqual(capturedOpts.env.GOMEMLIMIT, String(512 * 1024 * 1024),
+				'daemon spawn must set GOMEMLIMIT to 512 MiB (536870912) to soft-cap the Go heap');
+			assert.ok(Object.keys(capturedOpts.env).length > 1,
+				'spawn env must extend process.env, not replace it with a single key');
+
+			(mockChild as any).emit('exit', 0, null);
+		});
+
 		it('skipHealthFastPathOnce is consumed once and re-armed for next probe', async () => {
 			// After the flag fires once, the next start() (e.g., manual user
 			// invocation later) should go through the normal fast-path again.
