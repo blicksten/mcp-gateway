@@ -391,6 +391,10 @@ export function activate(
 		daemon = new DaemonManager(client, daemonPath, undefined, undefined, {
 			fileLogger,
 			autoRestartOnCrash,
+			// Production opts in to 2500ms race-detect window. Pre-2026-05-29 this
+			// was the daemon.ts default; flipped to test-friendly 0 to fix test
+			// suite bloat. See docs/spikes/2026-05-29-test-runtime-bloat.md.
+			raceDetectDelayMs: 2500,
 		});
 	}
 	context.subscriptions.push(daemon);

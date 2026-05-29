@@ -38,9 +38,11 @@ export interface DaemonManagerOptions {
 	/** Jitter source for backoff calculation; default Math.random. */
 	random?: () => number;
 	/** Delay (ms) between the first failed getHealth probe and the re-probe
-	 *  inside start(). Production default 2500ms — gives concurrent windows
-	 *  time to win the spawn race. Tests pass 0 to keep mocha within its
-	 *  default 2000ms per-test timeout. */
+	 *  inside start(). Default 0 — fast path for tests (no real wait).
+	 *  Production (extension.ts) MUST pass 2500 explicitly to give concurrent
+	 *  windows time to win the spawn race. Pre-2026-05-29 the default was
+	 *  2500 here; that paid 2.5s of unproductive wait in ~40 tests that
+	 *  forgot to override, bloating the suite from <1m to ~4m. */
 	raceDetectDelayMs?: number;
 }
 
@@ -115,7 +117,9 @@ export class DaemonManager {
 		this._setTimeout = options?.setTimeout ?? ((cb, ms) => setTimeout(cb, ms));
 		this._clearTimeout = options?.clearTimeout ?? ((h) => clearTimeout(h));
 		this._random = options?.random ?? Math.random;
-		this.raceDetectDelayMs = options?.raceDetectDelayMs ?? 2500;
+		// Default 0 (test-friendly fast path). Production MUST pass 2500
+		// explicitly — see options.raceDetectDelayMs docstring above.
+		this.raceDetectDelayMs = options?.raceDetectDelayMs ?? 0;
 	}
 
 	/** Number of quick crashes tracked in the current rolling window. */
