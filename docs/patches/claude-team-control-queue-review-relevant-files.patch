@@ -1,0 +1,154 @@
+From mcp-gateway 2026-05-29 — for the claude-team-control owner-session to apply.
+
+Bug: `orchestrator/tools.py:queue_review` (MCP-exposed wrapper) does not accept
+`relevant_files`. The worker (`review_queue.py:325,429`) DOES pass
+`spec.relevant_files` through to `pal_client.call_gate`, and the
+`ReviewSpec` model (`review_queue.py:93,98`) DOES persist it — but the wrapper
+silently drops it on construction, so `spec.relevant_files = None` for every
+async-queue gate. `pal_client._resolve_relevant_files(None)` then returns
+`[pyproject.toml]` (orchestrator's own — per WEDGE.3 redesign at
+pal_client.py:862). The external expert reviews an irrelevant file and
+returns PASS with `tokens_used=0` and `duration_ms=~15s`.
+
+Evidence (mcp-gateway session, this week):
+- queue_review for commit 0393974 with explicit relevant_files list of 9 paths:
+  returned `{"verdict":"PASS","tokens_used":0,"duration_ms":21619,
+  "relevant_files":null in spec}`. The wrapper drops the field; the worker
+  ratchets through with relevant_files=None.
+- Direct mcp__pal__codereview (which DOES accept relevant_files) hit 300s
+  MCP ceiling on the same diff — confirming the async path is the only
+  practical option for non-trivial reviews, and it is currently hollow.
+
+This is a structural hollow gate parallel to but distinct from HGB.2's
+`review_validation_type` defect (closed by b8787c6). HGB.2 closed the
+"internal mode forced" path. This defect closes any path where the
+async-queue PAL review is supposed to actually look at file contents
+from outside the orchestrator project — which is every cross-project
+review. Belongs in HGB.6 re-audit scope.
+
+Patch is against orchestrator/tools.py (signature change + ReviewSpec
+init + docstring). No schema migration needed — ReviewSpec already
+supports the field.
+
+Memory in mcp-gateway: project_queue_review_relevant_files_hollow_gate_2026_05_26.md
+
+Co-Authored-By: Porfiry
+
+---
+
+diff --git a/orchestrator/tools.py b/orchestrator/tools.py
+--- a/orchestrator/tools.py
++++ b/orchestrator/tools.py
+@@ -1654,12 +1654,13 @@
+ @mcp.tool()
+ @with_deadline()
+ async def queue_review(
+     gate_type: _Literal["codereview", "thinkdeep", "consensus", "precommit"],
+     prompt: str,
+     context: str = "",
+     model: str | None = None,
+     fallback_model: str = "gpt-5.1-codex",
+     max_wait_s: float = 600.0,
+     review_validation_type: str | None = None,
++    relevant_files: list[str] | None = None,
+ ) -> str:
+     """Enqueue a PAL cross-validation review that runs asynchronously.
+
+     Returns a task_id immediately. Poll get_review(task_id) until status is
+@@ -1689,6 +1690,12 @@
+         max_wait_s: Hard timeout per attempt (primary and fallback each).
+         review_validation_type: PAL validation mode for codereview ('external'
+             = expert + raw_analysis; 'internal' = skip expert, fast-path).
+             None (default) = let pal_client.call_gate pick the per-gate-type
+             default. HGB.2 T2.1 — see PLAN-hollow-gate-blockers.md §HGB.2.
++        relevant_files: ABSOLUTE paths to the files the gate should review.
++            REQUIRED for any cross-project codereview / precommit gate.
++            When None, pal_client._resolve_relevant_files defaults to
++            orchestrator's own pyproject.toml (WEDGE.3 redesign) — that
++            produces a hollow PASS (tokens_used=0) for any review of files
++            outside this repo. Pin this in tests.
+     """
+     from models import GateType as _GateType
+     from review_queue import ReviewSpec
+@@ -1709,6 +1716,7 @@
+         fallback_model=fallback_model,
+         max_wait_s=max_wait_s,
+         review_validation_type=review_validation_type,
++        relevant_files=relevant_files,
+     )
+     # enqueue() MUST run on the active asyncio loop — it calls
+     # asyncio.get_running_loop() to spawn the worker Task. Wrapping in
+---
+
+TESTING (in claude-team-control):
+
+1. Add a regression test in
+   orchestrator/tests/test_queue_review_relevant_files_pass_through.py:
+
+```python
+import pytest
+from orchestrator import tools
+
+@pytest.mark.asyncio
+async def test_queue_review_threads_relevant_files_to_spec(monkeypatch):
+    captured_spec = {}
+
+    class FakeQueue:
+        def enqueue(self, spec):
+            captured_spec["spec"] = spec
+            return "rev-fake"
+
+    monkeypatch.setattr(tools, "get_review_queue", lambda: FakeQueue())
+
+    out = await tools.queue_review(
+        gate_type="codereview",
+        prompt="x",
+        relevant_files=["/abs/a.go", "/abs/b.go"],
+    )
+    assert "rev-fake" in out
+    assert captured_spec["spec"].relevant_files == ["/abs/a.go", "/abs/b.go"]
+
+
+@pytest.mark.asyncio
+async def test_queue_review_relevant_files_defaults_to_none(monkeypatch):
+    captured_spec = {}
+
+    class FakeQueue:
+        def enqueue(self, spec):
+            captured_spec["spec"] = spec
+            return "rev-fake"
+
+    monkeypatch.setattr(tools, "get_review_queue", lambda: FakeQueue())
+
+    await tools.queue_review(gate_type="codereview", prompt="x")
+    assert captured_spec["spec"].relevant_files is None
+```
+
+2. Run: `pytest orchestrator/tests/test_queue_review_relevant_files_pass_through.py -v`
+
+3. Empirical post-fix verification (from mcp-gateway side or any consuming session):
+   - Issue queue_review with `relevant_files=[absolute paths]` for a real diff.
+   - Poll get_review.
+   - Verify `spec.relevant_files` in the response is NOT null AND
+     `result.tokens_used > 0` AND `result.duration_ms > 30000`. Pre-fix
+     baseline was tokens_used=0 + duration_ms=~15-22s.
+
+ACCEPTANCE CRITERIA:
+- queue_review signature accepts relevant_files: list[str] | None = None.
+- spec.relevant_files matches the wrapper argument 1:1.
+- New tests PASS.
+- Any consuming session that supplies relevant_files now sees genuine
+  external-expert PAL output (tokens_used > 0 confirms expert engagement).
+
+RISK ASSESSMENT:
+- Backwards compatible: default None preserves current callers.
+- No schema migration needed.
+- Existing test_pal_client_gate_arg_symmetry.py and friends are unaffected
+  (they test the call_gate layer, not the queue_review wrapper).
+- The fix is ~5 LOC plus 2 tests.
+
+CONTEXT ON THE PARALLEL HGB TRACK:
+HGB.2 (b8787c6) closed the `review_validation_type` defect: pal_client.py:880
+now defaults to `"external"`. That fix is necessary but not sufficient — the
+async queue can still hollow-out via dropped relevant_files. HGB.6 was
+flagged as "re-audit" in the spike; this finding belongs in that scope.
