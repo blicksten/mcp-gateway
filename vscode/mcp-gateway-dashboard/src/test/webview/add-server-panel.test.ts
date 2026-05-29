@@ -111,6 +111,10 @@ async function flush(): Promise<void> {
  * Throws on timeout — see code-review finding LOW-2 (Round 1, Sonnet 4.6). A
  * silent return turns a missing message into a confusing "0 === 1" assertion
  * far from the root cause; the throw surfaces the wait-site as the failure.
+ *
+ * Cross-file pollution under full-suite load can blow the 500 ms cap. The
+ * mocha `--retries 2` flag in package.json gives each flaky test 3 attempts
+ * before declaring it a true failure.
  */
 async function waitForPostedMessage(
 	panel: MockWebviewPanel,
