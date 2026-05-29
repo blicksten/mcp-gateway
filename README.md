@@ -123,7 +123,7 @@ FRONTEND (clients connect to gateway)     BACKEND (gateway connects to servers)
 
 1. **Gateway as sole MCP entry point** — not a peer manager. Gateway owns stdio backends as child processes, connects to HTTP/SSE backends as clients.
 2. **Live management via REST API** — add/remove/enable/disable/restart servers without touching config files or restarting sessions. The API is the primary interface; config file is just initial state.
-3. **Real-time health as first-class feature** — every server has a state machine (`stopped` -> `starting` -> `running` -> `degraded` -> `error` -> `restarting` -> `disabled`). Status is always available via API and VS Code UI.
+3. **Real-time health as first-class feature** — every server has a state machine (`stopped` -> `starting` -> `running` -> `degraded` -> `error` -> `restarting` -> `disabled` -> `unreachable`). Status is always available via API and VS Code UI. (`unreachable` covers TCP-level connection failures — host down / DNS fail / dial timeout — separated from protocol-level `error` so transient network outages don't burn the restart budget; see Disconnect resilience below.)
 4. **tools/list is cached per session in Claude Code** (Issue #13646) — gateway bypasses this by being the only server. New backends' tools appear via gateway's dynamic `tools/list`.
 5. **Go for daemon** — single binary, zero dependencies, instant startup (<10ms), goroutines for parallel process management.
 6. **TypeScript for VS Code extension** — native VS Code API, tree view with live status, status bar with health counts.
@@ -131,7 +131,7 @@ FRONTEND (clients connect to gateway)     BACKEND (gateway connects to servers)
 
 ## Status
 
-**Daemon v1.9.0 + Extension 1.32.0** (Wave 2 of `sap-picker-and-import-mcp`)
+**Daemon v1.9.0 + Extension 1.33.21** (Wave 2 of `sap-picker-and-import-mcp` + SAP Picker stabilization cycle)
 — SAP Picker (Wave 1) and Import-from-Claude (Wave 2) complete on top of
 the v1.7.x daemon-lifecycle and v1.6.x Claude Code integration baselines.
 
