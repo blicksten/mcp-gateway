@@ -7,9 +7,13 @@
 - `feature-64baca01` (StatusUnreachable) — **completed 2026-05-28 21:01** (9/9 steps + 3 CV gates PASS). All doc-writer artefacts in commits `cd931db → 526f515 → eeded16`. 3 MEDIUM follow-ups (integration tests for slow-poll cycle, TS UI unit tests, formal PAL consensus on Q1+Q2) tracked in the `StatusUnreachable` Released row below — non-blocking, scheduled for next-cycle test sprint.
 - `audit-e7618c9c` (Plan Audit, 6 scopes A–F) — **completed 2026-05-06**, retained as historical reference below (CRITICAL SE-01 detection.ts fix + HIGH F-A1 ldflags + HIGH SB-1 go:embed + HIGH SC-C-H1 cache preserve, all shipped).
 
-**Orphan pipeline (auto-cancel pending):**
+**Cancelled pipeline:**
 
-- `planning-3839c889` (verification-protocol-author, my session 2026-05-28) — parked at step 1 architect via `spawn_token` lease + CAS conflict. Architect output absorbed into local `docs/PLAN-verification-protocol-author.md` and `docs/REVIEW-verification-protocol-author.md` (both gitignored per project convention). REST cancel endpoint is read-only (orchestrator OpenAPI exposes only GET + Teams approve/decline), so cancel can only fire via MCP `pipeline_ops(action="cancel")` once the MCP gateway plugin reconnects in a future session. Otherwise, the Session Start Protocol step 5b orphan-scan auto-cancel will fire after the 72h staleness threshold (currently at ~28h, ETA 2026-05-31). Verification cycle anchor is `docs/audits/2026-05-24/` (commit `97a08c8`), audit packet stands independent of the orphan.
+- `planning-3839c889` (verification-protocol-author, 2026-05-28) — **cancelled 2026-05-29** via `pipeline_ops(action="cancel")` after the MCP transport was rehydrated. 5 steps abandoned, status=abandoned. Architect step-1 output was absorbed before cancellation into local `docs/PLAN-verification-protocol-author.md` and `docs/REVIEW-verification-protocol-author.md` (both gitignored per project convention). Verification cycle anchor is `docs/audits/2026-05-24/` (commit `97a08c8`), audit packet stands independent of the cancelled orphan. Pipeline was originally blocked by `spawn_token` lease + CAS conflict at step 1 — diagnostics for that blocker preserved in the cancelled-pipeline record for future investigation.
+
+**Root-cause fix shipped same day:**
+
+- The MCP transport disconnect that orphaned this pipeline was a Symptom B occurrence (mcp-gateway daemon respawned mid-session — PID 12412→32740, version `cee568f→eeded168946e+dirty` — Claude Code's MCP client did not auto-reconnect, 1183 deferred tools went unavailable). Root cause: `claude-team-control/hooks/mcp-rehydrate.sh` only touched `.mcp.json` mtime inside the `.orphaned_at` marker cleanup loop, but Symptom B leaves no marker. Fix shipped in claude-team-control commit `eedbf34 fix(mcpr): close Symptom B gap — daemon respawn touch outside marker loop`: new `rehydrate_gateway_on_respawn()` function detects daemon respawn by comparing `/api/v1/health.started_at` against the manifest mtime, touches when daemon is ahead, idempotent on re-run. 13/13 hook tests pass, PAL `chat` (gpt-5.1-codex) BLESSING. Detailed RCA in `[memory/project_mcprehydrate_symptom_b_gap_2026_05_29.md]`.
 
 ---
 
