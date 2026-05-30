@@ -18,9 +18,23 @@ files outside the listed directories still correctly skip the smoke
 test, keeping CI minute burn in check. Inline comment in the workflow
 file documents the rationale + the 2026-05-31 change date.
 
-Operator follow-up (T5.1 in CTC plan): measure dogfood-smoke baseline
-runtime + flake rate over the first 14 days of the new filter to confirm
-the trigger-rate inflation stays within acceptable CI-minute budget.
+**Baseline measured 2026-05-31** (pre-broadening filter, 20 most-recent
+runs via `gh run list --workflow=dogfood-smoke`):
+
+- Success rate: 20/20 = **100%** (flake rate 0%)
+- Duration: avg **34 s**, min 25 s, max 52 s
+- Window: 2026-05-21 → 2026-05-30 (~10 days, all pushes to `main`)
+
+Post-broadening comparison point (re-measure 2026-06-14):
+- If avg duration stays under 60 s AND success rate stays ≥ 95% →
+  broadening is healthy; no further action.
+- If avg duration > 60 s (smoke test acquired new heavy work via the
+  broader paths) → profile the workflow; either trim the heavy step
+  or split into `dogfood-smoke-fast` + `dogfood-smoke-slow`.
+- If success rate < 95% (new flake surface from `cmd/mcp-ctl/**`,
+  `vscode/**`, `tools/**`, `pkg/**`) → fix the flake, do NOT narrow
+  the filter back (the point of broadening was to expose these
+  regressions).
 
 ## Documentation actualization (2026-05-29 — code-grounded)
 
