@@ -1,6 +1,26 @@
 # MCP Gateway — Roadmap
 
-<!-- last-summary: 2026-05-29 -->
+<!-- last-summary: 2026-05-31 -->
+
+## Cross-product follow-up — hollow-ship-cleanup M-08 (2026-05-31)
+
+Closed cross-product finding M-08 from the claude-team-control hollow-ship
+audit (`claude-team-control/docs/REVIEW-hollow-ship-audit-2026-05-24.md`):
+the `.github/workflows/dogfood-smoke.yml` `paths:` filter was too narrow,
+missing PRs that touch `cmd/mcp-ctl/**` (MCPR.3 admin-token wiring),
+`vscode/**` (dashboard extension daemon-spawn glue), `tools/**` (helper
+scripts shipping with the package), and `pkg/**` (shared go modules).
+
+Action: broadened the filter to include those four paths under both
+`pull_request` and `push` triggers. Decision was BROADEN (not REMOVE) —
+doc-only PRs (README, `docs/**`, `*.md`) and PRs touching only test
+files outside the listed directories still correctly skip the smoke
+test, keeping CI minute burn in check. Inline comment in the workflow
+file documents the rationale + the 2026-05-31 change date.
+
+Operator follow-up (T5.1 in CTC plan): measure dogfood-smoke baseline
+runtime + flake rate over the first 14 days of the new filter to confirm
+the trigger-rate inflation stays within acceptable CI-minute budget.
 
 ## Documentation actualization (2026-05-29 — code-grounded)
 

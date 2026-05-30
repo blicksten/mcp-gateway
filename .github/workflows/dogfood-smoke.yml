@@ -16,19 +16,39 @@
 
 name: dogfood-smoke
 
+# hollow-ship-cleanup M-08 (2026-05-31): broadened the paths filter to add
+# cmd/mcp-ctl/**, vscode/**, tools/**, pkg/** so PRs touching the CLI,
+# the dashboard extension, helper tooling, or shared packages also trigger
+# the smoke test. Pre-2026-05-31 only configs/ci-dogfood.json + cmd/
+# mcp-gateway/** + internal/** + this file would trigger; that missed
+# regressions from cmd/mcp-ctl (MCPR.3 admin-token wiring), vscode (the
+# extension's daemon-spawn glue), tools/ (helper scripts that ship with
+# the package), and pkg/ (shared go modules consumed by both daemon and
+# CLI). Decision: BROADEN (not REMOVE) the filter — doc-only PRs (README,
+# docs/**, *.md) and PRs touching only test files outside the listed
+# directories still correctly skip the smoke test, keeping CI minute
+# burn in check.
 on:
   pull_request:
     paths:
       - 'configs/ci-dogfood.json'
       - 'cmd/mcp-gateway/**'
+      - 'cmd/mcp-ctl/**'
       - 'internal/**'
+      - 'pkg/**'
+      - 'tools/**'
+      - 'vscode/**'
       - '.github/workflows/dogfood-smoke.yml'
   push:
     branches: [main]
     paths:
       - 'configs/ci-dogfood.json'
       - 'cmd/mcp-gateway/**'
+      - 'cmd/mcp-ctl/**'
       - 'internal/**'
+      - 'pkg/**'
+      - 'tools/**'
+      - 'vscode/**'
       - '.github/workflows/dogfood-smoke.yml'
 
 jobs:
