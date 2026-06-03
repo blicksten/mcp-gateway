@@ -58,6 +58,8 @@ tbody tr { content-visibility: auto; contain-intrinsic-size: auto 32px; }
 tbody td { padding: 4px 8px; border-bottom: 1px solid var(--vscode-panel-border); font-size: 0.9em; vertical-align: middle; }
 tbody tr.kpmissing { color: var(--vscode-descriptionForeground); }
 tbody tr.kpmissing td.cred { color: var(--vscode-editorWarning-foreground); }
+tbody tr.registered { background: var(--vscode-list-inactiveSelectionBackground); }
+tbody tr.registered td:first-child { box-shadow: inset 2px 0 0 0 var(--vscode-testing-iconPassed); }
 .checkbox-cell { white-space: nowrap; }
 .checkbox-cell input[type="checkbox"]:disabled + .disabled-mark { display: inline-block; }
 .disabled-mark { display: none; color: var(--vscode-descriptionForeground); margin-left: 2px; }
@@ -189,9 +191,29 @@ function buildStatusBadge(status) {
   return span;
 }
 
+function buildLiveStatusBadge(live) {
+  // Bug 2: badge for an already-registered system derived from the live
+  // daemon status, reusing the existing row-status CSS classes.
+  let label, cls;
+  if (live === 'running') { label = 'running'; cls = 'config_added_running'; }
+  else if (live === 'error') { label = 'error'; cls = 'config_added_start_failed'; }
+  else { label = 'added'; cls = 'config_added'; }
+  const span = document.createElement('span');
+  span.className = 'row-status ' + cls;
+  span.textContent = label;
+  return span;
+}
+
 function buildRow(row) {
   const tr = document.createElement('tr');
   if (row.kpMissing) { tr.className = 'kpmissing'; }
+  // Bug 2 / R-01: highlight already-registered rows, but drop the accent once a
+  // component was removed in-session so a "removed" row doesn't keep the green
+  // bar until the next Refresh (snapshot.registered stays stale until then).
+  else if ((row.registered.vsp || row.registered.gui)
+           && row.vspStatus !== 'removed' && row.guiStatus !== 'removed') {
+    tr.className = 'registered';
+  }
   tr.dataset.rowKey = row.key;
 
   // SID
@@ -253,7 +275,18 @@ function buildComponentCell(row, component) {
 
   const status = component === 'vsp' ? row.vspStatus : row.guiStatus;
   const error = component === 'vsp' ? row.vspError : row.guiError;
-  const badge = buildStatusBadge(status);
+  let badge = buildStatusBadge(status);
+  // Bug 2: when there is no in-session lifecycle activity (idle) but the
+  // component is already registered in the daemon, fall back to the live
+  // cache status so already-added systems are visibly marked, not just
+  // pre-checked via the checkbox.
+  if (!badge && status === 'idle') {
+    const reg = component === 'vsp' ? row.registered.vsp : row.registered.gui;
+    if (reg) {
+      const live = component === 'vsp' ? row.status.vsp : row.status.gui;
+      badge = buildLiveStatusBadge(live);
+    }
+  }
   if (badge) { td.appendChild(badge); }
   if (error) {
     const err = document.createElement('div');

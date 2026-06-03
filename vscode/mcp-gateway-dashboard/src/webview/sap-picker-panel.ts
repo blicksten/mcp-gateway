@@ -992,14 +992,20 @@ export class SapPickerPanel {
 				await this.client.addServer(op.serverName, enrichedConfig);
 				this.applyEvent({ kind: 'add_ok', rowKey: op.rowKey, component: op.component });
 				// Poll /health to see whether the new entry transitions to running
-				// or fails to start. 5 s deadline matches spike §3.4 acceptance.
-				const started = await this.pollServerRunning(op.serverName, 5_000);
+				// or fails to start. The config IS already in the daemon at this
+				// point (addServer succeeded) — this poll only annotates the start
+				// outcome. SAP login (vsp.exe / sap-gui-server) routinely takes
+				// >5 s, so the old 5 s deadline produced false "start failed"
+				// badges for systems that were in fact added and came up a few
+				// seconds later (operator report 2026-06-03). 30 s gives SAP logon
+				// enough headroom.
+				const started = await this.pollServerRunning(op.serverName, 30_000);
 				if (started === 'running') {
 					this.applyEvent({ kind: 'add_started', rowKey: op.rowKey, component: op.component });
 				} else {
 					const err = started === 'error'
 						? 'Server reported error after start'
-						: 'Server did not transition to running within 5s';
+						: 'Server did not transition to running within 30s';
 					this.applyEvent({
 						kind: 'add_start_failed', rowKey: op.rowKey, component: op.component, error: err,
 					});
