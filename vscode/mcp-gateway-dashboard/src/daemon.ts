@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import * as net from 'node:net';
 import * as vscode from 'vscode';
 import type { IGatewayClient } from './extension';
 import { GatewayError } from './gateway-client';
@@ -7,6 +8,25 @@ import type { DaemonLogFile } from './daemon-log-file';
 
 /** Spawn function signature — matches child_process.spawn subset used here. */
 export type SpawnFn = (cmd: string, args: string[], opts: SpawnOptions) => ChildProcess;
+
+/**
+ * Default TCP probe implementation: attempts net.connect to host:port.
+ * Returns true when a connection is accepted, false on error or timeout.
+ * ALWAYS destroys the socket — no socket leak regardless of outcome.
+ */
+function defaultTcpProbe(host: string, port: number, timeoutMs: number): Promise<boolean> {
+	return new Promise<boolean>((resolve) => {
+		const socket = net.connect({ host, port });
+		const cleanup = (result: boolean): void => {
+			socket.removeAllListeners();
+			socket.destroy();
+			resolve(result);
+		};
+		const timer = setTimeout(() => cleanup(false), timeoutMs);
+		socket.once('connect', () => { clearTimeout(timer); cleanup(true); });
+		socket.once('error', () => { clearTimeout(timer); cleanup(false); });
+	});
+}
 
 /** Configuration for the crash-recovery supervisor built into DaemonManager. */
 export interface CrashRestartConfig {
@@ -23,6 +43,13 @@ export interface CrashRestartConfig {
 	/** Minimum uptime (ms) for a run to be considered stable; resets crash counter. Default 60_000ms. */
 	stableThresholdMs?: number;
 }
+
+/**
+ * TCP probe signature — injectable for tests.
+ * Returns true when the port accepts a connection, false when closed/timed-out.
+ * MUST always destroy the socket regardless of outcome (no socket leak).
+ */
+export type TcpProbeFn = (host: string, port: number, timeoutMs: number) => Promise<boolean>;
 
 /** Options for DaemonManager constructor — all optional for backward compatibility. */
 export interface DaemonManagerOptions {
@@ -44,6 +71,34 @@ export interface DaemonManagerOptions {
 	 *  2500 here; that paid 2.5s of unproductive wait in ~40 tests that
 	 *  forgot to override, bloating the suite from <1m to ~4m. */
 	raceDetectDelayMs?: number;
+	/**
+	 * Injectable TCP probe for tests. Default: real net.connect implementation.
+	 * FIX 1: used to discriminate a timed-out /health from a dead port —
+	 * prevents misclassifying a dead daemon as alive when TCP times out
+	 * on a filtered/closed port (common on Windows).
+	 */
+	tcpProbe?: TcpProbeFn;
+	/** Timeout for TCP probe in ms. Default: use tcpProbeTimeoutMs option. */
+	tcpProbeTimeoutMs?: number;
+	/**
+	 * How many consecutive poll failures trigger a respawn attempt (FIX 2).
+	 * Default 3. Production sets from mcpGateway.respawnAfterFailedPolls.
+	 */
+	respawnAfterFailedPolls?: number;
+	/**
+	 * Grace period in ms after a spawn during which poll failures do NOT
+	 * trigger a respawn (cold-start grace, FIX 2). Default 10000.
+	 * Production sets from mcpGateway.respawnColdStartGraceMs.
+	 */
+	respawnColdStartGraceMs?: number;
+	/**
+	 * When > 0, enables the EADDRINUSE heuristic (FIX 2 hygiene): an exit with
+	 * code=1, no signal, and aliveMs < addrinuseGraceMs is treated as a
+	 * potential spawn-race loss and confirmed via /health before counting as a
+	 * crash. Default 0 (disabled) to preserve synchronous crash handling in
+	 * tests that don't opt in. Production sets to 1500.
+	 */
+	addrinuseGraceMs?: number;
 }
 
 /**
@@ -84,6 +139,15 @@ export class DaemonManager {
 	private readonly _clearTimeout: (h: ReturnType<typeof setTimeout>) => void;
 	private readonly _random: () => number;
 	private readonly raceDetectDelayMs: number;
+	// FIX 1: TCP probe — injectable for tests, defaults to real net.connect.
+	private readonly _tcpProbe: TcpProbeFn;
+	private readonly tcpProbeTimeoutMs: number;
+	// FIX 2: poll-driven respawn fields
+	private readonly respawnAfterFailedPolls: number;
+	private readonly respawnColdStartGraceMs: number;
+	private consecutivePollFailures = 0;
+	// FIX 2 hygiene: EADDRINUSE heuristic grace window (0 = disabled, test-safe default)
+	private readonly addrinuseGraceMs: number;
 
 	// Supervisor runtime state
 	private spawnedAt: number | undefined;
@@ -120,6 +184,14 @@ export class DaemonManager {
 		// Default 0 (test-friendly fast path). Production MUST pass 2500
 		// explicitly — see options.raceDetectDelayMs docstring above.
 		this.raceDetectDelayMs = options?.raceDetectDelayMs ?? 0;
+		// FIX 1: TCP probe — real net.connect implementation with socket leak guard.
+		this._tcpProbe = options?.tcpProbe ?? defaultTcpProbe;
+		this.tcpProbeTimeoutMs = options?.tcpProbeTimeoutMs ?? 400;
+		// FIX 2: poll-driven respawn thresholds.
+		this.respawnAfterFailedPolls = options?.respawnAfterFailedPolls ?? 3;
+		this.respawnColdStartGraceMs = options?.respawnColdStartGraceMs ?? 10_000;
+		// FIX 2 hygiene: 0 = disabled (test-safe). Production passes 1500.
+		this.addrinuseGraceMs = options?.addrinuseGraceMs ?? 0;
 	}
 
 	/** Number of quick crashes tracked in the current rolling window. */
@@ -170,26 +242,34 @@ export class DaemonManager {
 					logger.info('daemon', 'Gateway already running — skipping spawn.');
 					return false;
 				} catch (e) {
-					// FM 8 (spike 2026-05-11): only non-connection GatewayError kinds
-					// (timeout/auth/parse/http) indicate the daemon is alive-but-slow
-					// (under FM 7 load). A blanket catch was causing PID-collision crashes
-					// when two windows raced to spawn after parallel slow probes.
-					// Non-GatewayError throws (e.g. plain Error from tests, unexpected
-					// throws) fall through to the re-probe path below — only after the
-					// re-probe also fails with non-skip semantics do we proceed to spawn.
-					if (e instanceof GatewayError && e.kind !== 'connection') {
-						logger.warn('daemon', `getHealth pre-spawn failed (kind=${e.kind}) — assuming gateway is alive, skipping spawn`, e);
+					// FM 8 (spike 2026-05-11): discriminate error kinds before deciding to spawn.
+					//
+					// FIX 1: HTTP /health is the SOLE authority for liveness. TCP open/closed
+					// is only a fast negative pre-filter (it can never prove liveness on its own
+					// because a dead daemon can hold an open socket on Windows via TIME_WAIT).
+					//
+					// auth/parse/http kinds prove the app is serving → skip spawn immediately.
+					// connection kind → daemon refused connection → fall through to re-probe.
+					// timeout kind (and any non-GatewayError) → ambiguous. Use TCP probe to
+					// distinguish "port closed = dead daemon" from "port open but /health slow".
+					if (e instanceof GatewayError && (e.kind === 'auth' || e.kind === 'parse' || e.kind === 'http')) {
+						logger.warn('daemon', `getHealth pre-spawn failed (kind=${e.kind}) — daemon is serving, skipping spawn`, e);
 						return false;
 					}
-					// Belt-and-suspenders re-probe with a delay so that a concurrent
-					// window that won the spawn race has time to bind the port and
-					// start serving before we check again. Without the delay all
-					// windows do the re-probe in the same millisecond window,
-					// see "still down", and all spawn — causing port-bind crashes
-					// (exit code 1) and a visible offline blip on every window reload.
+					if (e instanceof GatewayError && e.kind === 'timeout') {
+						// Timeout is ambiguous: on Windows a connect to a dead/filtered port can
+						// time out rather than fast-RST. Use TCP probe to disambiguate.
+						const skipSpawn = await this._resolveTimeoutKind(e, 'pre-spawn');
+						if (skipSpawn !== null) { return skipSpawn; }
+						// TCP probe returned null → treat as connection failure, fall through to re-probe.
+					}
+					// Belt-and-suspenders re-probe with jittered delay so concurrent windows
+					// don't collide. Jitter: raceDetectDelayMs * (0.5 + random) so different
+					// windows re-probe at slightly different moments.
 					if (this.disposed) { return false; }
-					if (this.raceDetectDelayMs > 0) {
-						await new Promise(resolve => setTimeout(resolve, this.raceDetectDelayMs));
+					const jitteredDelay = Math.round(this.raceDetectDelayMs * (0.5 + this._random()));
+					if (jitteredDelay > 0) {
+						await new Promise(resolve => setTimeout(resolve, jitteredDelay));
 					}
 					if (this.disposed) { return false; }
 					try {
@@ -197,11 +277,15 @@ export class DaemonManager {
 						logger.info('daemon', 'Gateway reachable on re-probe — skipping spawn.');
 						return false;
 					} catch (e2) {
-						if (e2 instanceof GatewayError && e2.kind !== 'connection') {
-							logger.warn('daemon', `getHealth re-probe failed (kind=${e2.kind}) — assuming gateway is alive, skipping spawn`, e2);
+						if (e2 instanceof GatewayError && (e2.kind === 'auth' || e2.kind === 'parse' || e2.kind === 'http')) {
+							logger.warn('daemon', `getHealth re-probe failed (kind=${e2.kind}) — daemon is serving, skipping spawn`, e2);
 							return false;
 						}
-						// Both probes failed with connection error — daemon is genuinely down. Proceed to spawn.
+						if (e2 instanceof GatewayError && e2.kind === 'timeout') {
+							const skipSpawn = await this._resolveTimeoutKind(e2, 're-probe');
+							if (skipSpawn !== null) { return skipSpawn; }
+						}
+						// Both probes failed — daemon is genuinely down. Proceed to spawn.
 					}
 				}
 			}
@@ -470,6 +554,41 @@ export class DaemonManager {
 		const wasGracefulZero = code === 0 && signal === null;
 		if (wasGracefulZero) { return; }
 
+		// FIX 2 hygiene: EADDRINUSE heuristic. A spawn-race loser exits quickly
+		// with code 1 and no signal. Confirm via /health: if the port now answers,
+		// the winner already bound it — this is NOT a real crash; do not count it.
+		// Only active when addrinuseGraceMs > 0 (production sets 1500; tests that
+		// do not pass the option use the synchronous path to preserve test semantics).
+		if (this.addrinuseGraceMs > 0 && code === 1 && signal === null && aliveMs < this.addrinuseGraceMs) {
+			void this._handlePotentialAddrinuse(aliveMs);
+			return;
+		}
+
+		this.recordCrashAndSchedule(aliveMs);
+	}
+
+	/**
+	 * FIX 2 hygiene: async confirmation for the EADDRINUSE heuristic.
+	 * Probes /health: if alive → race-loser (not a crash, don't count).
+	 * If still dead → genuine early-exit, count as crash.
+	 */
+	private async _handlePotentialAddrinuse(aliveMs: number): Promise<void> {
+		try {
+			await this.client.getHealth();
+			// /health resolved — a winner bound the port. This exit was a race-loser.
+			logger.info('daemon', 'Quick exit (code 1, aliveMs<1500) confirmed as spawn-race loss — not counted as crash');
+		} catch {
+			// /health rejected — genuine early failure. Count as crash.
+			this.recordCrashAndSchedule(aliveMs);
+		}
+	}
+
+	/**
+	 * Record a crash timestamp and schedule the next restart attempt.
+	 * Extracted from handleExit so both the normal path and the EADDRINUSE-
+	 * confirmed-down path can reuse it.
+	 */
+	private recordCrashAndSchedule(aliveMs: number): void {
 		// Reset crash counter if the previous run was stable long enough.
 		if (aliveMs >= this.cfg.stableThresholdMs) {
 			this.crashTimestamps = [];
@@ -528,6 +647,98 @@ export class DaemonManager {
 			this._clearTimeout(this.restartTimer);
 			this.restartTimer = undefined;
 		}
+	}
+
+	/**
+	 * FIX 1 helper: resolve ambiguous /health timeout by TCP-probing the port.
+	 *
+	 * Returns a value suitable for direct `return` from `start()` (true="spawned",
+	 * false="skipped spawn"), or null to signal "fall through to re-probe / spawn":
+	 *
+	 *   null  — TCP port is closed → daemon is dead; caller falls through to spawn.
+	 *   false — TCP port is open AND /health succeeded → daemon alive; skip spawn
+	 *           (start() returns false = "did not spawn this call").
+	 *   false — TCP port is open but /health still fails ("dead-but-bound") →
+	 *           another process holds the port; skip spawn, defer to watchdog.
+	 */
+	private async _resolveTimeoutKind(
+		_originalErr: GatewayError,
+		probeLabel: string,
+	): Promise<boolean | null> {
+		// Default to the well-known production address. Tests override via tcpProbe injectable.
+		const host = '127.0.0.1';
+		const port = 8765;
+		const portOpen = await this._tcpProbe(host, port, this.tcpProbeTimeoutMs);
+		if (!portOpen) {
+			// Port is closed — daemon is definitely dead. Fall through to re-probe / spawn.
+			logger.info('daemon', `getHealth ${probeLabel} timed out AND TCP port ${port} is closed — daemon is dead, proceeding to spawn`);
+			return null; // signal: fall through
+		}
+		// Port is open — daemon process is bound. Try one more /health call.
+		try {
+			await this.client.getHealth();
+			logger.info('daemon', `getHealth ${probeLabel} timed out but TCP open and /health recovered — daemon is alive, skipping spawn`);
+			return false; // skip spawn: start() returns false ("did not spawn")
+		} catch {
+			// Port open but /health still fails — "dead-but-bound": hung daemon or another
+			// process holds the port. We cannot bind; external watchdog must handle this.
+			logger.warn('daemon', `daemon bound but /health unresponsive — deferring to out-of-band recovery`);
+			return false; // skip spawn (we cannot bind an occupied port)
+		}
+	}
+
+	/**
+	 * FIX 2: poll-loop-driven respawn trigger.
+	 *
+	 * Called from the cache.onDidRefresh handler in extension.ts on every poll cycle.
+	 * Accumulates consecutive failures and triggers a respawn when the threshold is
+	 * reached — independent of the child exit handler, so a singleton daemon that
+	 * was not spawned by this window is still recovered.
+	 *
+	 * Guards: does NOT respawn during cold-start grace, while child/starting/restarting/
+	 * stopping/expectedExit flags are set, or when supervisorActive is false.
+	 * Uses tcpProbe to avoid racing another window that already won the respawn.
+	 */
+	async considerRespawnFromPoll(reachable: boolean): Promise<void> {
+		if (reachable) {
+			this.consecutivePollFailures = 0;
+			return;
+		}
+		this.consecutivePollFailures++;
+		if (this.consecutivePollFailures < this.respawnAfterFailedPolls) { return; }
+
+		// Check all guards.
+		if (
+			!this.autoRestartOnCrash ||
+			this.supervisorAborted ||
+			this.disposed ||
+			this.child !== undefined ||
+			this.starting ||
+			this.restarting ||
+			this.stopping ||
+			this.expectedExit
+		) {
+			return;
+		}
+
+		// Cold-start grace: if we spawned recently, the daemon's /health may not be up yet.
+		// Do not respawn or we enter an infinite restart loop.
+		if (this.spawnedAt !== undefined && Date.now() - this.spawnedAt < this.respawnColdStartGraceMs) {
+			return;
+		}
+
+		// TCP probe: if port is open, another window already won the respawn race.
+		const portOpen = await this._tcpProbe('127.0.0.1', 8765, this.tcpProbeTimeoutMs);
+		if (portOpen) {
+			// Another window respawned the daemon. Reset counter and let that window own it.
+			logger.info('daemon', 'poll-respawn: port open — another window respawned daemon, resetting counter');
+			this.consecutivePollFailures = 0;
+			return;
+		}
+
+		logger.info('daemon', `poll-respawn: ${this.consecutivePollFailures} consecutive failures, port closed — triggering respawn`);
+		this.consecutivePollFailures = 0;
+		await this.start().catch(err => logger.error('daemon', 'poll-respawn spawn failed', err));
 	}
 
 	/**

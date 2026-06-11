@@ -388,6 +388,13 @@ export function activate(
 			context.subscriptions.push({ dispose: () => fileLogger!.dispose() });
 		}
 
+		const tcpProbeTimeoutMs = vscode.workspace.getConfiguration('mcpGateway')
+			.get<number>('tcpProbeTimeoutMs', 400);
+		const respawnAfterFailedPolls = vscode.workspace.getConfiguration('mcpGateway')
+			.get<number>('respawnAfterFailedPolls', 3);
+		const respawnColdStartGraceMs = vscode.workspace.getConfiguration('mcpGateway')
+			.get<number>('respawnColdStartGraceMs', 10_000);
+
 		daemon = new DaemonManager(client, daemonPath, undefined, undefined, {
 			fileLogger,
 			autoRestartOnCrash,
@@ -395,6 +402,12 @@ export function activate(
 			// was the daemon.ts default; flipped to test-friendly 0 to fix test
 			// suite bloat. See docs/spikes/2026-05-29-test-runtime-bloat.md.
 			raceDetectDelayMs: 2500,
+			tcpProbeTimeoutMs,
+			respawnAfterFailedPolls,
+			respawnColdStartGraceMs,
+			// FIX 2 hygiene: enable EADDRINUSE async heuristic in production.
+			// Tests that do not pass this option use synchronous crash handling.
+			addrinuseGraceMs: 1500,
 		});
 	}
 	context.subscriptions.push(daemon);
@@ -511,9 +524,25 @@ export function activate(
 		daemon.start().catch(() => { /* logged by DaemonManager */ });
 	}
 
+	// FIX 2: wire poll-driven respawn. On each cache refresh, notify the daemon
+	// manager so it can respawn a dead singleton even when no child exit event fired.
+	// Only active when both autoStart and autoRestartOnCrash are enabled.
+	const autoRestartEnabled = !injectedDaemon && vscode.workspace.getConfiguration('mcpGateway')
+		.get<boolean>('autoRestartOnCrash', true);
+	if (!injectedDaemon && autoStart && autoRestartEnabled) {
+		context.subscriptions.push(cache.onDidRefresh((payload) => {
+			void daemon.considerRespawnFromPoll(!payload.lastRefreshFailed);
+		}));
+	}
+
 	// Phase 2.5: status bar — aggregate MCP N/M indicator.
 	// Phase 11.B: driven by ServerDataCache.onDidRefresh (no independent polling).
-	const statusBar = new McpStatusBar(cache);
+	// FIX 3: pass heartbeat settings so the bar renders "unknown" when polling stalls.
+	const statusHeartbeatMultiplier = vscode.workspace.getConfiguration('mcpGateway')
+		.get<number>('statusHeartbeatMultiplier', 3);
+	const statusBar = new McpStatusBar(cache, undefined, undefined, {
+		heartbeatMs: pollInterval * statusHeartbeatMultiplier,
+	});
 	context.subscriptions.push(statusBar);
 
 	// Phase 8.3: SAP status bar. Gated on the same setting as the SAP view so

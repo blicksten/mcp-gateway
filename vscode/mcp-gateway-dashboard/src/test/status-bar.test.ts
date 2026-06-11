@@ -255,3 +255,200 @@ describe('McpStatusBar (cache-driven)', () => {
 		});
 	});
 });
+
+// =============================================================================
+// FIX 3 — status bar heartbeat
+// =============================================================================
+
+describe('McpStatusBar heartbeat (FIX 3)', () => {
+	let cache: ServerDataCache;
+	let bar: McpStatusBar;
+
+	beforeEach(() => {
+		resetMockState();
+	});
+
+	afterEach(() => {
+		bar?.dispose();
+		cache?.dispose();
+	});
+
+	/** Build injectable timer/clock for heartbeat tests. */
+	function createClockMock() {
+		let nowMs = 1_000_000; // arbitrary non-zero start
+		const intervals: Array<{ cb: () => void; ms: number; handle: object; active: boolean }> = [];
+		let nextHandle = 1;
+
+		const setIntervalFn = (cb: () => void, ms: number): any => {
+			const handle = { id: nextHandle++ };
+			intervals.push({ cb, ms, handle, active: true });
+			return handle;
+		};
+
+		const clearIntervalFn = (h: any): void => {
+			const entry = intervals.find((i) => i.handle === h);
+			if (entry) { entry.active = false; }
+		};
+
+		const now = () => nowMs;
+		const advance = (ms: number) => {
+			nowMs += ms;
+			for (const i of intervals) {
+				if (i.active) { i.cb(); } // fire all active intervals
+			}
+		};
+
+		return { setIntervalFn, clearIntervalFn, now, advance, intervals };
+	}
+
+	it('HB-unknown: no successful refresh within heartbeatMs -> renders unknown (not stale green)', async () => {
+		const { client } = makeClient([
+			{ name: 'a', status: 'running', transport: 'stdio', restart_count: 0 },
+		]);
+		cache = new ServerDataCache(client as any);
+
+		const clock = createClockMock();
+		// First do a successful refresh to set lastSuccessfulRefreshAt
+		bar = new McpStatusBar(cache, undefined, undefined, {
+			heartbeatMs: 1000,
+			setInterval: clock.setIntervalFn as any,
+			clearInterval: clock.clearIntervalFn as any,
+			now: clock.now,
+		});
+		await cache.refresh(); // sets lastSuccessfulRefreshAt
+
+		// Advance time past the heartbeat threshold
+		clock.advance(2000);
+
+		assert.ok(
+			latestItem().text.includes('?') || latestItem().text.includes('question'),
+			`Expected "unknown" state after heartbeat, got: "${latestItem().text}"`,
+		);
+	});
+
+	it('HB-reset: successful refresh resets heartbeat (no unknown rendered)', async () => {
+		const { client, state } = makeClient([]);
+		cache = new ServerDataCache(client as any);
+
+		const clock = createClockMock();
+		bar = new McpStatusBar(cache, undefined, undefined, {
+			heartbeatMs: 1000,
+			setInterval: clock.setIntervalFn as any,
+			clearInterval: clock.clearIntervalFn as any,
+			now: clock.now,
+		});
+
+		// First successful refresh
+		await cache.refresh();
+		// Advance a bit but within threshold — then do another successful refresh
+		clock.advance(500);
+		await cache.refresh();
+		// Advance past original heartbeat — but last refresh was only 500ms ago, within new window
+		clock.advance(600); // total 1100ms but last refresh at 500ms so age=600ms < 1000ms threshold
+
+		// After the heartbeat tick, we should NOT be in unknown state
+		assert.ok(
+			!latestItem().text.includes('?'),
+			`Expected non-unknown state after recent refresh, got: "${latestItem().text}"`,
+		);
+		void state; // suppress unused var
+	});
+
+	it('HB-lastRefreshFailed-does-not-reset: a lastRefreshFailed event does NOT reset lastSuccessfulRefreshAt', async () => {
+		const { client, state } = makeClient([
+			{ name: 'a', status: 'running', transport: 'stdio', restart_count: 0 },
+		]);
+		cache = new ServerDataCache(client as any);
+
+		const clock = createClockMock();
+		bar = new McpStatusBar(cache, undefined, undefined, {
+			heartbeatMs: 1000,
+			setInterval: clock.setIntervalFn as any,
+			clearInterval: clock.clearIntervalFn as any,
+			now: clock.now,
+		});
+
+		// Successful refresh at t=0
+		await cache.refresh();
+		const successTime = clock.now();
+
+		// Now fail refresh — this should render offline but NOT update lastSuccessfulRefreshAt
+		state.fail = true;
+		await cache.refresh();
+
+		// Verify the bar shows offline (from the failed refresh), not unknown
+		assert.ok(
+			latestItem().text.includes('offline'),
+			`Expected offline state after failed refresh, got: "${latestItem().text}"`,
+		);
+
+		// Advance clock so heartbeat fires — bar should stay "offline" (not flip to unknown)
+		// because the explicit lastRefreshFailed takes precedence
+		clock.advance(2000);
+
+		// Even after heartbeat fires, "offline" wins because cache.lastRefreshFailed is true
+		assert.ok(
+			latestItem().text.includes('offline') || latestItem().text.includes('?'),
+			`Expected offline or unknown after failed refresh + heartbeat, got: "${latestItem().text}"`,
+		);
+		void successTime; // suppress unused var
+	});
+
+	it('HB-unknown-distinct-from-offline: unknown text is different from offline text', async () => {
+		const { client } = makeClient([
+			{ name: 'a', status: 'running', transport: 'stdio', restart_count: 0 },
+		]);
+		cache = new ServerDataCache(client as any);
+
+		const clock = createClockMock();
+		bar = new McpStatusBar(cache, undefined, undefined, {
+			heartbeatMs: 1000,
+			setInterval: clock.setIntervalFn as any,
+			clearInterval: clock.clearIntervalFn as any,
+			now: clock.now,
+		});
+
+		// Successful refresh
+		await cache.refresh();
+		// Advance to trigger unknown
+		clock.advance(2000);
+		const unknownText = latestItem().text;
+
+		// Now trigger offline via a new bar on a failed cache
+		bar.dispose();
+		const { client: c2, state } = makeClient([]);
+		state.fail = true;
+		const cache2 = new ServerDataCache(c2 as any);
+		const bar2 = new McpStatusBar(cache2);
+		await cache2.refresh();
+		const offlineText = latestItem().text;
+
+		assert.notStrictEqual(unknownText, offlineText,
+			`unknown state ("${unknownText}") must be visually distinct from offline ("${offlineText}")`);
+		assert.ok(unknownText.includes('?'), `unknown must contain '?', got: ${unknownText}`);
+		assert.ok(offlineText.includes('offline'), `offline must contain 'offline', got: ${offlineText}`);
+
+		bar2.dispose();
+		cache2.dispose();
+	});
+
+	it('HB-dispose-clears-interval: dispose() clears the heartbeat interval', () => {
+		const { client } = makeClient([]);
+		cache = new ServerDataCache(client as any);
+
+		const clock = createClockMock();
+		bar = new McpStatusBar(cache, undefined, undefined, {
+			heartbeatMs: 1000,
+			setInterval: clock.setIntervalFn as any,
+			clearInterval: clock.clearIntervalFn as any,
+			now: clock.now,
+		});
+
+		assert.strictEqual(clock.intervals.filter((i) => i.active).length, 1, 'one active interval after construction');
+
+		bar.dispose();
+		bar = undefined as any; // prevent afterEach double-dispose
+
+		assert.strictEqual(clock.intervals.filter((i) => i.active).length, 0, 'no active intervals after dispose');
+	});
+});

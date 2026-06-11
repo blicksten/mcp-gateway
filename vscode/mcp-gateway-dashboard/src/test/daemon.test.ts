@@ -1843,12 +1843,11 @@ describe('DaemonManager supervisor', () => {
 	// (spike 2026-05-11: blanket catch replaced with GatewayError.kind check)
 	// ---------------------------------------------------------------------------
 
-	// FM 8a — GatewayError(timeout) means daemon is alive-but-slow → skip spawn
+	// FM 8a — GatewayError(timeout) + TCP port OPEN → skip spawn (dead-but-bound)
+	// FIX 1 update: timeout alone is now ambiguous. TCP probe discriminates.
+	// When the port IS open (another process bound it), we skip spawn even if
+	// /health keeps timing out — we cannot bind an occupied port.
 	it('FM 8a: GatewayError(timeout) does NOT spawn (daemon assumed alive-but-slow)', async () => {
-		// Pre-fix: blanket catch treated ALL errors as "offline → spawn".
-		// Fix: only GatewayError(connection) triggers spawn; timeout/auth/parse/http
-		// indicate the daemon is alive (just slow or rejecting). Spawning a second
-		// daemon on the same port causes a PID-collision crash.
 		let spawnCount = 0;
 		let healthCalls = 0;
 		const timeoutClient: IGatewayClient = {
@@ -1856,7 +1855,7 @@ describe('DaemonManager supervisor', () => {
 				healthCalls++;
 				throw new GatewayError('timeout', 'simulated timeout');
 			},
-			shutdown: async () => { return { status: 'shutting_down' }; },
+			shutdown: async () => ({ status: 'shutting_down' }),
 			listServers: async () => [],
 			getServer: async () => ({}),
 			addServer: async () => ({ status: 'ok' }),
@@ -1868,18 +1867,18 @@ describe('DaemonManager supervisor', () => {
 			listTools: async () => [],
 		};
 
+		// TCP probe returns true (port is open) — another process holds the port.
+		// FIX 1: timeout + TCP open → skip spawn (dead-but-bound heuristic).
 		const mockSpawnLocal: SpawnFn = () => { spawnCount++; return createMockChild(); };
-		const dm = new DaemonManager(timeoutClient, 'mcp-gateway', output as any, mockSpawnLocal);
+		const dm = new DaemonManager(timeoutClient, 'mcp-gateway', output as any, mockSpawnLocal, {
+			tcpProbe: async () => true, // port is open
+		});
 		try {
 			const spawned = await dm.start();
 			assert.strictEqual(spawned, false,
-				'FM 8a regression: must NOT spawn on GatewayError(timeout) — daemon is alive-but-slow');
+				'FM 8a: must NOT spawn when timeout + TCP port is open (dead-but-bound)');
 			assert.strictEqual(spawnCount, 0,
-				'FM 8a regression: spawn function must not be called for timeout errors');
-			// With FM 8 fix: initial probe fires, kind=timeout → skip spawn immediately.
-			// No re-probe needed for non-connection errors.
-			assert.strictEqual(healthCalls, 1,
-				'FM 8a: exactly one health probe (kind=timeout short-circuits, no re-probe)');
+				'FM 8a: spawn function must not be called when port is occupied');
 		} finally {
 			await dm.dispose();
 		}
@@ -2032,6 +2031,656 @@ describe('DaemonManager supervisor', () => {
 
 		// After timer fires, restartTimer is cleared to undefined inside the callback
 		assert.ok(!daemon.pendingRestartScheduled, 'no pending timer after it fired');
+	});
+});
+
+// =============================================================================
+// Group F1 — FIX 1: /health-authoritative liveness (TCP probe discrimination)
+// =============================================================================
+
+describe('FIX 1 — /health-authoritative liveness (TCP probe discrimination)', () => {
+	function createOutput() {
+		return {
+			name: 'MCP Gateway',
+			lines: [] as string[],
+			disposed: false,
+			appendLine(line: string) { this.lines.push(line); },
+			append(text: string) { this.lines.push(text); },
+			clear() { this.lines.length = 0; },
+			show() {},
+			hide() {},
+			dispose() { this.disposed = true; },
+		};
+	}
+
+	function createMockChildLocal(): import('node:child_process').ChildProcess & { killed: boolean } {
+		const child = new EventEmitter() as any;
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.pid = 22222;
+		child.killed = false;
+		child.kill = (signal?: string) => {
+			child.killed = true;
+			child.emit('exit', null, signal ?? 'SIGTERM');
+			return true;
+		};
+		return child;
+	}
+
+	/** Build a client whose getHealth always throws GatewayError(kind). */
+	function makeTimeoutClient(kind: 'timeout' | 'auth' | 'http' | 'connection') {
+		const c: IGatewayClient = {
+			getHealth: async () => { throw new GatewayError(kind, `simulated ${kind}`); },
+			shutdown: async () => ({ status: 'ok' }),
+			listServers: async () => [],
+			getServer: async () => ({}),
+			addServer: async () => ({ status: 'ok' }),
+			removeServer: async () => ({ status: 'ok' }),
+			patchServer: async () => ({ status: 'ok' }),
+			restartServer: async () => ({ status: 'ok' }),
+			resetCircuit: async () => ({ status: 'ok' }),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+		return c;
+	}
+
+	let output: ReturnType<typeof createOutput>;
+	let daemon: DaemonManager | undefined;
+
+	beforeEach(() => {
+		resetMockState();
+		output = createOutput();
+		_setLoggerForTests(output);
+		daemon = undefined;
+	});
+
+	afterEach(async () => {
+		if (daemon) { await daemon.dispose(); }
+	});
+
+	it('F1-timeout-closed: timeout-probe + TCP closed -> spawns (spawnCount===1)', async () => {
+		const mockChild = createMockChildLocal();
+		let spawnCount = 0;
+		const mockSpawnLocal = (() => { spawnCount++; return mockChild; }) as unknown as SpawnFn;
+
+		const tcpProbe = async (_h: string, _p: number, _t: number) => false; // port closed
+
+		daemon = new DaemonManager(
+			makeTimeoutClient('timeout') as any,
+			'mcp-gateway',
+			output as any,
+			mockSpawnLocal,
+			{ tcpProbe },
+		);
+		const result = await daemon.start();
+		assert.strictEqual(spawnCount, 1, 'F1: timeout + TCP closed must spawn');
+		assert.strictEqual(result, true);
+		mockChild.emit('exit', 0, null);
+	});
+
+	it('F1-timeout-open-health-ok: timeout-probe + TCP open + 2nd /health succeeds -> skips (spawnCount===0)', async () => {
+		let spawnCount = 0;
+		const mockSpawnLocal = (() => { spawnCount++; return createMockChildLocal(); }) as unknown as SpawnFn;
+
+		let healthCalls = 0;
+		const c: IGatewayClient = {
+			getHealth: async () => {
+				healthCalls++;
+				if (healthCalls === 1) { throw new GatewayError('timeout', 'simulated timeout'); }
+				// 2nd call (follow-up inside _resolveTimeoutKind) succeeds
+				return { status: 'ok' } as any;
+			},
+			shutdown: async () => ({ status: 'ok' }),
+			listServers: async () => [],
+			getServer: async () => ({}),
+			addServer: async () => ({ status: 'ok' }),
+			removeServer: async () => ({ status: 'ok' }),
+			patchServer: async () => ({ status: 'ok' }),
+			restartServer: async () => ({ status: 'ok' }),
+			resetCircuit: async () => ({ status: 'ok' }),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+
+		const tcpProbe = async (_h: string, _p: number, _t: number) => true; // port open
+
+		daemon = new DaemonManager(c as any, 'mcp-gateway', output as any, mockSpawnLocal, { tcpProbe });
+		const result = await daemon.start();
+		assert.strictEqual(spawnCount, 0, 'F1: timeout + TCP open + /health ok must NOT spawn');
+		assert.strictEqual(result, false);
+	});
+
+	it('F1-timeout-open-health-fail: timeout + TCP open + 2nd /health fails (dead-but-bound) -> skips + logs deferral', async () => {
+		let spawnCount = 0;
+		const mockSpawnLocal = (() => { spawnCount++; return createMockChildLocal(); }) as unknown as SpawnFn;
+
+		// All health calls throw timeout
+		const c = makeTimeoutClient('timeout');
+		const tcpProbe = async (_h: string, _p: number, _t: number) => true; // port open
+
+		daemon = new DaemonManager(c as any, 'mcp-gateway', output as any, mockSpawnLocal, { tcpProbe });
+		const result = await daemon.start();
+		assert.strictEqual(spawnCount, 0, 'F1: dead-but-bound must NOT spawn (cannot bind occupied port)');
+		assert.strictEqual(result, false);
+		assert.ok(
+			output.lines.some((l) => l.includes('deferring to out-of-band recovery')),
+			`Expected deferral warning in output, got: ${output.lines.join('\n')}`,
+		);
+	});
+
+	it('F1-regression-connection-still-spawns: connection-kind still spawns', async () => {
+		const mockChild = createMockChildLocal();
+		let spawnCount = 0;
+		const mockSpawnLocal = (() => { spawnCount++; return mockChild; }) as unknown as SpawnFn;
+
+		daemon = new DaemonManager(
+			makeTimeoutClient('connection') as any,
+			'mcp-gateway',
+			output as any,
+			mockSpawnLocal,
+		);
+		const result = await daemon.start();
+		assert.strictEqual(spawnCount, 1, 'F1 regression: connection-kind must still spawn');
+		assert.strictEqual(result, true);
+		mockChild.emit('exit', 0, null);
+	});
+
+	it('F1-regression-auth-skips: auth-kind still skips spawn', async () => {
+		let spawnCount = 0;
+		const mockSpawnLocal = (() => { spawnCount++; return createMockChildLocal(); }) as unknown as SpawnFn;
+
+		daemon = new DaemonManager(
+			makeTimeoutClient('auth') as any,
+			'mcp-gateway',
+			output as any,
+			mockSpawnLocal,
+		);
+		const result = await daemon.start();
+		assert.strictEqual(spawnCount, 0, 'F1 regression: auth-kind must NOT spawn');
+		assert.strictEqual(result, false);
+	});
+
+	it('F1-regression-http-skips: http-kind still skips spawn', async () => {
+		let spawnCount = 0;
+		const mockSpawnLocal = (() => { spawnCount++; return createMockChildLocal(); }) as unknown as SpawnFn;
+
+		daemon = new DaemonManager(
+			makeTimeoutClient('http') as any,
+			'mcp-gateway',
+			output as any,
+			mockSpawnLocal,
+		);
+		const result = await daemon.start();
+		assert.strictEqual(spawnCount, 0, 'F1 regression: http-kind must NOT spawn');
+		assert.strictEqual(result, false);
+	});
+});
+
+// =============================================================================
+// Group F2 — FIX 2: poll-loop-driven respawn (considerRespawnFromPoll)
+// =============================================================================
+
+describe('FIX 2 — poll-loop-driven respawn (considerRespawnFromPoll)', () => {
+	function createOutput() {
+		return {
+			name: 'MCP Gateway',
+			lines: [] as string[],
+			disposed: false,
+			appendLine(line: string) { this.lines.push(line); },
+			append(text: string) { this.lines.push(text); },
+			clear() { this.lines.length = 0; },
+			show() {},
+			hide() {},
+			dispose() { this.disposed = true; },
+		};
+	}
+
+	function createOfflineClient() {
+		return {
+			online: false as boolean,
+			getHealth: async function(this: { online: boolean }) {
+				if (!this.online) { throw new Error('connection refused'); }
+				return { status: 'ok' };
+			},
+			shutdown: async function(this: { online: boolean }) {
+				if (!this.online) { throw new Error('connection refused'); }
+				return { status: 'shutting_down' };
+			},
+			listServers: async () => [],
+			getServer: async () => ({}),
+			addServer: async () => ({ status: 'ok' }),
+			removeServer: async () => ({ status: 'ok' }),
+			patchServer: async () => ({ status: 'ok' }),
+			restartServer: async () => ({ status: 'ok' }),
+			resetCircuit: async () => ({ status: 'ok' }),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+	}
+
+	let output: ReturnType<typeof createOutput>;
+	let daemon: DaemonManager | undefined;
+
+	beforeEach(() => {
+		resetMockState();
+		output = createOutput();
+		_setLoggerForTests(output);
+		daemon = undefined;
+	});
+
+	afterEach(async () => {
+		if (daemon) { await daemon.dispose(); }
+	});
+
+	it('F2-below-threshold: failures below threshold -> no respawn', async () => {
+		let spawnCount = 0;
+		const c = createOfflineClient();
+		const mockSpawnLocal = (() => { spawnCount++; return createMockChild(); }) as unknown as SpawnFn;
+		const tcpProbe = async () => false;
+
+		daemon = new DaemonManager(c as any, 'mcp-gateway', output as any, mockSpawnLocal, {
+			respawnAfterFailedPolls: 3,
+			respawnColdStartGraceMs: 0,
+			tcpProbe,
+		});
+
+		// Send 2 failures (below threshold of 3)
+		await daemon.considerRespawnFromPoll(false);
+		await daemon.considerRespawnFromPoll(false);
+		await new Promise((r) => setImmediate(r));
+
+		assert.strictEqual(spawnCount, 0, 'F2: below threshold must NOT trigger respawn');
+	});
+
+	it('F2-at-threshold-tcp-closed: at threshold + TCP closed -> respawn (spawnCount===1)', async () => {
+		let spawnCount = 0;
+		const c = createOfflineClient();
+		const mockChild = createMockChild();
+		const mockSpawnLocal = (() => { spawnCount++; return mockChild; }) as unknown as SpawnFn;
+		const tcpProbe = async () => false; // port closed -> respawn
+
+		daemon = new DaemonManager(c as any, 'mcp-gateway', output as any, mockSpawnLocal, {
+			respawnAfterFailedPolls: 3,
+			respawnColdStartGraceMs: 0,
+			tcpProbe,
+		});
+
+		await daemon.considerRespawnFromPoll(false);
+		await daemon.considerRespawnFromPoll(false);
+		await daemon.considerRespawnFromPoll(false); // hits threshold
+		await new Promise((r) => setImmediate(r));
+
+		assert.strictEqual(spawnCount, 1, 'F2: at threshold + TCP closed must trigger respawn');
+		mockChild.emit('exit', 0, null);
+	});
+
+	it('F2-at-threshold-tcp-open: at threshold + TCP open -> no spawn + counter reset', async () => {
+		let spawnCount = 0;
+		const c = createOfflineClient();
+		const mockSpawnLocal = (() => { spawnCount++; return createMockChild(); }) as unknown as SpawnFn;
+		const tcpProbe = async () => true; // port open -> another window owns it
+
+		daemon = new DaemonManager(c as any, 'mcp-gateway', output as any, mockSpawnLocal, {
+			respawnAfterFailedPolls: 3,
+			respawnColdStartGraceMs: 0,
+			tcpProbe,
+		});
+
+		await daemon.considerRespawnFromPoll(false);
+		await daemon.considerRespawnFromPoll(false);
+		await daemon.considerRespawnFromPoll(false); // hits threshold, port open -> no spawn
+
+		assert.strictEqual(spawnCount, 0, 'F2: TCP open must suppress spawn');
+		assert.strictEqual((daemon as any).consecutivePollFailures, 0, 'F2: counter must reset after race-loss detection');
+	});
+
+	it('F2-success-resets-counter: a successful poll resets the counter', async () => {
+		let spawnCount = 0;
+		const c = createOfflineClient();
+		const mockSpawnLocal = (() => { spawnCount++; return createMockChild(); }) as unknown as SpawnFn;
+		const tcpProbe = async () => false;
+
+		daemon = new DaemonManager(c as any, 'mcp-gateway', output as any, mockSpawnLocal, {
+			respawnAfterFailedPolls: 3,
+			respawnColdStartGraceMs: 0,
+			tcpProbe,
+		});
+
+		await daemon.considerRespawnFromPoll(false);
+		await daemon.considerRespawnFromPoll(false);
+		// Success resets counter before threshold
+		await daemon.considerRespawnFromPoll(true);
+		assert.strictEqual((daemon as any).consecutivePollFailures, 0, 'success resets counter');
+
+		// Now 2 more failures — still below threshold
+		await daemon.considerRespawnFromPoll(false);
+		await daemon.considerRespawnFromPoll(false);
+		assert.strictEqual(spawnCount, 0, 'F2: counter reset means threshold not yet reached again');
+	});
+
+	it('F2-cold-start-grace: failures within graceMs of spawnedAt do NOT respawn', async () => {
+		let spawnCount = 0;
+		const c = createOfflineClient();
+		const mockChild = createMockChild();
+		const mockSpawnLocal = (() => { spawnCount++; return mockChild; }) as unknown as SpawnFn;
+		const tcpProbe = async () => false;
+
+		daemon = new DaemonManager(c as any, 'mcp-gateway', output as any, mockSpawnLocal, {
+			respawnAfterFailedPolls: 1, // threshold of 1 so any failure would normally trigger
+			respawnColdStartGraceMs: 60_000, // 60s grace — huge window
+			tcpProbe,
+		});
+
+		// Simulate a recent spawn by setting spawnedAt to "just now"
+		(daemon as any).spawnedAt = Date.now();
+
+		// Now send failures — should be suppressed by grace window
+		await daemon.considerRespawnFromPoll(false);
+		await daemon.considerRespawnFromPoll(false);
+		await daemon.considerRespawnFromPoll(false);
+		await new Promise((r) => setImmediate(r));
+
+		assert.strictEqual(spawnCount, 0, 'F2: cold-start grace must suppress respawn');
+	});
+
+	it('F2-guards-child-owned: respawn suppressed while child is owned', async () => {
+		let spawnCount = 0;
+		const c = createOfflineClient();
+		const mockChild = createMockChild();
+		const mockSpawnLocal = (() => { spawnCount++; return mockChild; }) as unknown as SpawnFn;
+		const tcpProbe = async () => false;
+
+		daemon = new DaemonManager(c as any, 'mcp-gateway', output as any, mockSpawnLocal, {
+			respawnAfterFailedPolls: 1,
+			respawnColdStartGraceMs: 0,
+			tcpProbe,
+		});
+
+		// Inject an owned child directly
+		(daemon as any).child = mockChild;
+
+		await daemon.considerRespawnFromPoll(false);
+		assert.strictEqual(spawnCount, 0, 'F2: child owned must suppress respawn');
+	});
+
+	it('F2-guards-starting: respawn suppressed while starting', async () => {
+		let spawnCount = 0;
+		const c = createOfflineClient();
+		const mockSpawnLocal = (() => { spawnCount++; return createMockChild(); }) as unknown as SpawnFn;
+		const tcpProbe = async () => false;
+
+		daemon = new DaemonManager(c as any, 'mcp-gateway', output as any, mockSpawnLocal, {
+			respawnAfterFailedPolls: 1,
+			respawnColdStartGraceMs: 0,
+			tcpProbe,
+		});
+
+		(daemon as any).starting = true;
+		await daemon.considerRespawnFromPoll(false);
+		(daemon as any).starting = false;
+
+		assert.strictEqual(spawnCount, 0, 'F2: starting flag must suppress respawn');
+	});
+
+	it('F2-guards-restarting: respawn suppressed while restarting', async () => {
+		let spawnCount = 0;
+		const c = createOfflineClient();
+		const mockSpawnLocal = (() => { spawnCount++; return createMockChild(); }) as unknown as SpawnFn;
+		const tcpProbe = async () => false;
+
+		daemon = new DaemonManager(c as any, 'mcp-gateway', output as any, mockSpawnLocal, {
+			respawnAfterFailedPolls: 1,
+			respawnColdStartGraceMs: 0,
+			tcpProbe,
+		});
+
+		(daemon as any).restarting = true;
+		await daemon.considerRespawnFromPoll(false);
+		(daemon as any).restarting = false;
+
+		assert.strictEqual(spawnCount, 0, 'F2: restarting flag must suppress respawn');
+	});
+
+	it('F2-guards-stopping: respawn suppressed while stopping', async () => {
+		let spawnCount = 0;
+		const c = createOfflineClient();
+		const mockSpawnLocal = (() => { spawnCount++; return createMockChild(); }) as unknown as SpawnFn;
+		const tcpProbe = async () => false;
+
+		daemon = new DaemonManager(c as any, 'mcp-gateway', output as any, mockSpawnLocal, {
+			respawnAfterFailedPolls: 1,
+			respawnColdStartGraceMs: 0,
+			tcpProbe,
+		});
+
+		(daemon as any).stopping = true;
+		await daemon.considerRespawnFromPoll(false);
+		(daemon as any).stopping = false;
+
+		assert.strictEqual(spawnCount, 0, 'F2: stopping flag must suppress respawn');
+	});
+
+	it('F2-guards-expectedExit: respawn suppressed while expectedExit is set', async () => {
+		let spawnCount = 0;
+		const c = createOfflineClient();
+		const mockSpawnLocal = (() => { spawnCount++; return createMockChild(); }) as unknown as SpawnFn;
+		const tcpProbe = async () => false;
+
+		daemon = new DaemonManager(c as any, 'mcp-gateway', output as any, mockSpawnLocal, {
+			respawnAfterFailedPolls: 1,
+			respawnColdStartGraceMs: 0,
+			tcpProbe,
+		});
+
+		(daemon as any).expectedExit = true;
+		await daemon.considerRespawnFromPoll(false);
+		(daemon as any).expectedExit = false;
+
+		assert.strictEqual(spawnCount, 0, 'F2: expectedExit must suppress respawn');
+	});
+});
+
+// =============================================================================
+// Group F2H — FIX 2 hygiene: EADDRINUSE heuristic in handleExit
+// =============================================================================
+
+describe('FIX 2 hygiene — EADDRINUSE heuristic in handleExit', () => {
+	function createOutput() {
+		return {
+			name: 'MCP Gateway',
+			lines: [] as string[],
+			disposed: false,
+			appendLine(line: string) { this.lines.push(line); },
+			append(text: string) { this.lines.push(text); },
+			clear() { this.lines.length = 0; },
+			show() {},
+			hide() {},
+			dispose() { this.disposed = true; },
+		};
+	}
+
+	function createTimerMock() {
+		let now = 0;
+		const pending: Array<{ cb: () => void; at: number; handle: object }> = [];
+		const recorded: Array<{ ms: number }> = [];
+		let nextHandle = 1;
+		const timerHandle = (cb: () => void, ms: number): any => {
+			const handle = { id: nextHandle++ };
+			recorded.push({ ms });
+			pending.push({ cb, at: now + ms, handle });
+			return handle;
+		};
+		const clearHandle = (h: any): void => {
+			const idx = pending.findIndex((p) => p.handle === h);
+			if (idx >= 0) { pending.splice(idx, 1); }
+		};
+		const tick = (ms: number): void => {
+			now += ms;
+			const due = pending.filter((p) => p.at <= now).sort((a, b) => a.at - b.at);
+			for (const t of due) {
+				const idx = pending.indexOf(t);
+				if (idx >= 0) { pending.splice(idx, 1); }
+				t.cb();
+			}
+		};
+		return { timerHandle, clearHandle, tick, recorded, pending };
+	}
+
+	let output: ReturnType<typeof createOutput>;
+	let daemon: DaemonManager | undefined;
+
+	beforeEach(() => {
+		resetMockState();
+		output = createOutput();
+		_setLoggerForTests(output);
+		daemon = undefined;
+	});
+
+	afterEach(async () => {
+		if (daemon) { await daemon.dispose(); }
+	});
+
+	/**
+	 * F2H-addrinuse-not-counted: exit(1) + aliveMs<1500 + /health resolves
+	 * → NOT counted as crash, supervisorActive stays true across 6 such exits.
+	 */
+	it('F2H-addrinuse-not-counted: EADDRINUSE pattern (exit 1, aliveMs<1500, /health ok) NOT counted as crash — supervisorActive stays true across 6 exits', async () => {
+		const children: (import('node:child_process').ChildProcess & { killed: boolean })[] = [];
+		const timers = createTimerMock();
+
+		// Client starts offline so initial start() spawns. After each quick-exit
+		// we flip online to simulate the winner having bound the port.
+		const c = {
+			online: false as boolean,
+			getHealth: async function(this: { online: boolean }) {
+				if (!this.online) { throw new Error('connection refused'); }
+				return { status: 'ok' };
+			},
+			shutdown: async () => ({ status: 'ok' }),
+			listServers: async () => [],
+			getServer: async () => ({}),
+			addServer: async () => ({ status: 'ok' }),
+			removeServer: async () => ({ status: 'ok' }),
+			patchServer: async () => ({ status: 'ok' }),
+			restartServer: async () => ({ status: 'ok' }),
+			resetCircuit: async () => ({ status: 'ok' }),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+
+		const mockSpawnLocal: SpawnFn = () => {
+			const child = new EventEmitter() as any;
+			child.stdout = new EventEmitter();
+			child.stderr = new EventEmitter();
+			child.pid = 33333;
+			child.killed = false;
+			child.kill = () => { child.killed = true; return true; };
+			children.push(child);
+			return child;
+		};
+
+		daemon = new DaemonManager(c as any, 'mcp-gateway', output as any, mockSpawnLocal, {
+			autoRestartOnCrash: true,
+			crashRestartConfig: { initialDelayMs: 100, maxAttemptsInWindow: 5, windowMs: 3_600_000, jitterRatio: 0 },
+			setTimeout: timers.timerHandle,
+			clearTimeout: timers.clearHandle,
+			random: () => 0.5,
+			addrinuseGraceMs: 2000, // opt-in to async EADDRINUSE heuristic
+		});
+
+		await daemon.start();
+		assert.strictEqual(children.length, 1, 'initial spawn');
+
+		// Simulate 6 rapid spawn-race exits (code=1, aliveMs<1500).
+		// After each, /health resolves (winner bound the port).
+		c.online = true; // "winner" daemon is up
+		for (let i = 0; i < 6; i++) {
+			// Set spawnedAt to "just now" so aliveMs < 1500
+			(daemon as any).spawnedAt = Date.now();
+			children[children.length - 1].emit('exit', 1, null);
+			// Allow the async _handlePotentialAddrinuse to complete
+			await new Promise((r) => setImmediate(r));
+			await new Promise((r) => setImmediate(r));
+		}
+
+		// supervisorActive must still be true: none of the exits were counted as crashes
+		assert.ok(daemon.supervisorActive,
+			`F2H: supervisorActive must stay true after 6 EADDRINUSE-pattern exits (crashCount=${daemon.crashCount})`);
+		assert.strictEqual(daemon.crashCount, 0, 'F2H: crashCount must stay 0');
+	});
+
+	/**
+	 * F2H-genuine-exit: exit(1) + aliveMs<1500 + /health REJECTS
+	 * → counted as crash, crash loop aborts at 5.
+	 */
+	it('F2H-genuine-exit: genuine exit-1 with /health failing IS counted (aborts at 5, matching existing crash-loop test)', async () => {
+		const children: (import('node:child_process').ChildProcess & { killed: boolean })[] = [];
+		const timers = createTimerMock();
+
+		// Client always offline so all /health calls fail
+		const c = {
+			online: false as boolean,
+			getHealth: async function(this: { online: boolean }) {
+				if (!this.online) { throw new Error('connection refused'); }
+				return { status: 'ok' };
+			},
+			shutdown: async () => ({ status: 'ok' }),
+			listServers: async () => [],
+			getServer: async () => ({}),
+			addServer: async () => ({ status: 'ok' }),
+			removeServer: async () => ({ status: 'ok' }),
+			patchServer: async () => ({ status: 'ok' }),
+			restartServer: async () => ({ status: 'ok' }),
+			resetCircuit: async () => ({ status: 'ok' }),
+			callTool: async () => ({ content: null }),
+			listTools: async () => [],
+		};
+
+		const mockSpawnLocal: SpawnFn = () => {
+			const child = new EventEmitter() as any;
+			child.stdout = new EventEmitter();
+			child.stderr = new EventEmitter();
+			child.pid = 44444;
+			child.killed = false;
+			child.kill = () => { child.killed = true; return true; };
+			children.push(child);
+			return child;
+		};
+
+		// maxAttemptsInWindow=5 matches existing crash-loop test expectations
+		daemon = new DaemonManager(c as any, 'mcp-gateway', output as any, mockSpawnLocal, {
+			autoRestartOnCrash: true,
+			crashRestartConfig: { initialDelayMs: 50, maxAttemptsInWindow: 5, windowMs: 3_600_000, jitterRatio: 0 },
+			setTimeout: timers.timerHandle,
+			clearTimeout: timers.clearHandle,
+			random: () => 0.5,
+			addrinuseGraceMs: 2000, // opt-in to async EADDRINUSE heuristic
+		});
+
+		await daemon.start();
+		assert.strictEqual(children.length, 1, 'initial spawn');
+
+		// Emit 5 genuine early-exit (code=1, aliveMs<1500, /health fails)
+		// Each should be counted as a crash and schedule a backoff restart.
+		for (let i = 0; i < 5; i++) {
+			(daemon as any).spawnedAt = Date.now();
+			children[children.length - 1].emit('exit', 1, null);
+			// Wait for async EADDRINUSE probe to complete AND for timer callback
+			await new Promise((r) => setImmediate(r));
+			await new Promise((r) => setImmediate(r));
+			timers.tick(50);
+			await new Promise((r) => setImmediate(r));
+		}
+
+		// 6th child exits — should push crashCount over maxAttemptsInWindow and abort
+		(daemon as any).spawnedAt = Date.now();
+		children[children.length - 1].emit('exit', 1, null);
+		await new Promise((r) => setImmediate(r));
+		await new Promise((r) => setImmediate(r));
+
+		assert.ok(!daemon.supervisorActive,
+			`F2H: supervisorActive must be false after genuine crash-loop (crashCount=${daemon.crashCount})`);
 	});
 });
 

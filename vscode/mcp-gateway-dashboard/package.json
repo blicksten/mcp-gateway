@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.33.24",
+  "version": "1.33.26",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -561,6 +561,30 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically respawn the mcp-gateway daemon when it exits unexpectedly (non-zero code or fatal signal). Uses exponential backoff (1s → 60s) with crash-loop detection (max 5 quick crashes per 10 min)."
+        },
+        "mcpGateway.tcpProbeTimeoutMs": {
+          "type": "number",
+          "default": 400,
+          "minimum": 50,
+          "description": "Timeout in ms for the TCP probe used to disambiguate a timed-out /health response: distinguishes a dead (port closed) daemon from a slow (port open, /health stalled) daemon before deciding to spawn. Lower values reduce startup latency; higher values reduce false-positive spawns on a slow network stack."
+        },
+        "mcpGateway.respawnAfterFailedPolls": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "description": "Number of consecutive failed poll cycles before the extension attempts to respawn a dead gateway daemon that was not spawned by this VS Code window. Increase to tolerate transient hiccups; decrease for faster recovery."
+        },
+        "mcpGateway.respawnColdStartGraceMs": {
+          "type": "number",
+          "default": 10000,
+          "minimum": 1000,
+          "description": "Grace period in ms after a daemon spawn during which poll failures do NOT trigger another respawn attempt. Prevents an infinite respawn loop while a freshly-spawned daemon's /health endpoint is not yet responsive."
+        },
+        "mcpGateway.statusHeartbeatMultiplier": {
+          "type": "number",
+          "default": 3,
+          "minimum": 2,
+          "description": "Multiplier applied to pollInterval to compute the status-bar heartbeat deadline. If no successful poll is received within pollInterval × this multiplier, the status bar transitions to an 'unknown / no signal' state ($(question) MCP: ?) instead of freezing on the last known-good state."
         },
         "mcpGateway.daemonFileLogEnabled": {
           "type": "boolean",

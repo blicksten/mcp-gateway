@@ -5,6 +5,23 @@ import { formatUptime } from './gateway-tree-provider';
 import { escapeMd } from './markdown-utils';
 import { formatGatewayVersion } from './version-format';
 
+/** Options for McpStatusBar heartbeat (test-injectable). */
+export interface McpStatusBarOptions {
+	/**
+	 * Heartbeat interval in ms. When the last successful refresh is older than
+	 * this value, the bar renders an "unknown / no signal" state rather than
+	 * stale green. Default: pollInterval * statusHeartbeatMultiplier.
+	 * Production sets this from settings; tests pass a small value directly.
+	 */
+	heartbeatMs?: number;
+	/** Injectable setInterval for tests. Defaults to global setInterval. */
+	setInterval?: (cb: () => void, ms: number) => ReturnType<typeof setInterval>;
+	/** Injectable clearInterval for tests. Defaults to global clearInterval. */
+	clearInterval?: (h: ReturnType<typeof setInterval>) => void;
+	/** Injectable Date.now() for tests. Defaults to Date.now. */
+	now?: () => number;
+}
+
 /**
  * Aggregate MCP status bar indicator.
  *
@@ -16,17 +33,35 @@ import { formatGatewayVersion } from './version-format';
  * the cache's `lastRefreshFailed` flag distinguishes daemon-offline from an
  * empty server list, so the bar can render "offline" vs "no servers" without
  * its own /health call.
+ *
+ * FIX 3: Added heartbeat timer. If no successful refresh is seen for
+ * `heartbeatMs`, the bar renders an "unknown" state (visually distinct from
+ * "offline") so a stalled poll does not freeze the bar on stale green.
  */
 export class McpStatusBar implements vscode.Disposable {
 	private readonly item: vscode.StatusBarItem;
 	private readonly subscription: vscode.Disposable;
 	private disposed = false;
+	// FIX 3: heartbeat fields
+	private lastSuccessfulRefreshAt = 0;
+	private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+	private readonly heartbeatMs: number;
+	private readonly _clearInterval: (h: ReturnType<typeof setInterval>) => void;
+	private readonly _now: () => number;
 
 	constructor(
 		private readonly cache: ServerDataCache,
 		alignment: vscode.StatusBarAlignment = vscode.StatusBarAlignment.Left,
 		priority = 100,
+		options?: McpStatusBarOptions,
 	) {
+		// FIX 3: assign injectable options BEFORE refresh() so this._now is
+		// available when refresh() calls it (even during the initial paint below).
+		this._now = options?.now ?? (() => Date.now());
+		this._clearInterval = options?.clearInterval ?? ((h) => clearInterval(h));
+		this.heartbeatMs = options?.heartbeatMs ?? 0;
+		const _setInterval = options?.setInterval ?? ((cb, ms) => setInterval(cb, ms));
+
 		this.item = vscode.window.createStatusBarItem(alignment, priority);
 		this.item.command = 'mcpBackends.focus';
 		this.item.show();
@@ -34,19 +69,44 @@ export class McpStatusBar implements vscode.Disposable {
 		// Paint initial state from whatever is already cached so the bar is
 		// not blank until the first refresh fires.
 		this.refresh();
+
+		if (this.heartbeatMs > 0) {
+			this.heartbeatTimer = _setInterval(() => this.checkHeartbeat(), this.heartbeatMs);
+		}
 	}
 
 	/** Read current cache state and repaint the status bar item. */
 	private refresh(): void {
 		if (this.disposed) { return; }
 		if (this.cache.lastRefreshFailed) {
+			// An explicit lastRefreshFailed event wins over heartbeat-unknown.
 			this.renderOffline();
 			return;
 		}
+		// Successful refresh — track the timestamp for the heartbeat.
+		this.lastSuccessfulRefreshAt = this._now();
 		const servers = this.cache.getMcpServers();
 		const total = servers.length;
 		const running = servers.filter((s) => s.status === 'running').length;
 		this.renderCounts(running, total, servers, this.cache.gatewayHealth);
+	}
+
+	/**
+	 * FIX 3: heartbeat check — called by the independent timer.
+	 * If no successful refresh has arrived within heartbeatMs, render the
+	 * "unknown / no signal" state (visually distinct from renderOffline).
+	 * An explicit lastRefreshFailed event (renderOffline) takes precedence
+	 * over the heartbeat within the same interval.
+	 */
+	private checkHeartbeat(): void {
+		if (this.disposed) { return; }
+		// If the cache explicitly reports a failure, renderOffline already fired.
+		// Do not overwrite with "unknown" — offline is the more precise state.
+		if (this.cache.lastRefreshFailed) { return; }
+		if (this.lastSuccessfulRefreshAt === 0) { return; } // never had a successful refresh yet
+		if (this._now() - this.lastSuccessfulRefreshAt > this.heartbeatMs) {
+			this.renderUnknown();
+		}
 	}
 
 	/** Reset item styling to defaults. */
@@ -96,7 +156,7 @@ export class McpStatusBar implements vscode.Disposable {
 		this.item.tooltip = this.buildTooltip(running, total, servers, health);
 	}
 
-	/** Render the daemon-offline state. */
+	/** Render the daemon-offline state (confirmed unreachable). */
 	private renderOffline(): void {
 		this.resetStyle();
 		this.item.text = '$(debug-disconnect) MCP: offline';
@@ -104,6 +164,23 @@ export class McpStatusBar implements vscode.Disposable {
 		md.isTrusted = false;
 		md.supportHtml = false;
 		md.appendMarkdown('**MCP Gateway** — cannot reach daemon\n');
+		this.item.tooltip = md;
+	}
+
+	/**
+	 * FIX 3: render "unknown / no signal" state — visually distinct from
+	 * renderOffline (offline = confirmed-unreachable; unknown = no update heard).
+	 * Shown when the heartbeat fires and no successful refresh has arrived
+	 * within heartbeatMs.
+	 */
+	private renderUnknown(): void {
+		this.resetStyle();
+		this.item.text = '$(question) MCP: ?';
+		const md = new vscode.MarkdownString();
+		md.isTrusted = false;
+		md.supportHtml = false;
+		const ageS = Math.round((this._now() - this.lastSuccessfulRefreshAt) / 1000);
+		md.appendMarkdown(`**MCP Gateway** — no update in ${ageS}s\n`);
 		this.item.tooltip = md;
 	}
 
@@ -185,5 +262,10 @@ export class McpStatusBar implements vscode.Disposable {
 		this.disposed = true;
 		this.subscription.dispose();
 		this.item.dispose();
+		// FIX 3: clear heartbeat timer
+		if (this.heartbeatTimer !== undefined) {
+			this._clearInterval(this.heartbeatTimer);
+			this.heartbeatTimer = undefined;
+		}
 	}
 }
