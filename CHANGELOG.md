@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — Stability: GET notification-stream 400 hot-loop storm
+
+**Incident 2026-06-14.** With 13 parallel Claude Code sessions the gateway took a flat **~77 transport requests/second** (zero jitter, evenly spread across all 23 MCP surfaces), bloating `daemon.log` to **832 MB** and saturating the MCP router so new `initialize` handshakes timed out (PAL/orchestrator namespaces failed to register in-session). The daemon process itself was healthy — this was a request storm, not a respawn cascade.
+
+**Root cause** (`internal/api/resumable_streamable.go:251-254`): a Claude Code MCP client whose notification GET stream loses its session reopens `GET /mcp/<backend>` with **no `Mcp-Session-Id`**. In stateful mode that is always a protocol error → HTTP 400. The client retries with **no backoff** (upstream anthropics/claude-code#57642) on a ~298ms timer; 13 sessions × 23 backends = the steady 77/s. Same 400→reconnect-storm *class* as "Bug A" below, different trigger (GET notification stream vs. POST-init on an error-state backend).
+
+### Fixed
+
+- **Early-reject GET with empty session id** (`internal/api/server.go`, `mcpTransportPolicy`): the pathological shape (`GET` + empty `Mcp-Session-Id`) is now rejected at the policy layer with a cheap 400, before the session-map lookup / protocol negotiation in the resumable handler. Keyed **strictly** on the empty-header shape — a GET carrying an unknown/stale session id is untouched so it still reaches `tryResurrect` for restart recovery (FM-3). Healthy GET streams always carry a session id post-`initialize`, so they are unaffected.
+- **Happy-path transport logs dropped to DEBUG** (`internal/api/server.go`, `logMCPDecision`): `allow-loopback` / `allow-if-bearer` now log at `slog.LevelDebug` (daemon runs at `LevelInfo`, so they drop at the handler). `deny-*` decisions stay at INFO — rare and security-relevant. This removes the 832 MB/day log amplifier at the source.
+
+**Verified live:** post-deploy the storm dropped from 77 req/s to **0 lines in 12s**; `POST initialize /mcp/pal` recovered to **HTTP 200 in 961ms** (was timing out); `GET` with no session id returns 400 in **41ms** (was ~298ms).
+
+**Deferred to a follow-up pipeline:** per-path token-bucket throttle (429 + Retry-After) and a daemon-side size-capped log rotator (today the only rotation is the date-based VS Code `DaemonLogFile`, bypassed on CLI/Task-Scheduler launches).
+
+---
+
 ## [Unreleased] — Stability: Claude Code reconnect storm + TCP fast-fail
 
 Two bugs caused Claude Code to disconnect from mcp-gateway every 44 seconds whenever any configured HTTP backend was unreachable (e.g., VPN-dependent `pdap-docs` while VPN is off):
