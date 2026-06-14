@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.33.24",
+  "version": "1.1.0",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -504,7 +504,9 @@
         "mcpGateway.sapAdtUrls": {
           "type": "object",
           "default": {},
-          "additionalProperties": { "type": "string" },
+          "additionalProperties": {
+            "type": "string"
+          },
           "description": "[SAP Picker] Per-system SAP_URL overrides. Keys are '<SID>-<CLIENT>' or '<SID>', values are HTTP endpoints (e.g. {\"Q26-100\": \"http://sapq26.ebydos.local:50000\"}). When set, wins over sapAdtUrlTemplate."
         },
         "mcpGateway.sapEnableTransports": {
