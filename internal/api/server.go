@@ -769,6 +769,25 @@ func (s *Server) mcpTransportPolicy(authMW func(http.Handler) http.Handler) func
 					denyMCPTransport(w)
 					return
 				}
+				// Storm fix (2026-06-14): a GET that opens the MCP
+				// notification stream with NO Mcp-Session-Id is always a
+				// protocol error in stateful mode (no prior initialize).
+				// A Claude Code client whose session was lost reopens this
+				// GET in a ~298ms hot loop with no backoff (upstream
+				// anthropics/claude-code#57642). The downstream resumable
+				// handler already 400s this exact shape
+				// (resumable_streamable.go:251-254), but only AFTER an
+				// INFO log line + session-map lookup + protocol
+				// negotiation. Reject it here, cheaply and at DEBUG, so the
+				// loop costs the gateway nothing and stops bloating the
+				// log. We key strictly on the EMPTY-header shape — a GET
+				// carrying an unknown/stale session id is NOT rejected here
+				// (it must still reach tryResurrect for restart recovery).
+				if r.Method == http.MethodGet && r.Header.Get("Mcp-Session-Id") == "" {
+					s.logMCPDecision(r, mode, "allow-loopback-get-no-session-rejected")
+					http.Error(w, "Bad Request: GET requires an Mcp-Session-Id header", http.StatusBadRequest)
+					return
+				}
 				s.logMCPDecision(r, mode, "allow-loopback")
 				next.ServeHTTP(w, r)
 			}
@@ -786,12 +805,27 @@ func denyMCPTransport(w http.ResponseWriter) {
 // logMCPDecision emits one structured line per MCP transport request.
 // Never logs the received Authorization header value — only the path
 // the policy decision took.
+//
+// Storm fix (2026-06-14): the per-request happy-path lines
+// (allow-loopback / allow-if-bearer) are emitted at DEBUG, not INFO.
+// A Claude Code client whose notification GET stream loses its session
+// reopens it in a ~298ms hot loop with no backoff (upstream
+// anthropics/claude-code#57642); with 13 sessions x 23 backends this
+// produced ~77 allow-loopback lines/sec and bloated daemon.log to
+// 832 MB. The daemon runs at LevelInfo, so DEBUG allow-lines are
+// dropped at the handler with negligible cost. Denials (deny-*) stay
+// at INFO — they are rare and security-relevant, so we never want them
+// silently dropped.
 func (s *Server) logMCPDecision(r *http.Request, mode, decision string) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	s.logger.Info("mcp transport request",
+	level := slog.LevelInfo
+	if strings.HasPrefix(decision, "allow") {
+		level = slog.LevelDebug
+	}
+	s.logger.Log(r.Context(), level, "mcp transport request",
 		"policy", mode,
 		"remote", host,
 		"decision", decision,
