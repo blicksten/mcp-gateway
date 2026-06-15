@@ -578,6 +578,15 @@ export function activate(
 		aggregateEntryName: () => vscode.workspace
 			.getConfiguration('mcpGateway')
 			.get<string>('claudeConfigSync.aggregateEntryName', 'mcp-gateway'),
+		// OFF by default: reflecting one entry per backend forces every child
+		// claude.exe to open N+1 MCP sessions at startup, driving the
+		// ~/.claude.json write-war and the "Subprocess initialization did not
+		// complete within 60000ms" timeout. The aggregate entry alone exposes
+		// all backend tools (namespaced). Opt in only if a client needs
+		// un-namespaced per-server /mcp panels.
+		reflectPerBackend: () => vscode.workspace
+			.getConfiguration('mcpGateway')
+			.get<boolean>('claudeConfigSync.reflectPerBackend', false),
 	});
 	context.subscriptions.push(claudeConfigSync);
 

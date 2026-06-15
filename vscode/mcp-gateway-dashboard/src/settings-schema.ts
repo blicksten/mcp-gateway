@@ -49,6 +49,7 @@ export const RESTART_REQUIRED_KEYS: readonly string[] = [
 	'mcpGateway.claudeConfigSync.path',
 	'mcpGateway.claudeConfigSync.namespacePrefix',
 	'mcpGateway.claudeConfigSync.aggregateEntryName',
+	'mcpGateway.claudeConfigSync.reflectPerBackend',
 ];
 
 /** mcpDashboard.* → mcpGateway.* mapping for the Import button (S1 fix).
@@ -242,6 +243,11 @@ export const SETTINGS_SCHEMA: SettingsSchema = {
 				{
 					key: 'mcpGateway.claudeConfigSync.aggregateEntryName', label: 'Aggregate entry name', type: 'string', kind: 'plain',
 					description: 'Name of the aggregate gateway entry (empty disables it).',
+					restartRequired: true,
+				},
+				{
+					key: 'mcpGateway.claudeConfigSync.reflectPerBackend', label: 'Reflect per-backend entries', type: 'boolean', kind: 'plain',
+					description: 'OFF by default. Per-backend entries cause the ~/.claude.json write-war and the 60000ms MCP init timeout. The aggregate entry already exposes all backend tools.',
 					restartRequired: true,
 				},
 			],

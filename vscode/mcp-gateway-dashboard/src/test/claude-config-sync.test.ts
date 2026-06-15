@@ -58,6 +58,7 @@ function makeOpts(overrides: Partial<{
 	authValue: string | undefined;
 	authThrows: boolean;
 	aggregateEntryName: string;
+	reflectPerBackend: boolean;
 }> = {}): { opts: ClaudeConfigSyncOptions; setAuth: (v: string | undefined) => void } {
 	let auth = overrides.authValue;
 	let throws = overrides.authThrows ?? false;
@@ -67,6 +68,10 @@ function makeOpts(overrides: Partial<{
 	// Tests default to NO aggregate entry to keep counts predictable; opt-in
 	// via overrides.aggregateEntryName for the dedicated aggregate test cases.
 	const aggregateEntryName = overrides.aggregateEntryName ?? '';
+	// Most legacy tests assert per-backend entries, so the harness defaults
+	// reflectPerBackend to TRUE. Production default is FALSE (aggregate-only);
+	// dedicated cases below override to false to exercise that path.
+	const reflectPerBackend = overrides.reflectPerBackend ?? true;
 	let configPath = '';
 	const opts: ClaudeConfigSyncOptions = {
 		enabled: () => enabled,
@@ -78,6 +83,7 @@ function makeOpts(overrides: Partial<{
 			return auth;
 		},
 		aggregateEntryName: () => aggregateEntryName,
+		reflectPerBackend: () => reflectPerBackend,
 	};
 	// Allow tests to set the path after constructing opts via closure.
 	(opts as ClaudeConfigSyncOptions & { _setPath?: (p: string) => void })._setPath = (p: string) => { configPath = p; };
@@ -328,6 +334,9 @@ describe('claude-config-sync', () => {
 				configPath: () => cfg,
 				gatewayUrl: () => 'http://localhost:8765',
 				authHeader: async () => 'Bearer T',
+				// Per-backend entry is the observable this kill-switch test asserts
+				// on; opt in explicitly since production default is aggregate-only.
+				reflectPerBackend: () => true,
 			};
 
 			const { cache, fire } = fakeCache();
@@ -668,6 +677,91 @@ describe('claude-config-sync', () => {
 				const servers = readJson(cfg).mcpServers as Record<string, unknown>;
 				assert.ok(!('mcp-gateway' in servers));
 				assert.ok(servers['mcp-gateway:alpha']);
+			} finally {
+				sync.dispose();
+				cleanupConfigPath(cfg);
+			}
+		});
+	});
+
+	describe('reflectPerBackend (write-war / 60000ms fix)', () => {
+		it('default (false) writes ONLY the aggregate entry — no per-backend keys', async () => {
+			const cfg = freshConfigPath();
+			const { opts } = makeOpts({
+				authValue: 'Bearer T',
+				aggregateEntryName: 'mcp-gateway',
+				reflectPerBackend: false,
+			});
+			setOptsPath(opts, cfg);
+			const { cache } = fakeCache();
+			const sync = new ClaudeConfigSync(cache as ServerDataCache, opts);
+			try {
+				await sync.reconcile([srv('alpha'), srv('beta'), srv('gamma')]);
+				const servers = readJson(cfg).mcpServers as Record<string, unknown>;
+				assert.deepEqual(Object.keys(servers), ['mcp-gateway'],
+					`expected only the aggregate entry, got: ${Object.keys(servers).join(',')}`);
+				assert.ok(!('mcp-gateway:alpha' in servers));
+				assert.ok(!('mcp-gateway:beta' in servers));
+				assert.ok(!('mcp-gateway:gamma' in servers));
+			} finally {
+				sync.dispose();
+				cleanupConfigPath(cfg);
+			}
+		});
+
+		it('false converges an existing per-backend-polluted file down to the aggregate (gateway-as-truth cleanup)', async () => {
+			const cfg = freshConfigPath();
+			// Simulate the legacy state: 1 aggregate + 3 per-backend managed
+			// entries plus an unrelated user server.
+			fs.writeFileSync(cfg, JSON.stringify({
+				mcpServers: {
+					'pal': { type: 'stdio', command: 'pal-mcp' },
+					'mcp-gateway': { type: 'http', url: 'http://localhost:8765/mcp' },
+					'mcp-gateway:alpha': { type: 'http', url: 'http://localhost:8765/mcp/alpha' },
+					'mcp-gateway:beta': { type: 'http', url: 'http://localhost:8765/mcp/beta' },
+					'mcp-gateway:gamma': { type: 'http', url: 'http://localhost:8765/mcp/gamma' },
+				},
+			}, null, 2) + '\n');
+			const { opts } = makeOpts({
+				authValue: 'Bearer T',
+				aggregateEntryName: 'mcp-gateway',
+				reflectPerBackend: false,
+			});
+			setOptsPath(opts, cfg);
+			const { cache } = fakeCache();
+			const sync = new ClaudeConfigSync(cache as ServerDataCache, opts);
+			try {
+				await sync.reconcile([srv('alpha'), srv('beta'), srv('gamma')]);
+				const servers = readJson(cfg).mcpServers as Record<string, unknown>;
+				// Foreign user entry preserved; all per-backend managed entries removed.
+				assert.ok(servers['pal'], 'foreign user entry must be preserved');
+				assert.ok(servers['mcp-gateway'], 'aggregate entry must remain');
+				assert.ok(!('mcp-gateway:alpha' in servers));
+				assert.ok(!('mcp-gateway:beta' in servers));
+				assert.ok(!('mcp-gateway:gamma' in servers));
+				assert.equal(Object.keys(servers).length, 2);
+			} finally {
+				sync.dispose();
+				cleanupConfigPath(cfg);
+			}
+		});
+
+		it('true still writes per-backend entries (opt-in preserved)', async () => {
+			const cfg = freshConfigPath();
+			const { opts } = makeOpts({
+				authValue: 'Bearer T',
+				aggregateEntryName: 'mcp-gateway',
+				reflectPerBackend: true,
+			});
+			setOptsPath(opts, cfg);
+			const { cache } = fakeCache();
+			const sync = new ClaudeConfigSync(cache as ServerDataCache, opts);
+			try {
+				await sync.reconcile([srv('alpha'), srv('beta')]);
+				const servers = readJson(cfg).mcpServers as Record<string, unknown>;
+				assert.ok(servers['mcp-gateway']);
+				assert.ok(servers['mcp-gateway:alpha']);
+				assert.ok(servers['mcp-gateway:beta']);
 			} finally {
 				sync.dispose();
 				cleanupConfigPath(cfg);

@@ -66,6 +66,20 @@ export interface ClaudeConfigSyncOptions {
 	 * matches the legacy plugin name.
 	 */
 	aggregateEntryName?: () => string;
+	/**
+	 * When false (default), only the single aggregate entry is reflected
+	 * into ~/.claude.json — the per-backend `mcp-gateway:<name>` entries are
+	 * NOT written. This is the fix for the recurring "Subprocess
+	 * initialization did not complete within 60000ms" error: each child
+	 * claude.exe opens one MCP session per mcpServers entry at startup, so
+	 * reflecting N backends forced N+1 handshakes and pushed cold init past
+	 * the extension's hard 60s ceiling. The aggregate `/mcp` endpoint
+	 * already exposes every backend's tools (namespaced) from an in-memory
+	 * cache without dialing the backend during initialize, so a single
+	 * entry is sufficient. Opt back in to per-backend entries only if a
+	 * client genuinely needs un-namespaced per-server panels.
+	 */
+	reflectPerBackend?: () => boolean;
 }
 
 export interface ManagedHttpEntry {
@@ -130,16 +144,26 @@ export class ClaudeConfigSync implements vscode.Disposable {
 			out[aggName] = aggEntry;
 		}
 
-		for (const s of servers) {
-			const key = `${prefix}${s.name}`;
-			const entry: ManagedHttpEntry = {
-				type: 'http',
-				url: `${baseUrl}/mcp/${encodeURIComponent(s.name)}`,
-			};
-			if (auth) {
-				entry.headers = { Authorization: auth };
+		// Per-backend fan-out is OFF by default (reflectPerBackend === false).
+		// Reflecting N backends forces each child claude.exe to open N+1 MCP
+		// sessions at startup, which (a) drives the ~/.claude.json write-war
+		// against live sessions and (b) pushes cold init past the extension's
+		// 60s ceiling ("Subprocess initialization did not complete within
+		// 60000ms"). The aggregate `/mcp` entry already exposes every backend's
+		// tools (namespaced) from an in-memory cache, so a single entry suffices.
+		const reflectPerBackend = this.opts.reflectPerBackend?.() ?? false;
+		if (reflectPerBackend) {
+			for (const s of servers) {
+				const key = `${prefix}${s.name}`;
+				const entry: ManagedHttpEntry = {
+					type: 'http',
+					url: `${baseUrl}/mcp/${encodeURIComponent(s.name)}`,
+				};
+				if (auth) {
+					entry.headers = { Authorization: auth };
+				}
+				out[key] = entry;
 			}
-			out[key] = entry;
 		}
 		return out;
 	}

@@ -2,7 +2,7 @@
   "name": "mcp-gateway-dashboard",
   "displayName": "MCP Gateway Dashboard",
   "description": "Manage MCP backend servers from VS Code — tree view, status bar, daemon lifecycle",
-  "version": "1.33.26",
+  "version": "1.33.27",
   "publisher": "mcp-gateway",
   "license": "MIT",
   "repository": {
@@ -556,6 +556,11 @@
           "type": "string",
           "default": "mcp-gateway",
           "description": "Name of the managed entry that points at the aggregate gateway endpoint (/mcp without a backend suffix). Exposes gateway meta-tools (gateway.list_servers, gateway.list_tools, gateway.invoke). Empty string disables the aggregate entry."
+        },
+        "mcpGateway.claudeConfigSync.reflectPerBackend": {
+          "type": "boolean",
+          "default": false,
+          "description": "Reflect one ~/.claude.json entry per backend (mcp-gateway:<name>) in addition to the aggregate entry. OFF by default: per-backend fan-out forces each child claude.exe to open N+1 MCP sessions at startup, which drives the ~/.claude.json write-war between concurrent sessions and pushes cold init past Claude Code's 60s ceiling ('Subprocess initialization did not complete within 60000ms'). The aggregate entry already exposes every backend's tools (namespaced). Enable only if a client needs un-namespaced per-server /mcp panels."
         },
         "mcpGateway.autoRestartOnCrash": {
           "type": "boolean",
