@@ -9,12 +9,17 @@
 // map AND, on unknown-session POSTs, calls Server.Connect(...) with a cached
 // ServerSessionState supplying the original client's InitializeParams.
 //
-// This spike is NOT the final handler. It proves the resurrection primitive
-// in isolation: given a server, a sessionID, and cached InitializeParams, can
-// we use ONLY public SDK API to construct a working ServerSession? If yes,
-// the larger ServeHTTP fork is purely mechanical.
+// HISTORY: this began as a D-5 viability spike proving the resurrection
+// primitive in isolation (given a server, a sessionID, and cached
+// InitializeParams, construct a working ServerSession using ONLY public SDK
+// API). The primitive proved out and was PROMOTED TO PRODUCTION.
 //
-// Wired into: nothing yet. Existing /mcp dispatcher unchanged.
+// STATUS (2026-06): WIRED INTO PRODUCTION — not a spike anymore. The types
+// here (SessionStateRegistry, CaptureInitializeFromRequest, ResurrectSession)
+// back the live handler: api.Server constructs sessionRegistry in NewServer
+// and passes it to NewResumableStreamableHTTPHandler (resumable_streamable.go),
+// which is mounted at /mcp in Server.Handler(). Do NOT delete this file as
+// "dead spike code" — removing it breaks the /mcp session-resurrection path.
 
 package api
 

@@ -22,15 +22,6 @@ func DefaultConfigDir() (string, error) {
 	return filepath.Join(home, ".mcp-gateway"), nil
 }
 
-// DefaultConfigPath returns ~/.mcp-gateway/config.json.
-func DefaultConfigPath() (string, error) {
-	dir, err := DefaultConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "config.json"), nil
-}
-
 // expandHome replaces a leading ~/ or ~\ with the user's home directory.
 // Bare ~ is also expanded. ~user forms are NOT expanded (passed through).
 func expandHome(path string) string {

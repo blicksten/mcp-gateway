@@ -711,10 +711,46 @@ func (s *Server) Handler() http.Handler {
 		})
 	}
 
-	r.Handle("/mcp", mcpPolicy(clearWriteDeadlineForGET(streamableHandler)))
-	r.Handle("/mcp/*", mcpPolicy(clearWriteDeadlineForGET(streamableHandler)))
-	r.Handle("/sse", mcpPolicy(clearWriteDeadlineForGET(sseHandler)))
-	r.Handle("/sse/*", mcpPolicy(clearWriteDeadlineForGET(sseHandler)))
+	// Honor GatewaySettings.Transports. Each transport surface is gated on
+	// its token: "http" → /mcp streamable, "sse" → /sse legacy SSE. "stdio"
+	// is not implemented by the gateway daemon (it serves over HTTP only),
+	// so it is warned about and otherwise ignored. ApplyDefaults seeds
+	// ["http","sse"], preserving the historical behavior where both surfaces
+	// always mounted. Changing transports requires a daemon restart — the
+	// router is built once in Handler() and a live config reload
+	// (UpdateConfig) does not rebuild it.
+	s.cfgMu.RLock()
+	transports := s.cfg.Gateway.Transports
+	s.cfgMu.RUnlock()
+	httpEnabled, sseEnabled, stdioRequested := false, false, false
+	for _, t := range transports {
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case "http":
+			httpEnabled = true
+		case "sse":
+			sseEnabled = true
+		case "stdio":
+			stdioRequested = true
+		}
+	}
+	// Defensive: never leave the gateway silently unreachable. If config
+	// yields no HTTP-family transport (e.g. transports:["stdio"] only), fall
+	// back to HTTP streamable.
+	if !httpEnabled && !sseEnabled {
+		slog.Warn("api: no HTTP-family transport enabled; falling back to /mcp", "transports", transports)
+		httpEnabled = true
+	}
+	if stdioRequested {
+		slog.Warn("api: transports includes \"stdio\" but the gateway daemon serves over HTTP only — stdio is not implemented and is ignored")
+	}
+	if httpEnabled {
+		r.Handle("/mcp", mcpPolicy(clearWriteDeadlineForGET(streamableHandler)))
+		r.Handle("/mcp/*", mcpPolicy(clearWriteDeadlineForGET(streamableHandler)))
+	}
+	if sseEnabled {
+		r.Handle("/sse", mcpPolicy(clearWriteDeadlineForGET(sseHandler)))
+		r.Handle("/sse/*", mcpPolicy(clearWriteDeadlineForGET(sseHandler)))
+	}
 
 	return r
 }

@@ -177,7 +177,7 @@ func TestConfig_ApplyDefaults(t *testing.T) {
 	cfg.ApplyDefaults()
 
 	assert.Equal(t, 8765, cfg.Gateway.HTTPPort)
-	assert.Equal(t, []string{"http"}, cfg.Gateway.Transports)
+	assert.Equal(t, []string{"http", "sse"}, cfg.Gateway.Transports)
 	assert.Equal(t, Duration(30*time.Second), cfg.Gateway.PingInterval)
 	assert.NotNil(t, cfg.Servers)
 }
