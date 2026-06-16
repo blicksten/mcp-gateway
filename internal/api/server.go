@@ -827,6 +827,29 @@ func (s *Server) mcpTransportPolicy(authMW func(http.Handler) http.Handler) func
 				mode = models.AuthMCPTransportLoopbackOnly
 			}
 
+			// Storm fix (2026-06-14, generalised 2026-06-17): a GET that opens
+			// the MCP notification stream with NO Mcp-Session-Id is always a
+			// protocol error in stateful mode (no prior initialize). A Claude
+			// Code client whose session was lost reopens this GET in a ~298ms
+			// hot loop with no backoff (upstream anthropics/claude-code#57642).
+			// The downstream resumable handler already 400s this exact shape
+			// (resumable_streamable.go:251-254), but only AFTER an INFO log
+			// line + session-map lookup + protocol negotiation. Reject it here,
+			// cheaply, so the loop costs the gateway nothing and stops bloating
+			// the log. This guard is PROTOCOL-level, not policy-level: it must
+			// fire under bearer-required mode too (an authenticated client that
+			// lost its session loops identically), so it lives ABOVE the policy
+			// switch. We key strictly on the EMPTY-header shape — a GET carrying
+			// an unknown/stale session id is NOT rejected here (it must still
+			// reach tryResurrect for restart recovery). Logged as a "deny-…"
+			// decision so it surfaces at INFO (the reject rate is the signal
+			// that confirms the storm fix is working).
+			if r.Method == http.MethodGet && r.Header.Get("Mcp-Session-Id") == "" {
+				s.logMCPDecision(r, mode, "deny-sessionless-get")
+				http.Error(w, "Bad Request: GET requires an Mcp-Session-Id header", http.StatusBadRequest)
+				return
+			}
+
 			switch mode {
 			case models.AuthMCPTransportBearerRequired:
 				s.logMCPDecision(r, mode, "allow-if-bearer")
@@ -849,25 +872,6 @@ func (s *Server) mcpTransportPolicy(authMW func(http.Handler) http.Handler) func
 				if ip == nil || !ip.IsLoopback() {
 					s.logMCPDecision(r, mode, "deny-non-loopback")
 					denyMCPTransport(w)
-					return
-				}
-				// Storm fix (2026-06-14): a GET that opens the MCP
-				// notification stream with NO Mcp-Session-Id is always a
-				// protocol error in stateful mode (no prior initialize).
-				// A Claude Code client whose session was lost reopens this
-				// GET in a ~298ms hot loop with no backoff (upstream
-				// anthropics/claude-code#57642). The downstream resumable
-				// handler already 400s this exact shape
-				// (resumable_streamable.go:251-254), but only AFTER an
-				// INFO log line + session-map lookup + protocol
-				// negotiation. Reject it here, cheaply and at DEBUG, so the
-				// loop costs the gateway nothing and stops bloating the
-				// log. We key strictly on the EMPTY-header shape — a GET
-				// carrying an unknown/stale session id is NOT rejected here
-				// (it must still reach tryResurrect for restart recovery).
-				if r.Method == http.MethodGet && r.Header.Get("Mcp-Session-Id") == "" {
-					s.logMCPDecision(r, mode, "allow-loopback-get-no-session-rejected")
-					http.Error(w, "Bad Request: GET requires an Mcp-Session-Id header", http.StatusBadRequest)
 					return
 				}
 				s.logMCPDecision(r, mode, "allow-loopback")
