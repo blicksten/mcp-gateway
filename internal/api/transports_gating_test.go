@@ -15,16 +15,14 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// newServerWithTransports builds a minimal test Server whose router is gated by
-// the given GatewaySettings.Transports list. Auth is disabled to keep the probe
-// focused on route mounting.
-//
-// Sequencing: ApplyDefaults() IS called (to fill port/ping defaults), which also
-// seeds Transports=["http","sse"] when the passed slice is empty/nil. We then
-// re-apply the caller's explicit list ONLY when it is non-empty — so passing
-// `nil` exercises the seeded-default path, while passing `["http"]` / `["sse"]`
-// / `["stdio"]` exercises that exact value. An empty non-nil slice would be
-// indistinguishable from nil here, so callers must pass nil for the default case.
+// These tests pin the Transports gating in Server.Handler(). The gateway serves
+// MCP over HTTP only: /mcp (streamable) and /sse (legacy) are one HTTP family
+// and mount together. "http" and "sse" are aliases for that family; "stdio" is
+// unimplemented (warned + ignored); an empty/unknown/stdio-only list falls back
+// to the HTTP family so the gateway is never unreachable. The decisive property
+// is backward compatibility: a legacy config transports:["http"] (written when
+// the field was inert) must KEEP /sse.
+
 func newServerWithTransports(t *testing.T, transports []string) http.Handler {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -33,6 +31,9 @@ func newServerWithTransports(t *testing.T, transports []string) http.Handler {
 		Servers: map[string]*models.ServerConfig{},
 	}
 	cfg.ApplyDefaults()
+	// ApplyDefaults seeds Transports only when empty; re-apply the caller's
+	// explicit list (non-empty) so each case controls the exact value. Passing
+	// nil exercises the seeded default.
 	if len(transports) > 0 {
 		cfg.Gateway.Transports = transports
 	}
@@ -43,11 +44,11 @@ func newServerWithTransports(t *testing.T, transports []string) http.Handler {
 	return srv.Handler()
 }
 
-// probeStatus issues a GET against path on a loopback connection and returns the
-// HTTP status. A mounted route yields a handler/middleware status (e.g. 400/403
-// for /mcp without MCP headers); an unmounted route yields chi's 404 NotFound.
-// GET /sse is deliberately never probed when the SSE route is mounted because
-// the SSE handler opens a long-lived event stream that would block the recorder.
+// probeStatus issues a sessionless GET (no Mcp-Session-Id) on a loopback
+// connection. A MOUNTED MCP surface returns 400 — the sessionless-GET storm
+// guard in mcpTransportPolicy intercepts before the streaming SSE/streamable
+// handler runs, so this never blocks. An UNMOUNTED route returns chi's 404.
+// Thus: mounted => != 404 (specifically 400); unmounted => 404.
 func probeStatus(t *testing.T, h http.Handler, path string) int {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -57,37 +58,37 @@ func probeStatus(t *testing.T, h http.Handler, path string) int {
 	return rec.Code
 }
 
-func TestTransportsGating_HTTPOnly_DisablesSSE(t *testing.T) {
+func assertMounted(t *testing.T, h http.Handler, path string) {
+	t.Helper()
+	assert.NotEqual(t, http.StatusNotFound, probeStatus(t, h, path),
+		"%s must be mounted (got chi 404 — route not registered)", path)
+}
+
+// REGRESSION: the backward-compat guarantee. A legacy ["http"] config must keep
+// /sse mounted (per-token gating previously broke this — silent /sse loss).
+func TestTransportsGating_LegacyHTTP_KeepsSSE(t *testing.T) {
 	h := newServerWithTransports(t, []string{"http"})
-	assert.NotEqual(t, http.StatusNotFound, probeStatus(t, h, "/mcp"),
-		"/mcp must be mounted when transports includes \"http\"")
-	assert.Equal(t, http.StatusNotFound, probeStatus(t, h, "/sse"),
-		"/sse must NOT be mounted when transports excludes \"sse\"")
+	assertMounted(t, h, "/mcp")
+	assertMounted(t, h, "/sse")
 }
 
-func TestTransportsGating_SSEOnly_DisablesMCP(t *testing.T) {
+func TestTransportsGating_SSEAlias_MountsBoth(t *testing.T) {
 	h := newServerWithTransports(t, []string{"sse"})
-	assert.Equal(t, http.StatusNotFound, probeStatus(t, h, "/mcp"),
-		"/mcp must NOT be mounted when transports excludes \"http\"")
-	// /sse mounting is asserted indirectly: with only "sse" present and "http"
-	// absent, /mcp is 404 above; the fallback (mount /mcp) does not fire because
-	// sseEnabled is true. We avoid GET /sse to prevent the streaming handler
-	// from blocking the recorder.
+	assertMounted(t, h, "/mcp")
+	assertMounted(t, h, "/sse")
 }
 
-func TestTransportsGating_Defaults_MountMCP(t *testing.T) {
-	// nil → ApplyDefaults seeds ["http","sse"] → /mcp mounted.
+func TestTransportsGating_Defaults_MountBoth(t *testing.T) {
+	// nil → ApplyDefaults seeds ["http"] → HTTP family mounts both surfaces.
 	h := newServerWithTransports(t, nil)
-	assert.NotEqual(t, http.StatusNotFound, probeStatus(t, h, "/mcp"),
-		"/mcp must be mounted under default transports")
+	assertMounted(t, h, "/mcp")
+	assertMounted(t, h, "/sse")
 }
 
-func TestTransportsGating_StdioOnly_FallsBackToMCP(t *testing.T) {
-	// "stdio" is unimplemented; with no HTTP-family transport the router falls
-	// back to mounting /mcp so the gateway is never silently unreachable.
+func TestTransportsGating_StdioOnly_FallsBackToHTTPFamily(t *testing.T) {
+	// "stdio" is unimplemented; with no HTTP-family token the router falls back
+	// to mounting the HTTP family so the gateway is never silently unreachable.
 	h := newServerWithTransports(t, []string{"stdio"})
-	assert.NotEqual(t, http.StatusNotFound, probeStatus(t, h, "/mcp"),
-		"/mcp must be mounted as fallback when only \"stdio\" is requested")
-	assert.Equal(t, http.StatusNotFound, probeStatus(t, h, "/sse"),
-		"/sse must NOT be mounted when only \"stdio\" is requested")
+	assertMounted(t, h, "/mcp")
+	assertMounted(t, h, "/sse")
 }

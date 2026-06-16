@@ -374,11 +374,10 @@ func (c *Config) ApplyDefaults() {
 		c.Gateway.BindAddress = "127.0.0.1"
 	}
 	if len(c.Gateway.Transports) == 0 {
-		// http → /mcp streamable, sse → /sse legacy. Both are mounted by
-		// default to preserve the historical behavior (server.go gated these
-		// surfaces on this field as of the Transports-wiring fix; before that
-		// both always mounted regardless of config).
-		c.Gateway.Transports = []string{"http", "sse"}
+		// "http" enables the HTTP transport family (/mcp + /sse together);
+		// see server.go Handler(). A bare ["http"] default keeps both
+		// surfaces mounted, matching the historical unconditional behavior.
+		c.Gateway.Transports = []string{"http"}
 	}
 	if c.Gateway.PingInterval == 0 {
 		c.Gateway.PingInterval = Duration(30 * time.Second)

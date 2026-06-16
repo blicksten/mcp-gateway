@@ -711,43 +711,47 @@ func (s *Server) Handler() http.Handler {
 		})
 	}
 
-	// Honor GatewaySettings.Transports. Each transport surface is gated on
-	// its token: "http" → /mcp streamable, "sse" → /sse legacy SSE. "stdio"
-	// is not implemented by the gateway daemon (it serves over HTTP only),
-	// so it is warned about and otherwise ignored. ApplyDefaults seeds
-	// ["http","sse"], preserving the historical behavior where both surfaces
-	// always mounted. Changing transports requires a daemon restart — the
-	// router is built once in Handler() and a live config reload
-	// (UpdateConfig) does not rebuild it.
+	// Honor GatewaySettings.Transports. The gateway serves MCP over HTTP only:
+	// /mcp (streamable) and /sse (legacy SSE) are two surfaces of the SAME
+	// HTTP transport, so they are mounted together as a family — "http" and
+	// "sse" are aliases that both enable the pair. This is deliberately
+	// backward-compatible: a pre-existing config with transports:["http"]
+	// (written when this field was inert) keeps /sse, exactly as before the
+	// field was wired. "stdio" is NOT implemented by the daemon (no stdio
+	// gateway server exists); it is acknowledged with a warning and otherwise
+	// ignored. An empty/missing list, or a list with only unknown/stdio
+	// tokens, falls back to mounting the HTTP family so the gateway is never
+	// silently unreachable. Changing transports requires a daemon restart —
+	// the router is built once in Handler() and UpdateConfig does not rebuild
+	// it. (Separable per-surface gating was rejected: there is no consumer
+	// that needs /sse disabled independently, and doing so silently broke
+	// legacy ["http"] configs on upgrade.)
 	s.cfgMu.RLock()
 	transports := s.cfg.Gateway.Transports
 	s.cfgMu.RUnlock()
-	httpEnabled, sseEnabled, stdioRequested := false, false, false
+	httpFamilyEnabled, stdioRequested := false, false
 	for _, t := range transports {
 		switch strings.ToLower(strings.TrimSpace(t)) {
-		case "http":
-			httpEnabled = true
-		case "sse":
-			sseEnabled = true
+		case "http", "sse":
+			httpFamilyEnabled = true
 		case "stdio":
 			stdioRequested = true
 		}
 	}
-	// Defensive: never leave the gateway silently unreachable. If config
-	// yields no HTTP-family transport (e.g. transports:["stdio"] only), fall
-	// back to HTTP streamable.
-	if !httpEnabled && !sseEnabled {
-		slog.Warn("api: no HTTP-family transport enabled; falling back to /mcp", "transports", transports)
-		httpEnabled = true
-	}
 	if stdioRequested {
-		slog.Warn("api: transports includes \"stdio\" but the gateway daemon serves over HTTP only — stdio is not implemented and is ignored")
+		slog.Warn("api: transports includes \"stdio\" but the gateway daemon serves MCP over HTTP only — stdio is not implemented and is ignored")
 	}
-	if httpEnabled {
+	if !httpFamilyEnabled {
+		// Empty list or only unknown/stdio tokens: never leave the gateway
+		// unreachable — mount the HTTP family anyway.
+		if len(transports) > 0 {
+			slog.Warn("api: no HTTP-family transport enabled; mounting /mcp + /sse anyway to stay reachable", "transports", transports)
+		}
+		httpFamilyEnabled = true
+	}
+	if httpFamilyEnabled {
 		r.Handle("/mcp", mcpPolicy(clearWriteDeadlineForGET(streamableHandler)))
 		r.Handle("/mcp/*", mcpPolicy(clearWriteDeadlineForGET(streamableHandler)))
-	}
-	if sseEnabled {
 		r.Handle("/sse", mcpPolicy(clearWriteDeadlineForGET(sseHandler)))
 		r.Handle("/sse/*", mcpPolicy(clearWriteDeadlineForGET(sseHandler)))
 	}

@@ -93,7 +93,7 @@ func TestLoad_Defaults(t *testing.T) {
 	cfg, err := Load(path)
 	require.NoError(t, err)
 	assert.Equal(t, 8765, cfg.Gateway.HTTPPort)
-	assert.Equal(t, []string{"http", "sse"}, cfg.Gateway.Transports)
+	assert.Equal(t, []string{"http"}, cfg.Gateway.Transports)
 	assert.Equal(t, models.Duration(30*time.Second), cfg.Gateway.PingInterval)
 	assert.NotNil(t, cfg.Servers)
 }
