@@ -108,10 +108,10 @@ type Manager struct {
 	// manifest is wired by SetManifest (called from main.go after the manifest
 	// is loaded). Nil when the flag is OFF or manifest was not loaded — every
 	// caller nil-checks before use.
-	sfGroup      singleflight.Group
+	sfGroup       singleflight.Group
 	lazyPendingMu sync.Mutex
 	lazyPending   map[string]struct{}
-	manifest     *Manifest
+	manifest      *Manifest
 
 	// TASK T1 — lazy-spawn observability counters. Atomic; incremented from the
 	// detached spawn goroutines (EnsureStarted) and at boot under m.mu

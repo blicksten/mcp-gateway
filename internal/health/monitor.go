@@ -11,10 +11,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
 	"mcp-gateway/internal/models"
+	"mcp-gateway/internal/sapname"
 
 	"github.com/failsafe-go/failsafe-go/bulkhead"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -24,6 +26,14 @@ import (
 const (
 	DefaultPingTimeout          = 5 * time.Second
 	DefaultConsecutiveFailures  = 3
+	// DefaultSAPProbeFailures is the consecutive-failure threshold for the SAP
+	// reachability probe (vsp host-dial / sap-gui session check) before a live,
+	// MCP-ping-OK SAP backend is marked Degraded. Mirrors the MCP-ping threshold
+	// so a single transient VPN/host blip does not flap the status. SAP backends
+	// are deliberately NEVER routed to StatusUnreachable (stdio has no slow-poll
+	// recovery); they ride the same Running/Degraded loop as every other backend,
+	// which re-probes every tick and self-recovers.
+	DefaultSAPProbeFailures     = 3
 	DefaultCircuitBreakerThresh = 5
 	DefaultCircuitBreakerWindow = 300 * time.Second
 	DefaultRESTHealthTimeout    = 5 * time.Second
@@ -141,6 +151,12 @@ type serverState struct {
 	// cadence (first N at 60s, then 5min cap). Reset to 0 on transition
 	// back to StatusRunning.
 	reachProbeCount int
+	// sapProbeFailures counts consecutive SAP reachability-probe failures
+	// (vsp host-dial / sap-gui session check) while the MCP child is alive
+	// (mcpOK). Drives the Degraded threshold in checkOne so a transient blip is
+	// tolerated; reset to 0 on a successful SAP probe / non-SAP backend and by
+	// ResetCircuit. SAP backends never use the StatusUnreachable slow-poll.
+	sapProbeFailures int
 }
 
 // Monitor periodically checks backend server health and manages
@@ -163,6 +179,9 @@ type Monitor struct {
 	CircuitBreakerThreshold          int
 	CircuitBreakerWindow             time.Duration
 	ConsecutiveFailedStartsThreshold int
+	// SAPProbeFailureThreshold is the consecutive SAP-probe-failure count
+	// before a live (MCP-ping-OK) SAP backend is marked Degraded.
+	SAPProbeFailureThreshold int
 	// RestartBackoffBase/Max bound the exponential restart backoff.
 	// A base of 0 disables backoff (unit tests set this to drive many
 	// restart cycles without real time elapsing).
@@ -191,6 +210,7 @@ func NewMonitor(lm LifecycleManager, interval time.Duration, logger *slog.Logger
 		CircuitBreakerThreshold:          DefaultCircuitBreakerThresh,
 		CircuitBreakerWindow:             DefaultCircuitBreakerWindow,
 		ConsecutiveFailedStartsThreshold: DefaultConsecutiveFailedStarts,
+		SAPProbeFailureThreshold:         DefaultSAPProbeFailures,
 		RestartBackoffBase:               RestartBackoffBase,
 		RestartBackoffMax:                RestartBackoffMax,
 	}
@@ -457,6 +477,29 @@ func (m *Monitor) checkOne(ctx context.Context, entry models.ServerEntry) {
 		}
 	}
 
+	// Level 3 (SAP stdio backends only): after MCP ping succeeds, verify SAP
+	// reachability. For vsp-* backends, TCP-probe the SAP_URL host:port. For
+	// sap-gui-* backends, call sap_list_sessions to confirm a live GUI session.
+	// These probes run outside the mutex — they are blocking I/O and would
+	// hold the lock across a network dial, which is forbidden.
+	//
+	// Both probes are only applied when MCP ping already succeeded (mcpOK),
+	// so false-negatives from a dead child process can't reach here.
+	var sapStatus models.ServerStatus
+	var sapReason string
+	if mcpOK {
+		if sapURL, hasSAPURL := entry.Config.SAPEnvURL(); hasSAPURL && sapname.IsVSP(name) {
+			// BUG-STDIO-1/3: vsp-* backend: TCP-probe the SAP application server.
+			if !m.probeReachable(ctx, sapURL) {
+				sapStatus = models.StatusUnreachable
+				sapReason = "SAP host unreachable (VPN?)"
+			}
+		} else if sapname.IsSAPGUI(name) {
+			// BUG-STDIO-2/4: sap-gui-* backend: check for an open GUI session.
+			sapStatus, sapReason = m.checkSAPGUISession(ctx, name)
+		}
+	}
+
 	m.mu.Lock()
 	state := m.getOrCreateState(name)
 
@@ -471,7 +514,39 @@ func (m *Monitor) checkOne(ctx context.Context, entry models.ServerEntry) {
 		if state.uptimeStart.IsZero() {
 			state.uptimeStart = time.Now()
 		}
+
+		// SAP reachability (vsp-*/sap-gui-*). The MCP child is alive (mcpOK), so
+		// a transient SAP-host/GUI-session failure is a DEGRADED condition, never
+		// a terminal StatusUnreachable: stdio backends have no slow-poll recovery
+		// (maybeProbeUnreachable is HTTP-only), so flipping them Unreachable on a
+		// single 3s probe stranded a live, ping-OK backend until a manual
+		// restart. Feed the SAP probe into the SAME running/degraded loop every
+		// backend uses — a short consecutive-failure threshold absorbs VPN/host
+		// blips, and Degraded stays routable and is re-probed every tick, so it
+		// self-recovers when SAP returns.
+		sapBad := sapStatus == models.StatusUnreachable || sapStatus == models.StatusDegraded
+		if sapBad {
+			state.sapProbeFailures++
+			sapFails := state.sapProbeFailures
+			m.mu.Unlock()
+			if sapFails < m.SAPProbeFailureThreshold {
+				// Tolerate a transient blip — keep serving this tick.
+				m.lm.SetStatus(name, models.StatusRunning, "")
+				return
+			}
+			m.lm.SetStatus(name, models.StatusDegraded, sapReason)
+			return
+		}
+		// SAP probe passed (or backend is non-SAP / explicitly running).
+		state.sapProbeFailures = 0
 		m.mu.Unlock()
+
+		if sapStatus == models.StatusRunning {
+			// sap-gui explicit running: graceful tool-missing fallback, or an
+			// active GUI session was found.
+			m.lm.SetStatus(name, models.StatusRunning, "")
+			return
+		}
 
 		if restOK {
 			m.lm.SetStatus(name, models.StatusRunning, "")
@@ -707,6 +782,7 @@ func (m *Monitor) ResetCircuit(ctx context.Context, name string) error {
 	state.consecutiveFailedStarts = 0        // MED-1: stale count would re-disable
 	state.lastHealthyAt = time.Time{}        // MED-1: stale health would skew gate
 	state.nextRestartAllowedAt = time.Time{} // MED-1: clear pending backoff
+	state.sapProbeFailures = 0               // clear SAP-probe streak on reset
 	m.mu.Unlock()
 
 	m.lm.SetStatus(name, models.StatusStopped, "")
@@ -738,6 +814,98 @@ func (m *Monitor) checkMCPPing(ctx context.Context, name string) bool {
 		return false
 	}
 	return true
+}
+
+// sapGUISessionProbeToolName is the read-only MCP tool on the sap-gui backend
+// that reports open SAP GUI sessions without side effects. Chosen over
+// sap_get_session_info because it requires no index arguments and returns a
+// list — zero items == no sessions open.
+const sapGUISessionProbeToolName = "sap_list_sessions"
+
+// mapSAPGUIResult maps the raw output of a sap_list_sessions CallTool call to a
+// ServerStatus + reason pair. Extracted as a pure function so unit tests can
+// exercise all five branches without spawning a real MCP subprocess.
+//
+// Branch table (mirrors checkSAPGUISession's original inline logic):
+//
+//	callErr contains "not found"/"unknown tool" → (StatusRunning,  "")             [tool absent — graceful fallback]
+//	callErr != nil (other transport error)      → (StatusUnreachable, reason)
+//	res.IsError == true                         → (StatusDegraded,   reason from text content)
+//	res text == "[]" or ""                      → (StatusDegraded,   "no SAP GUI session open")
+//	res text non-empty                          → (StatusRunning,    "")
+//
+// serverName and logger are used only for the Warn log on the tool-absent path.
+// Passing a nil logger suppresses that log (useful in tests).
+func mapSAPGUIResult(res *mcp.CallToolResult, callErr error, serverName string, logger *slog.Logger) (models.ServerStatus, string) {
+	if callErr != nil {
+		errStr := callErr.Error()
+		// Tool missing at runtime (backend too old / tool renamed) — fall back
+		// to treating MCP ping alone as sufficient so we don't flip to
+		// unreachable incorrectly.
+		if strings.Contains(errStr, "not found") || strings.Contains(errStr, "unknown tool") {
+			if logger != nil {
+				logger.Warn("sap-gui session probe tool not available; falling back to MCP-ping-only health",
+					"server", serverName, "tool", sapGUISessionProbeToolName)
+			}
+			return models.StatusRunning, ""
+		}
+		return models.StatusUnreachable, "sap-gui session probe failed: " + errStr
+	}
+
+	// The tool returns a JSON array. An empty array means no sessions are open.
+	// We check the raw text content for "[]" as the simplest non-mutating check.
+	if res.IsError {
+		// The MCP tool itself returned an error result (e.g. COM not available).
+		reason := "no SAP GUI session (sap_list_sessions error)"
+		for _, c := range res.Content {
+			if tc, ok := c.(*mcp.TextContent); ok && tc.Text != "" {
+				reason = "no SAP GUI session: " + tc.Text
+				break
+			}
+		}
+		return models.StatusDegraded, reason
+	}
+
+	// Non-error result: inspect text content for an empty list.
+	for _, c := range res.Content {
+		tc, ok := c.(*mcp.TextContent)
+		if !ok {
+			continue
+		}
+		text := strings.TrimSpace(tc.Text)
+		if text == "[]" || text == "" {
+			return models.StatusDegraded, "no SAP GUI session open"
+		}
+		// Non-empty list → at least one session is active.
+		return models.StatusRunning, ""
+	}
+
+	// No content at all — treat as no sessions.
+	return models.StatusDegraded, "no SAP GUI session open (empty response)"
+}
+
+// checkSAPGUISession calls sap_list_sessions on a sap-gui-* backend and
+// interprets the result:
+//   - >=1 sessions in the list → (StatusRunning, "")
+//   - zero sessions or "no session"/"not connected" error → (StatusDegraded, reason)
+//   - tool missing / transport error → (StatusUnreachable, reason)
+//
+// Returns the status to apply and the reason string. Callers must have already
+// confirmed MCP ping succeeded before calling this. The ctx passed in should
+// already carry an appropriate deadline.
+func (m *Monitor) checkSAPGUISession(ctx context.Context, name string) (models.ServerStatus, string) {
+	session, ok := m.lm.Session(name)
+	if !ok {
+		return models.StatusUnreachable, "no MCP session for sap-gui probe"
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, DefaultPingTimeout)
+	defer cancel()
+
+	result, err := session.CallTool(callCtx, &mcp.CallToolParams{
+		Name: sapGUISessionProbeToolName,
+	})
+	return mapSAPGUIResult(result, err, name, m.logger)
 }
 
 // checkRESTHealth performs an HTTP GET to the health endpoint.

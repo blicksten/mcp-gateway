@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — Stability: SAP stdio backends stuck Unreachable on transient SAP/VPN blip
+
+**Incident 2026-06-18.** `vsp-*` and `sap-gui-*` (stdio) backends were flipped to terminal `StatusUnreachable` on a single ~3s SAP-reachability probe failure even though the MCP child was alive and answering MCP ping. `StatusUnreachable` recovery (`maybeProbeUnreachable`) early-returns for stdio (`Config.URL == ""`) and suture returns `ErrDoNotRestart` for Unreachable, so a live, ping-OK backend was stranded until a manual `mcp-ctl servers restart`. The router refuses Unreachable (`Running`/`Degraded` route fine), so all SAP tools silently vanished. Regular backends were unaffected (they ride the MCP-ping → threshold → Degraded → restart loop).
+
+**Root cause:** SAP reachability was a bolted-on third probe level in `checkOne` that (1) had no consecutive-failure threshold — a single blip flipped the whole backend — and (2) reused `StatusUnreachable`, whose recovery/suture handling is HTTP-URL-only, a dead-end for stdio.
+
+### Fixed
+
+- **SAP reachability is now a thresholded `Degraded` signal, never `Unreachable` for stdio** (`internal/health/monitor.go`, `checkOne`): a bad SAP probe (`StatusUnreachable`/`StatusDegraded` from the vsp host-dial or sap-gui session check) feeds a new `serverState.sapProbeFailures` counter against `SAPProbeFailureThreshold` (= `DefaultSAPProbeFailures` = 3). Below threshold → `Running` (absorbs transient VPN/host blips); at/above → `Degraded`. `Degraded` stays routable and is re-probed every health tick, so the backend self-recovers to `Running` when SAP returns. Counter resets on a good probe and in `ResetCircuit`. Restores the invariant that stdio backends never enter `StatusUnreachable`.
+- **Removed the start-time vsp SAP TCP pre-check** (`internal/lifecycle/manager.go`, `Start`): it set terminal `StatusUnreachable` and aborted the spawn. The vsp child serves MCP independently of SAP reachability, so SAP is now a runtime `Degraded` signal owned by the monitor. The HTTP (`cfg.URL`) pre-check is untouched.
+
+**Verified:** `go vet ./...` clean; `go test ./...` green (20 packages, incl. new threshold + self-recovery tests in `monitor_sap_test.go`); PAL (gpt-5.1-codex-mini) verdict SHIP; live induced-flap on `vsp-TST`: `running` (blip tolerated) → `degraded` (not `unreachable`) → restore → `running`; post-deploy `mcp-ctl servers list` shows all `vsp-*` running and `sap-gui-*` `degraded` (no open GUI session) instead of stuck `unreachable`, RESTARTS 0.
+
+---
+
 ## [Unreleased] — Stability: GET notification-stream 400 hot-loop storm
 
 **Incident 2026-06-14.** With 13 parallel Claude Code sessions the gateway took a flat **~77 transport requests/second** (zero jitter, evenly spread across all 23 MCP surfaces), bloating `daemon.log` to **832 MB** and saturating the MCP router so new `initialize` handshakes timed out (PAL/orchestrator namespaces failed to register in-session). The daemon process itself was healthy — this was a request storm, not a respawn cascade.
