@@ -348,3 +348,83 @@ func TestServerStatus_Values(t *testing.T) {
 		seen[s] = true
 	}
 }
+
+// --- W-5b: orchestrator REST defaults via ApplyDefaults ---
+
+// TestApplyDefaults_OrchestratorGetsRESTDefaults verifies that a config
+// containing an "orchestrator" entry with no rest_url gets the canonical
+// REST defaults injected so Level-2 health monitoring fires automatically.
+func TestApplyDefaults_OrchestratorGetsRESTDefaults(t *testing.T) {
+	cfg := &Config{
+		Servers: map[string]*ServerConfig{
+			OrchestratorServerName: {Command: absCmd(t)},
+		},
+	}
+	cfg.ApplyDefaults()
+
+	sc := cfg.Servers[OrchestratorServerName]
+	require.NotNil(t, sc)
+	assert.Equal(t, OrchestratorRESTURL, sc.RestURL,
+		"orchestrator must get default rest_url from ApplyDefaults")
+	assert.Equal(t, OrchestratorHealthEndpoint, sc.HealthEndpoint,
+		"orchestrator must get default health_endpoint from ApplyDefaults")
+}
+
+// TestApplyDefaults_OrchestratorExplicitRESTNotOverridden verifies that an
+// explicit rest_url in the orchestrator config is never overridden by
+// ApplyDefaults (explicit config always wins over the default).
+func TestApplyDefaults_OrchestratorExplicitRESTNotOverridden(t *testing.T) {
+	customURL := "http://192.168.1.42:8100"
+	cfg := &Config{
+		Servers: map[string]*ServerConfig{
+			OrchestratorServerName: {
+				Command:        absCmd(t),
+				RestURL:        customURL,
+				HealthEndpoint: "/custom-health",
+			},
+		},
+	}
+	cfg.ApplyDefaults()
+
+	sc := cfg.Servers[OrchestratorServerName]
+	require.NotNil(t, sc)
+	assert.Equal(t, customURL, sc.RestURL,
+		"explicit rest_url must not be overridden by ApplyDefaults")
+	assert.Equal(t, "/custom-health", sc.HealthEndpoint,
+		"explicit health_endpoint must not be overridden by ApplyDefaults")
+}
+
+// TestApplyDefaults_NonOrchestratorUnaffected verifies that ApplyDefaults
+// does not inject REST defaults into backends whose name is not "orchestrator".
+func TestApplyDefaults_NonOrchestratorUnaffected(t *testing.T) {
+	cfg := &Config{
+		Servers: map[string]*ServerConfig{
+			"pal":    {Command: absCmd(t)},
+			"my-app": {URL: "http://localhost:3000/mcp"},
+		},
+	}
+	cfg.ApplyDefaults()
+
+	for name, sc := range cfg.Servers {
+		assert.Empty(t, sc.RestURL,
+			"server %q must not receive orchestrator REST defaults", name)
+		assert.Empty(t, sc.HealthEndpoint,
+			"server %q must not receive orchestrator REST defaults", name)
+	}
+}
+
+// TestApplyDefaults_NoOrchestratorEntry_NoSideEffect verifies that when no
+// server named "orchestrator" is in the config, ApplyDefaults does not
+// create one or produce any other side effect.
+func TestApplyDefaults_NoOrchestratorEntry_NoSideEffect(t *testing.T) {
+	cfg := &Config{
+		Servers: map[string]*ServerConfig{
+			"other": {Command: absCmd(t)},
+		},
+	}
+	cfg.ApplyDefaults()
+
+	assert.Len(t, cfg.Servers, 1, "ApplyDefaults must not add new servers")
+	_, hasOrch := cfg.Servers[OrchestratorServerName]
+	assert.False(t, hasOrch, "ApplyDefaults must not create an orchestrator entry")
+}

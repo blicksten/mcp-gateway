@@ -54,6 +54,20 @@ var dangerousEnvKeys = map[string]bool{
 // ToolNameSeparator is used to namespace tools: "server__tool".
 const ToolNameSeparator = "__"
 
+// OrchestratorServerName is the canonical gateway-config name for the
+// orchestrator stdio backend. Used by ApplyDefaults to inject REST health
+// defaults and by the health monitor to emit a missing-REST warning.
+const OrchestratorServerName = "orchestrator"
+
+// OrchestratorRESTURL is the default REST base URL for the orchestrator daemon.
+// The orchestrator listens on :8100; /health returns 200 when the daemon is alive.
+// These constants are the single source of truth — health monitor and config
+// defaults both read from here.
+const OrchestratorRESTURL = "http://127.0.0.1:8100"
+
+// OrchestratorHealthEndpoint is the REST health endpoint path on the orchestrator daemon.
+const OrchestratorHealthEndpoint = "/health"
+
 // serverNameRe matches valid server names: alphanumeric start, up to 64 chars.
 var serverNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 
@@ -75,13 +89,13 @@ func ValidateServerName(name string) error {
 type ServerStatus string
 
 const (
-	StatusStopped     ServerStatus = "stopped"
-	StatusStarting    ServerStatus = "starting"
-	StatusRunning     ServerStatus = "running"
-	StatusDegraded    ServerStatus = "degraded"
-	StatusError       ServerStatus = "error"
-	StatusRestarting  ServerStatus = "restarting"
-	StatusDisabled    ServerStatus = "disabled"
+	StatusStopped    ServerStatus = "stopped"
+	StatusStarting   ServerStatus = "starting"
+	StatusRunning    ServerStatus = "running"
+	StatusDegraded   ServerStatus = "degraded"
+	StatusError      ServerStatus = "error"
+	StatusRestarting ServerStatus = "restarting"
+	StatusDisabled   ServerStatus = "disabled"
 	// StatusUnreachable indicates a transport-level failure where the
 	// backend host cannot be reached at the TCP layer (host down, DNS
 	// failure, VPN off, network partition). Distinct from StatusError
@@ -128,7 +142,7 @@ type ServerConfig struct {
 	HealthEndpoint string `json:"health_endpoint,omitempty"`
 
 	// Behavior flags.
-	Disabled    bool `json:"disabled,omitempty"`
+	Disabled    bool  `json:"disabled,omitempty"`
 	ExposeTools *bool `json:"expose_tools,omitempty"` // default true when nil
 }
 
@@ -322,9 +336,9 @@ func (tf *ToolFilter) Validate() error {
 
 // GatewaySettings controls global gateway behavior.
 type GatewaySettings struct {
-	Transports      []string    `json:"transports,omitempty"`       // e.g. ["stdio","http","sse"]
+	Transports      []string    `json:"transports,omitempty"` // e.g. ["stdio","http","sse"]
 	HTTPPort        int         `json:"http_port,omitempty"`
-	BindAddress     string      `json:"bind_address,omitempty"`     // IP to bind; default "127.0.0.1"
+	BindAddress     string      `json:"bind_address,omitempty"` // IP to bind; default "127.0.0.1"
 	PingInterval    Duration    `json:"ping_interval,omitempty"`
 	ToolFilter      *ToolFilter `json:"tool_filter,omitempty"`
 	CompressSchemas bool        `json:"compress_schemas,omitempty"` // Truncate tool descriptions, strip schema examples
@@ -345,7 +359,7 @@ type GatewaySettings struct {
 
 // MCP transport policy mode constants (GatewaySettings.AuthMCPTransport).
 const (
-	AuthMCPTransportLoopbackOnly  = "loopback-only"
+	AuthMCPTransportLoopbackOnly   = "loopback-only"
 	AuthMCPTransportBearerRequired = "bearer-required"
 )
 
@@ -361,8 +375,8 @@ func ValidateBindAddress(addr string) (nonLoopback bool, err error) {
 
 // Config is the top-level gateway configuration.
 type Config struct {
-	Gateway         GatewaySettings          `json:"gateway"`
-	Servers         map[string]*ServerConfig  `json:"servers"`
+	Gateway GatewaySettings          `json:"gateway"`
+	Servers map[string]*ServerConfig `json:"servers"`
 }
 
 // ApplyDefaults fills in zero-value fields with sensible defaults.
@@ -384,6 +398,19 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Servers == nil {
 		c.Servers = make(map[string]*ServerConfig)
+	}
+
+	// W-5b: inject orchestrator REST health defaults so Level-2 monitoring
+	// fires automatically even when the operator omits rest_url/health_endpoint
+	// from config.json. Only applies when:
+	//   1. A server named "orchestrator" exists in the config.
+	//   2. Its RestURL is currently unset (explicit config always wins).
+	// This keeps the change non-breaking for operators who have already
+	// configured a non-default URL, and harmless for machines that don't
+	// run the orchestrator (no such server in config → no change).
+	if sc, ok := c.Servers[OrchestratorServerName]; ok && sc != nil && sc.RestURL == "" {
+		sc.RestURL = OrchestratorRESTURL
+		sc.HealthEndpoint = OrchestratorHealthEndpoint
 	}
 }
 
@@ -449,10 +476,10 @@ type ServerEntry struct {
 
 // MetricsResponse is the JSON payload for GET /api/v1/metrics.
 type MetricsResponse struct {
-	Timestamp     time.Time          `json:"timestamp"`
-	GatewayUptime Duration           `json:"gateway_uptime"`
+	Timestamp     time.Time           `json:"timestamp"`
+	GatewayUptime Duration            `json:"gateway_uptime"`
 	Servers       []ServerMetricsInfo `json:"servers"`
-	Tokens        TokenMetrics       `json:"tokens"`
+	Tokens        TokenMetrics        `json:"tokens"`
 	// LazySpawn carries the C2 lazy-spawn observability counters (TASK T1).
 	// It is populated only when the MCP_GATEWAY_LAZY_SPAWN flag is enabled;
 	// nil (and omitted from JSON) when the feature is OFF, so the default-config
@@ -486,10 +513,10 @@ type LazySpawnMetrics struct {
 
 // ServerMetricsInfo holds operational metrics for a single backend server.
 type ServerMetricsInfo struct {
-	Name         string   `json:"name"`
-	RestartCount int      `json:"restart_count"`
-	MTBF         Duration `json:"mtbf"` // 0 when no failures recorded
-	Uptime       Duration `json:"uptime"`
+	Name         string     `json:"name"`
+	RestartCount int        `json:"restart_count"`
+	MTBF         Duration   `json:"mtbf"` // 0 when no failures recorded
+	Uptime       Duration   `json:"uptime"`
 	LastCrashAt  *time.Time `json:"last_crash_at,omitempty"` // nil if never crashed
 }
 
