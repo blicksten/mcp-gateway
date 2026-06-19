@@ -918,13 +918,20 @@ func mapSAPGUIResult(res *mcp.CallToolResult, callErr error, serverName, expectS
 	// state. Aggregate all blocks, then derive a fail-CLOSED verdict.
 	recs, sawText := parseSAPSessions(res.Content)
 
-	// SID unknown (non-sap-gui name / env missing) → any session counts (legacy
-	// lenient fallback; real sap-gui backends always carry a SID).
-	if expectSystem == "" {
-		if len(recs) > 0 {
-			return models.StatusRunning, ""
+	// SID unknown (name parse / env missing). A real sap-gui backend ALWAYS
+	// carries a SID, so this is a misconfiguration. Fail CLOSED (review HIGH):
+	// require at least one LOGGED-IN session (non-empty user) before reporting
+	// Running — a bare login-screen window or a foreign SID must NOT green it.
+	if strings.TrimSpace(expectSystem) == "" {
+		for _, r := range recs {
+			if strings.TrimSpace(r.User) != "" {
+				return models.StatusRunning, ""
+			}
 		}
-		return models.StatusDegraded, sapNoSessionReason(sawText)
+		if len(recs) == 0 {
+			return models.StatusDegraded, sapNoSessionReason(sawText)
+		}
+		return models.StatusDegraded, "sap-gui backend not signed in (SID unknown)"
 	}
 
 	// Per-system verdict. SAP GUI Scripting exposes a SINGLE global engine, so
@@ -1002,7 +1009,13 @@ func parseSAPSessions(contents []mcp.Content) (recs []sapSessionRec, sawText boo
 // when its system_name equals expectSystem (the SID, case-insensitive) AND it
 // carries a non-empty user (empty user = window still at the SAP login screen).
 // When expectUser/expectClient are known they must also match (defence in depth).
+// The expected values are normalised (TrimSpace) up front so stray whitespace in
+// SAP_USER / SAP_CLIENT env (review MEDIUM) can't strand a genuinely logged-in
+// backend in Degraded.
 func sapSessionsMatch(recs []sapSessionRec, expectSystem, expectUser, expectClient string) bool {
+	expectSystem = strings.TrimSpace(expectSystem)
+	expectUser = strings.TrimSpace(expectUser)
+	expectClient = strings.TrimSpace(expectClient)
 	for _, s := range recs {
 		if !strings.EqualFold(strings.TrimSpace(s.SystemName), expectSystem) {
 			continue

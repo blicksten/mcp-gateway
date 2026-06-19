@@ -587,11 +587,21 @@ func TestMapSAPGUIResult(t *testing.T) {
 			wantReasonSub: "no SAP GUI session open",
 		},
 		{
-			name:            "res text content non-empty list -> StatusRunning",
-			res:             okResult(textContent(`[{"id":1,"name":"SAPLogon"}]`)),
+			// SID unknown (no expectSystem) + a LOGGED-IN session present -> Running.
+			name:            "SID unknown + logged-in session -> StatusRunning",
+			res:             okResult(textContent(`[{"system_name":"X","user":"NAUMOV"}]`)),
 			callErr:         nil,
 			wantStatus:      models.StatusRunning,
 			wantEmptyReason: true,
+		},
+		{
+			// SID unknown + only a login-screen window (user empty) must FAIL CLOSED
+			// (review HIGH) — this used to false-green on any desktop window.
+			name:          "SID unknown + only login-screen window -> StatusDegraded",
+			res:           okResult(textContent(`{"system_name":"X","user":""}`)),
+			callErr:       nil,
+			wantStatus:    models.StatusDegraded,
+			wantReasonSub: "SID unknown",
 		},
 		{
 			name:          "res no content at all -> StatusDegraded empty response",
@@ -688,6 +698,20 @@ func TestMapSAPGUIResult(t *testing.T) {
 			expectSystem:    "CTC",
 			expectUser:      "NAUMOV",
 			expectClient:    "100",
+			wantStatus:      models.StatusRunning,
+			wantEmptyReason: true,
+		},
+		{
+			// Dirty env (review MEDIUM): stray whitespace / case in expected
+			// SID/USER/CLIENT must NOT strand a genuinely logged-in backend.
+			name: "logged-in but whitespace/case in expected values -> StatusRunning",
+			res: okResult(
+				textContent(`{"system_name":"CTC","client":"100","user":"NAUMOV"}`),
+			),
+			callErr:         nil,
+			expectSystem:    " ctc ",
+			expectUser:      "  NAUMOV ",
+			expectClient:    " 100 ",
 			wantStatus:      models.StatusRunning,
 			wantEmptyReason: true,
 		},
