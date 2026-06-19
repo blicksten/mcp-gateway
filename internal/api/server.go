@@ -41,6 +41,22 @@ import (
 // exit (os.Exit(0)) so the supervisor does not restart the losing process.
 var ErrAlreadyRunning = errors.New("another gateway instance is already serving")
 
+// sessionCountAdapter bridges *ResumableStreamableHTTPHandler to the
+// proxy.ClientCounter interface used by the idle-exit monitor (TASK A).
+// A nil handler is safe — ClientCount returns 0, which is conservative
+// (0 clients = idle guard passes; the inflight + time guards still protect
+// against a spurious early exit).
+type sessionCountAdapter struct {
+	h *ResumableStreamableHTTPHandler
+}
+
+func (a sessionCountAdapter) ClientCount() int {
+	if a.h == nil {
+		return 0
+	}
+	return a.h.SessionCount()
+}
+
 // Server holds all dependencies for the HTTP server.
 type Server struct {
 	lm         *lifecycle.Manager
@@ -154,6 +170,12 @@ type Server struct {
 	// in a goroutine — the WaitGroup ensures we don't return from
 	// ListenAndServe before those goroutines finish.
 	bgStartWG sync.WaitGroup
+
+	// streamableHandler is the ResumableStreamableHTTPHandler built in
+	// Handler(). Stored here so ListenAndServe can pass it as a
+	// proxy.ClientCounter to the idle-exit monitor (TASK A). Nil before
+	// Handler() is first called; the sessionCountAdapter is nil-safe.
+	streamableHandler *ResumableStreamableHTTPHandler
 }
 
 // Addr returns the bound listener address, or nil if ListenAndServe has
@@ -638,6 +660,11 @@ func (s *Server) Handler() http.Handler {
 	// IDs. The eviction timer also calls registry.Delete (see handler), so
 	// both the live sessions map and the registry are pruned together.
 	streamableHandler.SessionTimeout = 24 * time.Hour
+	// TASK A: store the handler so ListenAndServe can wire it to the idle-exit
+	// monitor. The field is written once (before any traffic) and read once
+	// (in ListenAndServe after Handler() returns) so no additional locking is
+	// needed beyond the write-before-read ordering that ListenAndServe enforces.
+	s.streamableHandler = streamableHandler
 	sseHandler := mcp.NewSSEHandler(
 		func(r *http.Request) *mcp.Server { return s.gw.Server() }, nil,
 	)
@@ -955,6 +982,21 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		IdleTimeout:    5 * time.Minute,
 		MaxHeaderBytes: 64 << 10, // 64 KB — M-003 fix
 	}
+
+	// TASK A: wire the idle-exit monitor now that Handler() has been called
+	// (s.streamableHandler is set). The shutdown closure reads s.shutdownFn
+	// under s.shutdownMu at call-time, not at wiring time, so it works
+	// correctly even if main.go calls SetShutdownFn after NewServer but
+	// before any realistic 5-min idle window elapses.
+	s.gw.ConfigureIdleExit(sessionCountAdapter{s.streamableHandler}, func() {
+		s.shutdownMu.Lock()
+		fn := s.shutdownFn
+		s.shutdownMu.Unlock()
+		if fn != nil {
+			fn()
+		}
+	})
+	go s.gw.ServeIdleExit(ctx)
 
 	// Graceful shutdown wiring. When ctx cancels (signal handler in main, or
 	// the REST /api/v1/shutdown admin endpoint), give in-flight MCP tool

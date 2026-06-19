@@ -66,6 +66,10 @@ type Gateway struct {
 	// unnamespaced tool names, outer map keyed by backend name.
 	registeredTools   map[string]struct{}
 	backendRegistered map[string]map[string]struct{}
+
+	// idleExit holds the idle exit monitor (TASK A). Configured via
+	// ConfigureIdleExit; started via ServeIdleExit(ctx).
+	idleExit idleExitField
 }
 
 // New creates a new Gateway with the given config and lifecycle manager.
@@ -978,4 +982,58 @@ func (g *Gateway) ListTools() []models.ToolInfo {
 		}
 	}
 	return result
+}
+
+// ConfigureIdleExit configures the idle-exit monitor (TASK A). Call this
+// once after creating the Gateway and before ServeIdleExit. It reads the
+// idle window from MCP_GATEWAY_IDLE_EXIT_SECONDS (default 300 s; 0 disables).
+//
+// counter: an object that reports the current number of connected MCP
+// clients (e.g. ResumableStreamableHTTPHandler from internal/api). Pass nil
+// to use the conservative default (assumes a client is always present; the
+// monitor will never trigger exit on the client-count guard alone — still
+// useful for the inflight guard). Callers SHOULD wire a real counter.
+//
+// shutdownFn: the root context cancel from signal.NotifyContext, which is
+// the same function wired to POST /api/v1/shutdown via SetShutdownFn. The
+// monitor calls this to trigger a clean daemon exit.
+func (g *Gateway) ConfigureIdleExit(counter ClientCounter, shutdownFn func()) {
+	window := parseIdleExitWindow(g.logger)
+	if window == 0 {
+		return // disabled by config
+	}
+	cfg := idleExitConfig{
+		window:   window,
+		counter:  counter,
+		shutdown: shutdownFn,
+		logger:   g.logger,
+	}
+	mon := newIdleExitMonitor(cfg, g.router)
+
+	g.idleExit.Lock()
+	g.idleExit.monitor = mon
+	g.idleExit.Unlock()
+}
+
+// ServeIdleExit starts the idle-exit monitor goroutine if one was configured
+// via ConfigureIdleExit. It is a no-op if ConfigureIdleExit was not called
+// or if the idle window is disabled (MCP_GATEWAY_IDLE_EXIT_SECONDS=0). Safe
+// to call multiple times; the goroutine starts at most once.
+//
+// Intended to be launched as an errgroup goroutine alongside the HTTP server:
+//
+//	g.Go(func() error { gw.ServeIdleExit(ctx); return nil })
+func (g *Gateway) ServeIdleExit(ctx context.Context) {
+	g.idleExit.Lock()
+	mon := g.idleExit.monitor
+	already := g.idleExit.started
+	if mon != nil && !already {
+		g.idleExit.started = true
+	}
+	g.idleExit.Unlock()
+
+	if mon == nil || already {
+		return
+	}
+	mon.run(ctx)
 }
