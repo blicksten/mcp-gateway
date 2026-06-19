@@ -4,6 +4,8 @@ package lifecycle
 
 import (
 	"fmt"
+	"log/slog"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -14,6 +16,16 @@ type jobHandle = windows.Handle
 
 // newJobObject creates a Windows Job Object configured to kill all assigned
 // processes when the last handle is closed (i.e., when the gateway daemon exits).
+//
+// L4 non-inheritable assertion: CreateJobObject is called with nil
+// SECURITY_ATTRIBUTES (bInheritHandles=false, no SA_INHERIT flag) and a nil
+// name, so:
+//   - the handle is not inheritable by child processes;
+//   - the job has no kernel name, so a foreign process cannot open it via
+//     OpenJobObject(name) — it would need to inherit or duplicate our handle.
+//
+// Therefore L4 (foreign OpenJobObject leaking the job handle) is already
+// mitigated by construction. No ACL restriction is required.
 func newJobObject() (jobHandle, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
@@ -38,6 +50,34 @@ func newJobObject() (jobHandle, error) {
 		return 0, fmt.Errorf("SetInformationJobObject: %w", err)
 	}
 	return job, nil
+}
+
+// retryAssignProcess attempts assignProcess with exponential backoff.
+// Tries up to maxAssignAttempts times with 50/100/200ms sleeps between
+// attempts (~0.35s total worst case) so a transient race (e.g. kernel
+// object not yet fully initialised) is tolerated without blocking startup
+// noticeably.
+// Returns nil on success, or the last error after all retries are exhausted.
+func retryAssignProcess(job jobHandle, pid uint32, logger *slog.Logger, name string) error {
+	const maxAssignAttempts = 4
+	delay := 50 * time.Millisecond
+	var lastErr error
+	for attempt := 1; attempt <= maxAssignAttempts; attempt++ {
+		if err := assignProcess(job, pid); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if attempt < maxAssignAttempts {
+			logger.Warn("assign process to job object failed, retrying",
+				"server", name, "pid", pid, "attempt", attempt, "backoff", delay)
+			time.Sleep(delay)
+			delay *= 2
+		}
+	}
+	logger.Error("assign process to job object failed after retries; killing unassigned backend",
+		"server", name, "pid", pid, "error", lastErr)
+	return fmt.Errorf("AssignProcessToJobObject after %d attempts: %w", maxAssignAttempts, lastErr)
 }
 
 // assignProcess assigns a running process to the Job Object.

@@ -405,9 +405,30 @@ func (m *Manager) connectStdio(ctx context.Context, name string, client *mcp.Cli
 	// TOCTOU: small race between CommandTransport.Start() and this call;
 	// accepted limitation — see ADR in docs/PLAN-phase5.md.
 	// jobClosed guard prevents calling assignProcess after StopAll has closed the handle.
+	//
+	// L2 remediation (TASK D′, 2026-06-19): a process that fails assignment
+	// is OUTSIDE the job and will survive gateway death — a real orphan leak.
+	// We retry with exponential backoff, then kill and return an error on
+	// persistent failure so the caller (Start) sets StatusError.
+	//
+	// DoS guard: returning an error here propagates to Start(), which sets
+	// StatusError. BackendSupervisor.Serve() returns that error to suture.
+	// Suture's FailureBackoff=15s + FailureThreshold=5/FailureDecay=30s
+	// provides rate-limiting: at most 5 restarts in 30s before the circuit
+	// opens (suture stops retrying). No tight loop is possible.
 	if cmd.Process != nil && m.jobValid && !m.jobClosed.Load() {
-		if err := assignProcess(m.job, uint32(cmd.Process.Pid)); err != nil {
-			m.logger.Warn("failed to assign process to job object", "server", name, "pid", cmd.Process.Pid, "error", err)
+		if assignErr := retryAssignProcess(m.job, uint32(cmd.Process.Pid), m.logger, name); assignErr != nil {
+			// The process is outside the job and cannot be reaped on gateway exit.
+			// Close the MCP session first so the SDK's transport goroutines
+			// drain cleanly, then kill the underlying OS process.
+			_ = session.Close()
+			_ = terminateProcessGroup(cmd.Process)
+			_ = killProcessGroup(cmd.Process)
+			_ = cmd.Wait()
+			// registry.Add (further below) is intentionally NOT reached: the
+			// process was just killed inline, so there is nothing to reap and no
+			// orphan-registry entry is needed (mirrors the connect-error path).
+			return nil, nil, nil, nil, fmt.Errorf("job assign: %w", assignErr)
 		}
 	}
 
