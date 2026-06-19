@@ -147,6 +147,59 @@ describe('SapSystemItem (Phase 17.5 — imported KeePass row)', () => {
 	});
 });
 
+describe('SapSystemItem (stale / gateway offline)', () => {
+	it('stale=true forces debug-disconnect icon (disabledForeground) for daemon-backed row', () => {
+		const item = new SapSystemItem(makeSystem({ status: 'running' }), false, true);
+		const icon = item.iconPath as { id: string; color?: { id: string } };
+		assert.strictEqual(icon.id, 'debug-disconnect',
+			'stale system row must show debug-disconnect regardless of last-known status');
+		assert.strictEqual(icon.color?.id, 'disabledForeground',
+			'stale icon must use disabledForeground');
+	});
+
+	it('stale=true appends " · offline" to description', () => {
+		const item = new SapSystemItem(makeSystem(), false, true);
+		const desc = item.description as string;
+		assert.ok(desc.endsWith(' · offline'),
+			`description must end with " · offline" when stale; got: ${desc}`);
+	});
+
+	it('stale=true adds offline notice to tooltip', () => {
+		const item = new SapSystemItem(makeSystem(), false, true);
+		const tip = (item.tooltip as unknown as MockMarkdownString).value;
+		assert.ok(tip.includes('gateway offline'),
+			`tooltip must mention "gateway offline" when stale; got: ${tip}`);
+		assert.ok(tip.includes('last known state'),
+			`tooltip must mention "last known state" when stale; got: ${tip}`);
+	});
+
+	it('stale=false preserves normal icon (non-stale unchanged)', () => {
+		const item = new SapSystemItem(makeSystem({ status: 'running' }), false, false);
+		const icon = item.iconPath as { id: string; color?: { id: string } };
+		assert.notStrictEqual(icon.id, 'debug-disconnect',
+			'non-stale running row must NOT show debug-disconnect');
+		assert.strictEqual(icon.id, 'vm-running');
+	});
+
+	it('stale=false description has no offline suffix', () => {
+		const item = new SapSystemItem(makeSystem(), false, false);
+		const desc = item.description as string;
+		assert.ok(!desc.includes('offline'),
+			`non-stale description must not include "offline"; got: ${desc}`);
+	});
+
+	it('imported row ignores stale flag — keeps cloud-download icon', () => {
+		const sys = { key: 'DEV-001', sid: 'DEV', client: '001', status: 'stopped' as const, imported: true as const };
+		const item = new SapSystemItem(sys, false, true);
+		const icon = item.iconPath as { id: string };
+		assert.strictEqual(icon.id, 'cloud-download',
+			'imported row must keep cloud-download icon even when stale');
+		const desc = item.description as string;
+		assert.ok(!desc.includes('offline'),
+			'imported row description must not include offline suffix even when stale');
+	});
+});
+
 describe('SapComponentItem', () => {
 	const system = makeSystem();
 
@@ -201,5 +254,54 @@ describe('SapComponentItem', () => {
 		assert.ok(!md.value.includes('PID'));
 		assert.ok(!md.value.includes('Restarts'));
 		assert.ok(!md.value.includes('Error'));
+	});
+});
+
+describe('SapComponentItem (stale / gateway offline)', () => {
+	const system = makeSystem();
+
+	it('stale=true forces debug-disconnect icon with disabledForeground', () => {
+		const item = new SapComponentItem(system, 'vsp', makeVsp('running'), true);
+		const icon = item.iconPath as { id: string; color?: { id: string } };
+		assert.strictEqual(icon.id, 'debug-disconnect',
+			'stale component must show debug-disconnect icon');
+		assert.strictEqual(icon.color?.id, 'disabledForeground',
+			'stale icon color must be disabledForeground');
+	});
+
+	it('stale=true appends " · offline" to description', () => {
+		const item = new SapComponentItem(system, 'vsp', makeVsp('running'), true);
+		const desc = item.description as string;
+		assert.ok(desc.endsWith(' · offline'),
+			`stale component description must end with " · offline"; got: ${desc}`);
+	});
+
+	it('stale=true prepends offline notice to tooltip', () => {
+		const item = new SapComponentItem(system, 'gui', makeGui('running'), true);
+		const md = item.tooltip as unknown as MockMarkdownString;
+		assert.ok(md.value.includes('gateway offline'),
+			`stale component tooltip must mention "gateway offline"; got: ${md.value}`);
+	});
+
+	it('stale=false preserves normal icon', () => {
+		const item = new SapComponentItem(system, 'vsp', makeVsp('running'), false);
+		const icon = item.iconPath as { id: string; color?: { id: string } };
+		assert.strictEqual(icon.id, 'vm-running',
+			'non-stale running VSP must use vm-running icon');
+		assert.notStrictEqual(icon.id, 'debug-disconnect');
+	});
+
+	it('stale=false description has no offline suffix', () => {
+		const item = new SapComponentItem(system, 'vsp', makeVsp('running'), false);
+		const desc = item.description as string;
+		assert.strictEqual(desc, 'running',
+			`non-stale description must equal the raw status; got: ${desc}`);
+	});
+
+	it('stale=false tooltip has no offline notice', () => {
+		const item = new SapComponentItem(system, 'gui', makeGui('stopped'), false);
+		const md = item.tooltip as unknown as MockMarkdownString;
+		assert.ok(!md.value.includes('gateway offline'),
+			'non-stale component tooltip must not include offline notice');
 	});
 });

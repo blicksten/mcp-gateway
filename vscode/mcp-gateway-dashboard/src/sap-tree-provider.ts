@@ -49,7 +49,8 @@ export class SapTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem>
 			if (this.cache.lastRefreshFailed && systems.length === 0) {
 				return [new PlaceholderTreeItem()];
 			}
-			return systems.map((sys) => new SapSystemItem(sys, this.hierarchical));
+			const stale = this.cache.lastRefreshFailed;
+			return systems.map((sys) => new SapSystemItem(sys, this.hierarchical, stale));
 		}
 		if (!this.hierarchical) { return []; }
 		if (element instanceof SapSystemItem) {
@@ -57,12 +58,13 @@ export class SapTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem>
 			// Make the contract explicit so future refactors can't accidentally
 			// treat them as expandable.
 			if (element.system.imported) { return []; }
+			const stale = this.cache.lastRefreshFailed;
 			const children: SapComponentItem[] = [];
 			if (element.system.vsp) {
-				children.push(new SapComponentItem(element.system, 'vsp', element.system.vsp));
+				children.push(new SapComponentItem(element.system, 'vsp', element.system.vsp, stale));
 			}
 			if (element.system.gui) {
-				children.push(new SapComponentItem(element.system, 'gui', element.system.gui));
+				children.push(new SapComponentItem(element.system, 'gui', element.system.gui, stale));
 			}
 			return children;
 		}
@@ -107,7 +109,11 @@ export class SapTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem>
 		// "no SAP rows found" (empty tree). Ensures the tree re-fires on
 		// recovery even when the recovered list is also empty.
 		const placeholder = lastRefreshFailed && systems.length === 0;
-		const parts: string[] = [placeholder ? 'P' : 'N', this.hierarchical ? 'H' : 'F'];
+		// Include lastRefreshFailed explicitly so the tree re-renders when the
+		// gateway goes offline mid-session (stale icons need to become grey).
+		// Mirrors BackendTreeProvider.computeFingerprint.
+		const staleMark = lastRefreshFailed ? 'S' : '';
+		const parts: string[] = [placeholder ? 'P' : 'N', this.hierarchical ? 'H' : 'F', staleMark];
 		for (const s of systems) {
 			parts.push([
 				s.key,

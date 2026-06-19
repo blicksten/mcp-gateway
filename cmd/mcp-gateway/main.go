@@ -155,6 +155,19 @@ func main() {
 		Level: levelVar,
 	}))
 
+	// F-2 (stability audit 2026-06-02): apply a default Go heap soft-cap when
+	// the launcher did not set GOMEMLIMIT, so the OOM mitigation (FM-10) is
+	// intrinsic to the daemon regardless of who spawns it. The VS Code
+	// extension sets GOMEMLIMIT=512MiB explicitly; CLI / Task Scheduler /
+	// manual / CI launches previously ran uncapped. An explicit GOMEMLIMIT env
+	// (already honoured by the Go runtime at startup, including the value "off")
+	// takes precedence — we set a default only when the env is absent.
+	if os.Getenv("GOMEMLIMIT") == "" {
+		const defaultHeapSoftLimit = 512 * 1024 * 1024 // 512 MiB
+		debug.SetMemoryLimit(defaultHeapSoftLimit)
+		logger.Info("applied default GOMEMLIMIT heap soft-cap (launcher set none)", "bytes", defaultHeapSoftLimit)
+	}
+
 	if err := run(configPath, envFile, logger, noAuth); err != nil {
 		if errors.Is(err, api.ErrAlreadyRunning) {
 			// Another gateway instance already owns the port and is healthy.

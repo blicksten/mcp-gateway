@@ -50,7 +50,14 @@ export class SapSystemItem extends vscode.TreeItem {
 	readonly system: SapSystem;
 	readonly hierarchical: boolean;
 
-	constructor(system: SapSystem, hierarchical: boolean = false) {
+	constructor(
+		system: SapSystem,
+		hierarchical: boolean = false,
+		/** When true the data is stale (gateway offline). Non-imported rows are
+		 *  greyed out — we can't trust the last-known SAP status when the
+		 *  gateway is unreachable. Mirrors {@link BackendItem}'s stale path. */
+		stale = false,
+	) {
 		super(
 			system.key,
 			// Imported rows never expand — there are no daemon-backed components.
@@ -61,17 +68,29 @@ export class SapSystemItem extends vscode.TreeItem {
 		this.system = system;
 		this.hierarchical = hierarchical;
 
-		// Icon based on composite status.
-		const iconId = system.imported
-			? 'cloud-download'
-			: (STATUS_ICONS[system.status] ?? 'question');
-		const colorId = system.imported ? undefined : STATUS_COLORS[system.status];
-		this.iconPath = colorId
-			? new vscode.ThemeIcon(iconId, new vscode.ThemeColor(colorId))
-			: new vscode.ThemeIcon(iconId);
+		// Stale applies only to daemon-backed rows. Imported rows have no live
+		// status to invalidate — they keep their cloud-download treatment.
+		const showStale = stale && !system.imported;
+
+		// Icon based on composite status. When stale (gateway offline) the icon
+		// is forced to the greyed debug-disconnect, regardless of last status —
+		// matches BackendItem so the two trees read consistently.
+		if (showStale) {
+			this.iconPath = new vscode.ThemeIcon('debug-disconnect',
+				new vscode.ThemeColor('disabledForeground'));
+		} else {
+			const iconId = system.imported
+				? 'cloud-download'
+				: (STATUS_ICONS[system.status] ?? 'question');
+			const colorId = system.imported ? undefined : STATUS_COLORS[system.status];
+			this.iconPath = colorId
+				? new vscode.ThemeIcon(iconId, new vscode.ThemeColor(colorId))
+				: new vscode.ThemeIcon(iconId);
+		}
 
 		// Description: component status dots (kept in hierarchical mode as a
-		// quick glance even when the children are collapsed).
+		// quick glance even when the children are collapsed). The stale path
+		// appends ' · offline' (same wording as BackendItem).
 		if (system.imported) {
 			this.description = 'imported (KeePass)';
 		} else {
@@ -82,13 +101,16 @@ export class SapSystemItem extends vscode.TreeItem {
 			if (system.gui) {
 				parts.push(`gui ${STATUS_DOTS[system.gui.status] ?? '?'}`);
 			}
-			this.description = parts.join('  ');
+			this.description = parts.join('  ') + (showStale ? ' · offline' : '');
 		}
 
 		// Tooltip with details (MarkdownString for rich rendering).
 		const md = new vscode.MarkdownString();
 		md.isTrusted = false;
 		md.supportHtml = false;
+		if (showStale) {
+			md.appendMarkdown(`_(gateway offline — showing last known state)_\n\n`);
+		}
 		md.appendMarkdown(`**SAP System:** ${escapeMd(system.sid)}\n\n`);
 		if (system.client) { md.appendMarkdown(`- Client: \`${escapeMd(system.client)}\`\n`); }
 		if (system.imported) {
@@ -144,23 +166,40 @@ export class SapComponentItem extends vscode.TreeItem {
 	readonly kind: 'vsp' | 'gui';
 	readonly server: ServerView;
 
-	constructor(system: SapSystem, kind: 'vsp' | 'gui', server: ServerView) {
+	constructor(
+		system: SapSystem,
+		kind: 'vsp' | 'gui',
+		server: ServerView,
+		/** When true the data is stale (gateway offline). Icon is greyed out.
+		 *  Mirrors {@link SapSystemItem} and {@link BackendItem} stale paths. */
+		stale = false,
+	) {
 		super(kind.toUpperCase(), vscode.TreeItemCollapsibleState.None);
 		this.system = system;
 		this.kind = kind;
 		this.server = server;
 
-		const iconId = STATUS_ICONS[server.status] ?? 'question';
-		const colorId = STATUS_COLORS[server.status];
-		this.iconPath = colorId
-			? new vscode.ThemeIcon(iconId, new vscode.ThemeColor(colorId))
-			: new vscode.ThemeIcon(iconId);
+		if (stale) {
+			// Grey disconnected icon — we can't trust the component status
+			// when the gateway is unreachable. Matches BackendItem convention.
+			this.iconPath = new vscode.ThemeIcon('debug-disconnect',
+				new vscode.ThemeColor('disabledForeground'));
+		} else {
+			const iconId = STATUS_ICONS[server.status] ?? 'question';
+			const colorId = STATUS_COLORS[server.status];
+			this.iconPath = colorId
+				? new vscode.ThemeIcon(iconId, new vscode.ThemeColor(colorId))
+				: new vscode.ThemeIcon(iconId);
+		}
 
-		this.description = server.status;
+		this.description = server.status + (stale ? ' · offline' : '');
 
 		const md = new vscode.MarkdownString();
 		md.isTrusted = false;
 		md.supportHtml = false;
+		if (stale) {
+			md.appendMarkdown(`_(gateway offline — showing last known state)_\n\n`);
+		}
 		md.appendMarkdown(`**${kind.toUpperCase()}:** \`${escapeMd(server.name)}\`\n\n`);
 		md.appendMarkdown(`- Status: ${server.status}\n`);
 		if (server.transport) { md.appendMarkdown(`- Transport: \`${escapeMd(server.transport)}\`\n`); }

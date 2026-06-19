@@ -342,6 +342,138 @@ describe('SapTreeProvider', () => {
 		});
 	});
 
+	describe('stale rendering (BUG-MCP-OFFLINE-3)', () => {
+		it('fingerprint changes when gateway goes offline (lastRefreshFailed toggles)', async () => {
+			// First call succeeds — online state.
+			const snapshots: (ServerView[] | Error)[] = [
+				[
+					{ name: 'vsp-DEV', status: 'running', transport: 'stdio', restart_count: 0 },
+					{ name: 'sap-gui-DEV', status: 'running', transport: 'http', restart_count: 0 },
+				],
+				new Error('gateway unreachable'),
+			];
+			const client = {
+				calls: 0,
+				listServers: async function () {
+					const snap = snapshots[Math.min(this.calls++, snapshots.length - 1)];
+					if (snap instanceof Error) { throw snap; }
+					return snap;
+				},
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			cache = new ServerDataCache(client as any);
+			provider = new SapTreeProvider(cache);
+			let fireCount = 0;
+			provider.onDidChangeTreeData(() => { fireCount++; });
+
+			await cache.refresh(); // success → online fingerprint
+			const onlineFp = provider.getFingerprint();
+
+			await cache.refresh(); // fail → stale fingerprint
+			const staleFp = provider.getFingerprint();
+
+			assert.notStrictEqual(onlineFp, staleFp,
+				'fingerprint must differ between online and offline states so tree re-renders');
+			assert.strictEqual(fireCount, 2, 'must fire twice: online then stale');
+		});
+
+		it('SapSystemItem rows are stale when lastRefreshFailed=true with cached data', async () => {
+			const snapshots: (ServerView[] | Error)[] = [
+				[
+					{ name: 'vsp-DEV', status: 'running', transport: 'stdio', restart_count: 0 },
+				],
+				new Error('transient'),
+			];
+			const client = {
+				calls: 0,
+				listServers: async function () {
+					const snap = snapshots[Math.min(this.calls++, snapshots.length - 1)];
+					if (snap instanceof Error) { throw snap; }
+					return snap;
+				},
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			cache = new ServerDataCache(client as any);
+			await cache.refresh(); // success
+			await cache.refresh(); // fail — cache preserved
+			provider = new SapTreeProvider(cache);
+
+			assert.strictEqual(cache.lastRefreshFailed, true, 'precondition: cache reports stale');
+			const items = provider.getChildren() as SapSystemItem[];
+			assert.strictEqual(items.length, 1, 'cached rows must still render (no cache wipe)');
+
+			const icon = items[0].iconPath as { id: string; color?: { id: string } };
+			assert.strictEqual(icon.id, 'debug-disconnect',
+				'stale SAP system row must show debug-disconnect icon');
+			assert.strictEqual(icon.color?.id, 'disabledForeground');
+			const desc = items[0].description as string;
+			assert.ok(desc.includes('offline'),
+				`stale row description must include "offline"; got: ${desc}`);
+		});
+
+		it('SapComponentItem children are stale in hierarchical mode when gateway offline', async () => {
+			mockConfigValues['mcpGateway.sapGroupBySid'] = true;
+			const snapshots: (ServerView[] | Error)[] = [
+				[
+					{ name: 'vsp-DEV', status: 'running', transport: 'stdio', restart_count: 0 },
+					{ name: 'sap-gui-DEV', status: 'running', transport: 'http', restart_count: 0 },
+				],
+				new Error('gateway down'),
+			];
+			const client = {
+				calls: 0,
+				listServers: async function () {
+					const snap = snapshots[Math.min(this.calls++, snapshots.length - 1)];
+					if (snap instanceof Error) { throw snap; }
+					return snap;
+				},
+				getHealth: async () => ({}),
+				getServer: async () => ({}),
+				addServer: async () => ({}),
+				removeServer: async () => ({}),
+				patchServer: async () => ({}),
+				restartServer: async () => ({}),
+				resetCircuit: async () => ({}),
+				callTool: async () => ({ content: null }),
+				listTools: async () => [],
+			};
+			cache = new ServerDataCache(client as any);
+			await cache.refresh(); // success
+			await cache.refresh(); // fail — cache preserved, lastRefreshFailed=true
+			provider = new SapTreeProvider(cache);
+
+			const roots = provider.getChildren() as SapSystemItem[];
+			assert.strictEqual(roots.length, 1, 'cached root must survive');
+
+			const children = provider.getChildren(roots[0]) as SapComponentItem[];
+			assert.ok(children.length > 0, 'hierarchical children must still exist');
+
+			const childIcon = children[0].iconPath as { id: string; color?: { id: string } };
+			assert.strictEqual(childIcon.id, 'debug-disconnect',
+				'stale SapComponentItem must show debug-disconnect icon');
+			assert.strictEqual(childIcon.color?.id, 'disabledForeground');
+			const childDesc = children[0].description as string;
+			assert.ok(childDesc.includes('offline'),
+				`stale component description must include "offline"; got: ${childDesc}`);
+		});
+	});
+
 	describe('cold-start placeholder (Phase 2)', () => {
 		it('returns PlaceholderTreeItem when lastRefreshFailed=true AND no SAP systems are cached', async () => {
 			const throwingClient = {
