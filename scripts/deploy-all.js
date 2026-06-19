@@ -130,6 +130,37 @@ function currentVersion() {
 	return raw.slice(start, raw.indexOf('"', start));
 }
 
+// Prune orphaned extension FOLDERS left on disk by VS Code's lazy GC.
+// `code --uninstall-extension` unregisters the old version but VS Code defers
+// the on-disk folder deletion to a window restart — so a deploy without a
+// restart in between leaves `<EXT_ID>-<oldVersion>` dirs behind (the
+// "1.33.27 + 1.33.28 both present" bug). `code --list-extensions` only reads
+// the registry, so the step-6 verify passes while a dead folder lingers.
+// Delete every `<EXT_ID>-<version>` folder except the one we just installed.
+// Best-effort: a locked folder logs a warning, never fails the deploy.
+function pruneOrphanExtensionFolders(keepVersion) {
+	const home = process.env.USERPROFILE || process.env.HOME || '';
+	const dirs = [
+		path.join(home, '.vscode', 'extensions'),
+		path.join(home, '.vscode-insiders', 'extensions'),
+	];
+	const prefix = EXT_ID + '-';
+	const pruned = [];
+	for (const extensionsDir of dirs) {
+		let entries;
+		try { entries = fs.readdirSync(extensionsDir, { withFileTypes: true }); }
+		catch { continue; } // dir absent (e.g. no Insiders install) — skip
+		for (const e of entries) {
+			if (!e.isDirectory() || !e.name.startsWith(prefix)) { continue; }
+			if (e.name.slice(prefix.length) === keepVersion) { continue; } // keep current
+			const full = path.join(extensionsDir, e.name);
+			try { fs.rmSync(full, { recursive: true, force: true }); pruned.push(e.name); }
+			catch (err) { console.warn(`  [warn] could not prune orphan ${e.name}: ${err.message}`); }
+		}
+	}
+	return pruned;
+}
+
 (async () => {
 	const before = await httpGetJson(HEALTH_URL);
 	const beforePid = before && before.pid;
@@ -155,8 +186,14 @@ function currentVersion() {
 	run('npm', ['run', 'package'], { cwd: extDir, shell: process.platform === 'win32' });
 
 	step(5, 'dedupe + install (uninstall all versions, install fresh)');
-	code(['--uninstall-extension', EXT_ID]); // removes every installed version
+	code(['--uninstall-extension', EXT_ID]); // unregisters every installed version
 	code(['--install-extension', path.join(extDir, VSIX), '--force']);
+	// Registry is now clean, but VS Code's lazy GC may have left old version
+	// FOLDERS on disk — prune them so disk matches the registry (only one).
+	const prunedOrphans = pruneOrphanExtensionFolders(ver.next);
+	if (prunedOrphans.length) {
+		console.log(`  [ok] pruned ${prunedOrphans.length} orphan folder(s) on disk: ${prunedOrphans.join(', ')}`);
+	}
 
 	step(6, 'verify running state');
 	let ok = true;
@@ -186,6 +223,27 @@ function currentVersion() {
 			console.error(`  [x] installed ${installedVer} != package.json ${ver.next}`); ok = false;
 		} else {
 			console.log(`  [ok] exactly one extension installed: ${EXT_ID}@${installedVer}`);
+		}
+	}
+
+	// 6c. disk matches registry — no orphan version folders left behind.
+	// Non-blocking: a locked folder is harmless (registry is clean) and VS Code
+	// GCs it on restart; we only surface it so it is never silently invisible.
+	{
+		const home = process.env.USERPROFILE || process.env.HOME || '';
+		const prefix = EXT_ID + '-';
+		const stale = [];
+		for (const d of [path.join(home, '.vscode', 'extensions'), path.join(home, '.vscode-insiders', 'extensions')]) {
+			try {
+				for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+					if (e.isDirectory() && e.name.startsWith(prefix) && e.name.slice(prefix.length) !== ver.next) { stale.push(e.name); }
+				}
+			} catch { /* dir absent — skip */ }
+		}
+		if (stale.length) {
+			console.warn(`  [warn] orphan extension folder(s) still on disk (locked? GC on next VS Code restart): ${stale.join(', ')}`);
+		} else {
+			console.log('  [ok] no orphan extension folders on disk');
 		}
 	}
 
