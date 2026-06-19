@@ -1120,10 +1120,15 @@ func toView(e models.ServerEntry) ServerView {
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	entries := s.lm.Entries()
-	total, running := len(entries), 0
+	total, running, idle := len(entries), 0, 0
 	for _, e := range entries {
-		if e.Status == models.StatusRunning {
+		switch e.Status {
+		case models.StatusRunning:
 			running++
+		case models.StatusIdle:
+			// TASK C2.1 (MED-3): count Idle backends separately so operators
+			// can distinguish "deferred but tools cached" from "broken".
+			idle++
 		}
 	}
 	authState := "enabled"
@@ -1136,7 +1141,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		startedAt = s.monitor.StartedAt().UTC().Format(time.RFC3339)
 		uptimeSeconds = int64(s.monitor.GatewayUptime().Seconds())
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"status":         "ok",
 		"servers":        total,
 		"running":        running,
@@ -1145,7 +1150,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"pid":            os.Getpid(),
 		"version":        s.version,
 		"uptime_seconds": uptimeSeconds,
-	})
+	}
+	if idle > 0 {
+		resp["idle"] = idle
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleListServers(w http.ResponseWriter, _ *http.Request) {
