@@ -5,6 +5,7 @@ package health
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -836,7 +837,7 @@ const sapGUISessionProbeToolName = "sap_list_sessions"
 //
 // serverName and logger are used only for the Warn log on the tool-absent path.
 // Passing a nil logger suppresses that log (useful in tests).
-func mapSAPGUIResult(res *mcp.CallToolResult, callErr error, serverName string, logger *slog.Logger) (models.ServerStatus, string) {
+func mapSAPGUIResult(res *mcp.CallToolResult, callErr error, serverName, expectUser, expectClient string, logger *slog.Logger) (models.ServerStatus, string) {
 	if callErr != nil {
 		errStr := callErr.Error()
 		// Tool missing at runtime (backend too old / tool renamed) — fall back
@@ -876,12 +877,49 @@ func mapSAPGUIResult(res *mcp.CallToolResult, callErr error, serverName string, 
 		if text == "[]" || text == "" {
 			return models.StatusDegraded, "no SAP GUI session open"
 		}
-		// Non-empty list → at least one session is active.
+		// Per-system verdict. SAP GUI Scripting exposes a SINGLE global engine,
+		// so sap_list_sessions returns EVERY connection on the desktop — not
+		// just this backend's system. A non-empty list therefore means "some
+		// system is logged in", which previously made ALL sap-gui-* backends
+		// report Running as soon as any one system was logged in. When we know
+		// which system this backend owns (SAP_USER + SAP_CLIENT from its env),
+		// require a session matching that identity.
+		if expectUser != "" && expectClient != "" {
+			if sapSessionMatches(text, expectUser, expectClient) {
+				return models.StatusRunning, ""
+			}
+			return models.StatusDegraded, fmt.Sprintf(
+				"no SAP GUI session for this system (client %s, user %s) — another system may be logged in",
+				expectClient, expectUser)
+		}
+		// No expected identity (env missing) → fall back to "any session counts".
 		return models.StatusRunning, ""
 	}
 
 	// No content at all — treat as no sessions.
 	return models.StatusDegraded, "no SAP GUI session open (empty response)"
+}
+
+// sapSessionMatches reports whether the sap_list_sessions JSON array contains
+// at least one session whose user (case-insensitive) and client match the
+// backend's expected identity. On JSON parse failure it returns true
+// (fail-open to the legacy "non-empty == running" behavior) so an unexpected
+// output format never strands a genuinely-healthy backend as degraded.
+func sapSessionMatches(jsonText, expectUser, expectClient string) bool {
+	var sessions []struct {
+		User   string `json:"user"`
+		Client string `json:"client"`
+	}
+	if err := json.Unmarshal([]byte(jsonText), &sessions); err != nil {
+		return true
+	}
+	for _, s := range sessions {
+		if strings.EqualFold(strings.TrimSpace(s.User), expectUser) &&
+			strings.TrimSpace(s.Client) == expectClient {
+			return true
+		}
+	}
+	return false
 }
 
 // checkSAPGUISession calls sap_list_sessions on a sap-gui-* backend and
@@ -899,13 +937,31 @@ func (m *Monitor) checkSAPGUISession(ctx context.Context, name string) (models.S
 		return models.StatusUnreachable, "no MCP session for sap-gui probe"
 	}
 
+	expectUser, expectClient := m.sapExpectedIdentity(name)
+
 	callCtx, cancel := context.WithTimeout(ctx, DefaultPingTimeout)
 	defer cancel()
 
 	result, err := session.CallTool(callCtx, &mcp.CallToolParams{
 		Name: sapGUISessionProbeToolName,
 	})
-	return mapSAPGUIResult(result, err, name, m.logger)
+	return mapSAPGUIResult(result, err, name, expectUser, expectClient, m.logger)
+}
+
+// sapExpectedIdentity returns the SAP_USER and SAP_CLIENT the named backend is
+// configured for, read from its Config.Env (set by the gateway when the SAP
+// backend is registered). Returns empty strings when the backend or the env
+// keys are absent — callers treat that as "identity unknown" and fall back to
+// the legacy any-session-counts verdict.
+func (m *Monitor) sapExpectedIdentity(name string) (user, client string) {
+	for _, e := range m.lm.Entries() {
+		if e.Name == name {
+			user, _ = e.Config.EnvValue("SAP_USER")
+			client, _ = e.Config.EnvValue("SAP_CLIENT")
+			return user, client
+		}
+	}
+	return "", ""
 }
 
 // checkRESTHealth performs an HTTP GET to the health endpoint.

@@ -510,6 +510,8 @@ func TestMapSAPGUIResult(t *testing.T) {
 		name           string
 		res            *mcp.CallToolResult
 		callErr        error
+		expectUser     string // backend's configured SAP_USER ("" = identity unknown)
+		expectClient   string // backend's configured SAP_CLIENT ("" = identity unknown)
 		wantStatus     models.ServerStatus
 		wantReasonSub  string // non-empty: reason must contain this substring
 		wantEmptyReason bool  // true: reason must be exactly ""
@@ -577,12 +579,62 @@ func TestMapSAPGUIResult(t *testing.T) {
 			wantStatus:    models.StatusDegraded,
 			wantReasonSub: "no SAP GUI session open (empty response)",
 		},
+		// --- Q2: per-system verdict when the backend's identity is known ---
+		{
+			name: "identity known + matching session -> StatusRunning",
+			res: okResult(textContent(
+				`[{"system_name":"CTC","client":"100","user":"NAUMOV","transaction":"SESSION_MANAGER"}]`)),
+			callErr:         nil,
+			expectUser:      "NAUMOV",
+			expectClient:    "100",
+			wantStatus:      models.StatusRunning,
+			wantEmptyReason: true,
+		},
+		{
+			name: "identity known + only ANOTHER system logged in -> StatusDegraded (not stranded as running)",
+			res: okResult(textContent(
+				`[{"system_name":"DEV","client":"200","user":"IVANOV","transaction":"SE80"}]`)),
+			callErr:       nil,
+			expectUser:    "NAUMOV",
+			expectClient:  "100",
+			wantStatus:    models.StatusDegraded,
+			wantReasonSub: "no SAP GUI session for this system",
+		},
+		{
+			name: "identity known + matching session with lowercase user -> StatusRunning (case-insensitive)",
+			res: okResult(textContent(
+				`[{"system_name":"CTC","client":"100","user":"naumov"}]`)),
+			callErr:         nil,
+			expectUser:      "NAUMOV",
+			expectClient:    "100",
+			wantStatus:      models.StatusRunning,
+			wantEmptyReason: true,
+		},
+		{
+			name: "identity known + matching client but different user -> StatusDegraded",
+			res: okResult(textContent(
+				`[{"system_name":"CTC","client":"100","user":"OTHERUSER"}]`)),
+			callErr:       nil,
+			expectUser:    "NAUMOV",
+			expectClient:  "100",
+			wantStatus:    models.StatusDegraded,
+			wantReasonSub: "no SAP GUI session for this system",
+		},
+		{
+			name:            "identity known + non-JSON non-empty text -> StatusRunning (fail-open, no false strand)",
+			res:             okResult(textContent("unexpected-non-json-output")),
+			callErr:         nil,
+			expectUser:      "NAUMOV",
+			expectClient:    "100",
+			wantStatus:      models.StatusRunning,
+			wantEmptyReason: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// nil logger is explicitly supported by mapSAPGUIResult (guarded by != nil).
-			status, reason := mapSAPGUIResult(tt.res, tt.callErr, "sap-gui-Q00", nil)
+			status, reason := mapSAPGUIResult(tt.res, tt.callErr, "sap-gui-Q00", tt.expectUser, tt.expectClient, nil)
 
 			assert.Equal(t, tt.wantStatus, status, "unexpected ServerStatus")
 

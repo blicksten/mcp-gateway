@@ -159,9 +159,16 @@ func (sc *ServerConfig) ExposeToolsEnabled() bool {
 // Returns ("", false) when SAP_URL is not present. Uses strings.Cut per
 // CLAUDE.md Regex Discipline — no regex used.
 func (sc *ServerConfig) SAPEnvURL() (string, bool) {
+	return sc.EnvValue("SAP_URL")
+}
+
+// EnvValue extracts the value of a KEY=VALUE entry from Config.Env by key.
+// Returns ("", false) when the key is absent or its value is empty. Uses
+// strings.Cut per CLAUDE.md Regex Discipline — no regex used.
+func (sc *ServerConfig) EnvValue(key string) (string, bool) {
 	for _, entry := range sc.Env {
-		key, val, ok := strings.Cut(entry, "=")
-		if ok && key == "SAP_URL" && val != "" {
+		k, val, ok := strings.Cut(entry, "=")
+		if ok && k == key && val != "" {
 			return val, true
 		}
 	}
