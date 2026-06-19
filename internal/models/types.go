@@ -125,6 +125,19 @@ func (sc *ServerConfig) ExposeToolsEnabled() bool {
 	return *sc.ExposeTools
 }
 
+// SAPEnvURL extracts the SAP_URL value from Config.Env entries (KEY=VALUE format).
+// Returns ("", false) when SAP_URL is not present. Uses strings.Cut per
+// CLAUDE.md Regex Discipline — no regex used.
+func (sc *ServerConfig) SAPEnvURL() (string, bool) {
+	for _, entry := range sc.Env {
+		key, val, ok := strings.Cut(entry, "=")
+		if ok && key == "SAP_URL" && val != "" {
+			return val, true
+		}
+	}
+	return "", false
+}
+
 // TransportType returns the detected backend transport type.
 func (sc *ServerConfig) TransportType() string {
 	if sc.Command != "" {
