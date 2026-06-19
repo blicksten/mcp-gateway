@@ -93,6 +93,22 @@ const (
 	// Auto-recovers (Start → Running) when the host becomes reachable
 	// again. See docs/PLAN-unreachable-handling.md.
 	StatusUnreachable ServerStatus = "unreachable"
+
+	// StatusIdle indicates a backend whose tools are known from the
+	// manifest cache but that has not yet been spawned. Semantics:
+	// "configured, tools cached from last session, not yet running —
+	// will spawn on first tool invocation (connect VPN / launch)."
+	//
+	// TASK C2 — docs/DESIGN-mcp-gateway-lazy-spawn.md §4.2.
+	// Guard 3 (PAL/UX): the dashboard should display this as a neutral
+	// "idle" badge, NOT red/yellow down state. Idle is not an error.
+	// Only set when MCP_GATEWAY_LAZY_SPAWN=1 is active.
+	StatusIdle ServerStatus = "idle"
+
+	// StatusIdleReason is the human-readable last_error string for an Idle
+	// backend. Surfaced in the dashboard as context so operators understand
+	// the backend is intentionally deferred, not failing.
+	StatusIdleReason = "idle — SAP tools available from cache; spawns on first use (connect VPN/launch)"
 )
 
 // ServerConfig defines how to connect to a backend MCP server.
