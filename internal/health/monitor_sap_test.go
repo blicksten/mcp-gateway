@@ -649,8 +649,41 @@ func TestMapSAPGUIResult(t *testing.T) {
 			wantEmptyReason: true,
 		},
 		{
-			name:            "SID known + non-JSON non-empty text -> StatusRunning (fail-open, no false strand)",
-			res:             okResult(textContent("unexpected-non-json-output")),
+			// Was a fail-OPEN (-> Running) case that codified the always-green bug.
+			// Now fail-CLOSED: an unparseable result must never mask as running.
+			name:          "SID known + unparseable text -> StatusDegraded (fail-closed, no false green)",
+			res:           okResult(textContent("unexpected-non-json-output")),
+			callErr:       nil,
+			expectSystem:  "CTC",
+			expectUser:    "NAUMOV",
+			expectClient:  "100",
+			wantStatus:    models.StatusDegraded,
+			wantReasonSub: "no SAP GUI session open",
+		},
+		// --- REGRESSION: the REAL FastMCP wire format. sap_list_sessions returns
+		// ONE TextContent block PER session (each a single JSON object), NOT a
+		// single JSON array. The old code read only the first block and fail-opened,
+		// so every backend showed Running regardless of login state.
+		{
+			name: "multi-block: own SID at login screen (user empty) -> StatusDegraded",
+			res: okResult(
+				textContent(`{"system_name":"Q25","client":"100","user":"NAUMOV"}`),
+				textContent(`{"system_name":"CTC","client":"000","user":""}`),
+				textContent(`{"system_name":"TST","client":"100","user":"NAUMOV"}`),
+			),
+			callErr:       nil,
+			expectSystem:  "CTC",
+			expectUser:    "NAUMOV",
+			expectClient:  "100",
+			wantStatus:    models.StatusDegraded,
+			wantReasonSub: "no logged-in SAP GUI session for system CTC",
+		},
+		{
+			name: "multi-block: own SID logged in among others -> StatusRunning",
+			res: okResult(
+				textContent(`{"system_name":"Q25","client":"100","user":"NAUMOV"}`),
+				textContent(`{"system_name":"CTC","client":"100","user":"NAUMOV","transaction":"SESSION_MANAGER"}`),
+			),
 			callErr:         nil,
 			expectSystem:    "CTC",
 			expectUser:      "NAUMOV",

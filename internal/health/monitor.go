@@ -868,13 +868,18 @@ const sapGUISessionProbeToolName = "sap_list_sessions"
 // ServerStatus + reason pair. Extracted as a pure function so unit tests can
 // exercise all five branches without spawning a real MCP subprocess.
 //
-// Branch table (mirrors checkSAPGUISession's original inline logic):
+// Branch table:
 //
-//	callErr contains "not found"/"unknown tool" → (StatusRunning,  "")             [tool absent — graceful fallback]
+//	callErr contains "not found"/"unknown tool" → (StatusRunning,    "")            [tool absent — graceful fallback]
 //	callErr != nil (other transport error)      → (StatusUnreachable, reason)
-//	res.IsError == true                         → (StatusDegraded,   reason from text content)
-//	res text == "[]" or ""                      → (StatusDegraded,   "no SAP GUI session open")
-//	res text non-empty                          → (StatusRunning,    "")
+//	res.IsError == true                         → (StatusDegraded,    reason from text content)
+//	logged-in session for this SID present      → (StatusRunning,     "")
+//	sessions parsed but none logged-in for SID  → (StatusDegraded,    "no logged-in … for system <SID>")
+//	no sessions parsed (empty / unparseable)    → (StatusDegraded,    "no SAP GUI session open …")   [fail-CLOSED]
+//
+// The verdict aggregates EVERY TextContent block (FastMCP returns one block per
+// session), and an unparseable result fails CLOSED to degraded — never green —
+// which is the inverse of the old fail-open that masked the always-running bug.
 //
 // serverName and logger are used only for the Warn log on the tool-absent path.
 // Passing a nil logger suppresses that log (useful in tests).
@@ -894,8 +899,6 @@ func mapSAPGUIResult(res *mcp.CallToolResult, callErr error, serverName, expectS
 		return models.StatusUnreachable, "sap-gui session probe failed: " + errStr
 	}
 
-	// The tool returns a JSON array. An empty array means no sessions are open.
-	// We check the raw text content for "[]" as the simplest non-mutating check.
 	if res.IsError {
 		// The MCP tool itself returned an error result (e.g. COM not available).
 		reason := "no SAP GUI session (sap_list_sessions error)"
@@ -908,58 +911,99 @@ func mapSAPGUIResult(res *mcp.CallToolResult, callErr error, serverName, expectS
 		return models.StatusDegraded, reason
 	}
 
-	// Non-error result: inspect text content for an empty list.
-	for _, c := range res.Content {
+	// Parse EVERY content block. FastMCP serialises the tool's list[dict] return
+	// as ONE TextContent block PER session (each a single JSON object) — NOT a
+	// single JSON array — so reading only the first block (and treating a parse
+	// failure as "running") made the badge permanently green regardless of login
+	// state. Aggregate all blocks, then derive a fail-CLOSED verdict.
+	recs, sawText := parseSAPSessions(res.Content)
+
+	// SID unknown (non-sap-gui name / env missing) → any session counts (legacy
+	// lenient fallback; real sap-gui backends always carry a SID).
+	if expectSystem == "" {
+		if len(recs) > 0 {
+			return models.StatusRunning, ""
+		}
+		return models.StatusDegraded, sapNoSessionReason(sawText)
+	}
+
+	// Per-system verdict. SAP GUI Scripting exposes a SINGLE global engine, so
+	// sap_list_sessions returns EVERY connection on the desktop — not just this
+	// backend's system. The DISCRIMINATOR is the SAP system id (SID), because
+	// deployments commonly share one SAP_USER + SAP_CLIENT across many systems
+	// (e.g. NAUMOV/100 on CTC, Q25, S23, …). Require a LOGGED-IN session
+	// (non-empty user) on THIS backend's SID.
+	if sapSessionsMatch(recs, expectSystem, expectUser, expectClient) {
+		return models.StatusRunning, ""
+	}
+	if len(recs) == 0 {
+		return models.StatusDegraded, sapNoSessionReason(sawText)
+	}
+	return models.StatusDegraded, fmt.Sprintf(
+		"no logged-in SAP GUI session for system %s (client %s) — SAP Logon not signed in",
+		expectSystem, expectClient)
+}
+
+// sapNoSessionReason returns the degraded reason for a successful probe that
+// yielded no parseable sessions: distinguishes a genuinely empty list from an
+// empty/unrecognised response.
+func sapNoSessionReason(sawText bool) string {
+	if sawText {
+		return "no SAP GUI session open"
+	}
+	return "no SAP GUI session open (empty response)"
+}
+
+// sapSessionRec is the subset of one sap_list_sessions row that drives the
+// health verdict.
+type sapSessionRec struct {
+	SystemName string `json:"system_name"`
+	User       string `json:"user"`
+	Client     string `json:"client"`
+}
+
+// parseSAPSessions extracts session records from a sap_list_sessions result.
+// FastMCP emits one TextContent block per list element (each a single JSON
+// object); older/test callers may emit a single block holding a JSON array.
+// Each non-empty block is tried as an array first, then as a single object.
+// Unparseable blocks are SKIPPED (never counted as a session) so a malformed
+// result fails CLOSED to "degraded" instead of masking as "running" — the
+// fail-open that previously hid the always-green bug. sawText reports whether
+// any non-empty text block was present at all.
+func parseSAPSessions(contents []mcp.Content) (recs []sapSessionRec, sawText bool) {
+	for _, c := range contents {
 		tc, ok := c.(*mcp.TextContent)
 		if !ok {
 			continue
 		}
 		text := strings.TrimSpace(tc.Text)
-		if text == "[]" || text == "" {
-			return models.StatusDegraded, "no SAP GUI session open"
+		if text == "" {
+			continue
 		}
-		// Per-system verdict. SAP GUI Scripting exposes a SINGLE global engine,
-		// so sap_list_sessions returns EVERY connection on the desktop — not
-		// just this backend's system. The DISCRIMINATOR is the SAP system id
-		// (SID), because deployments commonly share one SAP_USER + SAP_CLIENT
-		// across many systems (e.g. NAUMOV/100 on CTC, Q25, S23, …). Matching
-		// on user+client alone made a single login (CTC) flip ALL sap-gui-*
-		// backends to Running. When we know this backend's SID, require a
-		// LOGGED-IN session (non-empty user) on THAT system.
-		if expectSystem != "" {
-			if sapSessionMatches(text, expectSystem, expectUser, expectClient) {
-				return models.StatusRunning, ""
-			}
-			return models.StatusDegraded, fmt.Sprintf(
-				"no logged-in SAP GUI session for system %s (client %s) — SAP Logon not signed in",
-				expectSystem, expectClient)
+		sawText = true
+		if text == "[]" {
+			continue
 		}
-		// SID unknown (non-sap-gui name / env missing) → any session counts.
-		return models.StatusRunning, ""
+		var arr []sapSessionRec
+		if err := json.Unmarshal([]byte(text), &arr); err == nil {
+			recs = append(recs, arr...)
+			continue
+		}
+		var one sapSessionRec
+		if err := json.Unmarshal([]byte(text), &one); err == nil {
+			recs = append(recs, one)
+		}
 	}
-
-	// No content at all — treat as no sessions.
-	return models.StatusDegraded, "no SAP GUI session open (empty response)"
+	return recs, sawText
 }
 
-// sapSessionMatches reports whether the sap_list_sessions JSON array contains
-// at least one LOGGED-IN session for the backend's own SAP system. A session
-// qualifies when its system_name equals expectSystem (the SID, case-insensitive)
-// AND it carries a non-empty user (an empty user means the window is still at
-// the SAP login screen — open but not signed in). When expectUser/expectClient
-// are known they must also match (defence in depth). On JSON parse failure it
-// returns true (fail-open to the legacy "non-empty == running" behaviour) so an
-// unexpected output format never strands a genuinely-healthy backend.
-func sapSessionMatches(jsonText, expectSystem, expectUser, expectClient string) bool {
-	var sessions []struct {
-		SystemName string `json:"system_name"`
-		User       string `json:"user"`
-		Client     string `json:"client"`
-	}
-	if err := json.Unmarshal([]byte(jsonText), &sessions); err != nil {
-		return true
-	}
-	for _, s := range sessions {
+// sapSessionsMatch reports whether recs contains at least one LOGGED-IN session
+// for the backend's own SAP system (expectSystem != ""). A session qualifies
+// when its system_name equals expectSystem (the SID, case-insensitive) AND it
+// carries a non-empty user (empty user = window still at the SAP login screen).
+// When expectUser/expectClient are known they must also match (defence in depth).
+func sapSessionsMatch(recs []sapSessionRec, expectSystem, expectUser, expectClient string) bool {
+	for _, s := range recs {
 		if !strings.EqualFold(strings.TrimSpace(s.SystemName), expectSystem) {
 			continue
 		}
