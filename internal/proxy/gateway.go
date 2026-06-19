@@ -37,11 +37,12 @@ import (
 // Phase 16.1 introduces the per-backend surface for Claude Code plugin
 // integration; the aggregate surface is unchanged for backward compatibility.
 type Gateway struct {
-	lm      *lifecycle.Manager
-	router  *router.Router
-	cfg     *models.Config
-	version string
-	logger  *slog.Logger
+	lm       *lifecycle.Manager
+	router   *router.Router
+	cfg      *models.Config
+	version  string
+	logger   *slog.Logger
+	manifest *lifecycle.Manifest // TASK C2.1: tool-manifest cache; nil when flag OFF
 
 	cfgMu   sync.RWMutex // protects g.cfg reads/writes (separate from toolsMu)
 	toolsMu sync.Mutex   // protects tool registration on MCP servers (aggregate + per-backend)
@@ -92,6 +93,17 @@ func New(cfg *models.Config, lm *lifecycle.Manager, version string, logger *slog
 	g.aggregateServer = g.buildMCPServer()
 	g.registerGatewayBuiltins()
 	return g
+}
+
+// SetManifest wires the tool-manifest cache to the gateway so filteredTools
+// can serve cached tools for StatusIdle backends. Call this before
+// ServeBackgroundSupervisor so the manifest is available when RebuildTools
+// fires at startup. When manifest is nil the Idle path is disabled (same as
+// flag OFF behavior).
+//
+// TASK C2.1 — docs/DESIGN-mcp-gateway-lazy-spawn.md §4.3
+func (g *Gateway) SetManifest(manifest *lifecycle.Manifest) {
+	g.manifest = manifest
 }
 
 // gatewayInstructions is surfaced to MCP clients via the initialize response
@@ -812,6 +824,46 @@ func (g *Gateway) filteredTools() []namespacedTool {
 
 	var allTools []namespacedTool
 	for _, entry := range entries {
+		// TASK C2.1: include StatusIdle backends when the manifest cache has
+		// their tools, so MCP clients can see and invoke idle SAP tools.
+		// For Idle backends we read tools from the manifest, not entry.Tools.
+		// Core/eager (Running/Degraded) backends use their live entry.Tools.
+		if entry.Status == models.StatusIdle {
+			if g.manifest == nil {
+				continue // flag OFF or manifest not wired — skip
+			}
+			rec, ok := g.manifest.Get(entry.Name)
+			if !ok {
+				continue // no cached tools — skip
+			}
+			if !entry.Config.ExposeToolsEnabled() {
+				continue
+			}
+			if !g.serverAllowed(entry.Name, filter) {
+				continue
+			}
+			budget := 0
+			if filter != nil && filter.PerServerBudget > 0 {
+				budget = filter.PerServerBudget
+			}
+			// TODO(C2.2): Idle branch does not apply ConsolidateExcess — tools beyond
+			// PerServerBudget are dropped, not folded into a meta-tool.
+			count := 0
+			for _, ct := range rec.Tools {
+				if budget > 0 && count >= budget {
+					break
+				}
+				allTools = append(allTools, namespacedTool{
+					server:      entry.Name,
+					name:        ct.Name,
+					description: ct.Description,
+					namespaced:  g.router.NamespacedTool(entry.Name, ct.Name),
+					inputSchema: ct.InputSchema,
+				})
+				count++
+			}
+			continue
+		}
 		if entry.Status != models.StatusRunning && entry.Status != models.StatusDegraded {
 			continue
 		}
