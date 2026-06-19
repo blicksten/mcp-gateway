@@ -99,6 +99,12 @@ type LifecycleManager interface {
 	// wired. When true, the supervisor owns restart policy and Monitor's
 	// attemptRestart must not issue an independent Restart call (F2 fix).
 	SupervisorActive() bool
+	// AddBackendToSupervisor re-registers a backend with the suture supervisor
+	// tree after recovery from StatusUnreachable. The backend's Serve returned
+	// ErrDoNotRestart when it went Unreachable, so it was removed from suture;
+	// calling this re-adds it so crash-restart policy applies again. No-op when
+	// the supervisor is not set up or the backend is already registered (idempotent).
+	AddBackendToSupervisor(name string, logger *slog.Logger)
 }
 
 // serverState tracks per-server health state.
@@ -305,11 +311,20 @@ func (m *Monitor) checkAll(ctx context.Context) {
 // flapping (start succeeds, ping fails repeatedly), not for VPN-off
 // network partitions.
 func (m *Monitor) maybeProbeUnreachable(ctx context.Context, entry models.ServerEntry) {
-	if entry.Config.URL == "" {
-		// stdio backends don't have a URL — they should never reach
-		// StatusUnreachable (the classifier path is HTTP-only). Defensive.
+	// Determine the probe URL for this backend:
+	//   - HTTP/SSE backends: use Config.URL (original path).
+	//   - TASK C1 — stdio backends skipped at spawn time (vsp-* with SAP_URL):
+	//     use the SAP_URL extracted from Config.Env. This enables slow-poll
+	//     retry-on-recovery for stdio SAP backends, which mirrors the HTTP path
+	//     but targets the SAP application server TCP endpoint rather than the
+	//     MCP transport URL (stdio has no transport URL).
+	//   - All other stdio backends (no URL, no SAP_URL): defensive no-op.
+	probeURL := unreachableProbeURL(entry)
+	if probeURL == "" {
+		// No URL to probe — skip (defensive guard for non-SAP stdio).
 		return
 	}
+
 	now := time.Now()
 	m.mu.Lock()
 	state := m.getOrCreateState(entry.Name)
@@ -326,7 +341,7 @@ func (m *Monitor) maybeProbeUnreachable(ctx context.Context, entry models.Server
 	state.nextReachProbeAt = now.Add(delay)
 	m.mu.Unlock()
 
-	reachable := m.probeReachable(ctx, entry.Config.URL)
+	reachable := m.probeReachable(ctx, probeURL)
 	if !reachable {
 		m.logger.Debug("unreachable probe still failing",
 			"server", entry.Name,
@@ -351,7 +366,44 @@ func (m *Monitor) maybeProbeUnreachable(ctx context.Context, entry models.Server
 	if err := m.lm.Start(ctx, entry.Name); err != nil {
 		m.logger.Warn("auto-restart after reachability recovery failed",
 			"server", entry.Name, "error", err)
+		return
 	}
+
+	// H-1 fix: the backend's BackendSupervisor.Serve returned ErrDoNotRestart
+	// when the backend entered StatusUnreachable, removing it from the suture
+	// tree. Now that Start() succeeded, re-register so suture owns crash-restart
+	// policy again. AddBackendToSupervisor is idempotent (no-op if already
+	// registered) and is a no-op when the supervisor is not active (legacy/test
+	// path). Gate on SupervisorActive() to avoid calling into an uninitialised
+	// supervisorTokens map.
+	if m.lm.SupervisorActive() {
+		m.lm.AddBackendToSupervisor(entry.Name, m.logger)
+		m.logger.Info("re-registered backend with supervisor after reachability recovery",
+			"server", entry.Name)
+	}
+}
+
+// unreachableProbeURL returns the URL to TCP-probe for a backend in
+// StatusUnreachable. Returns "" when there is nothing to probe (non-SAP stdio
+// without a transport URL — should not enter slow-poll at all).
+//
+// Logic:
+//   - HTTP/SSE backend (Config.URL != ""): use Config.URL (unchanged behaviour).
+//   - Stdio backend with SAP_URL in env (TASK C1 skip-spawn path): use SAP_URL.
+//   - Stdio backend without SAP_URL: return "" (defensive; should never be
+//     StatusUnreachable via TASK C1 path, but guard against accidental entry).
+func unreachableProbeURL(entry models.ServerEntry) string {
+	if entry.Config.URL != "" {
+		return entry.Config.URL
+	}
+	// stdio backend — check for SAP_URL (TASK C1 path).
+	if entry.Config.Command != "" {
+		sapURL, ok := entry.Config.SAPEnvURL()
+		if ok {
+			return sapURL
+		}
+	}
+	return ""
 }
 
 // probeReachable performs a short TCP dial to verify reachability. Returns

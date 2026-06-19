@@ -88,6 +88,9 @@ func (m *bulkheadMockLM) Start(_ context.Context, _ string) error {
 // supervisor path and must keep Monitor's own restart logic active.
 func (m *bulkheadMockLM) SupervisorActive() bool { return false }
 
+// AddBackendToSupervisor is a no-op stub satisfying LifecycleManager.
+func (m *bulkheadMockLM) AddBackendToSupervisor(_ string, _ *slog.Logger) {}
+
 func (m *bulkheadMockLM) callsFor(name string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -246,6 +246,45 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 		}
 	}
 
+	// TASK C1 — pre-spawn reachability gate for STDIO backends with SAP_URL.
+	//
+	// When MCP_GATEWAY_SKIP_UNREACHABLE_STDIO is not "0" (default ON), a
+	// vsp-* backend carrying SAP_URL is TCP-probed before spawning. If
+	// unreachable (VPN off, host down), we skip spawning and set
+	// StatusUnreachable with a dashboard-friendly reason. The health
+	// monitor's slow-poll path (maybeProbeUnreachable) re-probes the backend
+	// at 60s/5min cadence and calls Start() again when the endpoint becomes
+	// reachable (VPN up) — same recovery loop as HTTP backends.
+	//
+	// Non-SAP stdio (orchestrator, pal, context7, …) and sap-gui-* (COM
+	// automation, no TCP endpoint) are not probed and spawn unconditionally.
+	//
+	// Historical note: an earlier version of this comment stated that SAP
+	// reachability was intentionally NOT a start-time gate because "the vsp
+	// child serves MCP independently of SAP host reachability." That was
+	// correct as long as there was no retry-on-recovery path for stdio. TASK
+	// C1 adds that path (health monitor extension), making the skip safe.
+	//
+	// M-1 fix: gate the 3-second TCP probe behind SkipUnreachableStdioEnabled()
+	// so probeStdioSAPEndpoint is never called when the feature is disabled.
+	// Previously the probe always ran and shouldSkipStdioSpawn discarded the
+	// result — correct behavior, wasted latency.
+	if cfg.Command != "" && SkipUnreachableStdioEnabled() {
+		sapURL, reachable := probeStdioSAPEndpoint(ctx, cfg)
+		if shouldSkipStdioSpawn(cfg, name, true, reachable) {
+			m.mu.Lock()
+			if e2, ok := m.entries[name]; ok {
+				e2.starting = false
+				e2.Status = models.StatusUnreachable
+				e2.LastError = skippedStdioReason
+			}
+			m.mu.Unlock()
+			m.logger.Info("stdio backend skipped: SAP endpoint unreachable",
+				"server", name, "sap_url", sapURL)
+			return fmt.Errorf("start %q: %s", name, skippedStdioReason)
+		}
+	}
+
 	session, client, transport, cmd, err := m.connectSafe(ctx, name, &cfg)
 
 	m.mu.Lock()

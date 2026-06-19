@@ -3,6 +3,7 @@ package health
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -115,6 +116,10 @@ func (m *mockLM) Start(ctx context.Context, name string) error {
 // Monitor-owned restart path unchanged (F2 fix is a no-op when supervisor
 // is not wired).
 func (m *mockLM) SupervisorActive() bool { return false }
+
+// AddBackendToSupervisor is a no-op stub satisfying LifecycleManager. Tests
+// that need to verify re-registration use supervisorMockLM instead.
+func (m *mockLM) AddBackendToSupervisor(_ string, _ *slog.Logger) {}
 
 func (m *mockLM) lastStatus(name string) models.ServerStatus {
 	m.mu.Lock()

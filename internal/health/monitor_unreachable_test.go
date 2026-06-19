@@ -13,16 +13,66 @@ package health
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
 	"mcp-gateway/internal/models"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// supervisorTrackingLM is a LifecycleManager that:
+//   - returns true from SupervisorActive() (supervisor path active)
+//   - records every AddBackendToSupervisor call by name
+//   - delegates Start/SetStatus/entries to an embedded mockLM
+//
+// Used exclusively by TestMaybeProbeUnreachable_RecoveryReRegistersWithSupervisor
+// to verify H-1: after a successful Start() on recovery, the backend is
+// re-added to the suture supervisor tree.
+type supervisorTrackingLM struct {
+	*mockLM
+	mu           sync.Mutex
+	reAddedNames []string
+}
+
+func newSupervisorTrackingLM() *supervisorTrackingLM {
+	return &supervisorTrackingLM{mockLM: newMockLM()}
+}
+
+func (s *supervisorTrackingLM) SupervisorActive() bool { return true }
+
+func (s *supervisorTrackingLM) AddBackendToSupervisor(name string, _ *slog.Logger) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reAddedNames = append(s.reAddedNames, name)
+}
+
+func (s *supervisorTrackingLM) reAddCount(name string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := 0
+	for _, n := range s.reAddedNames {
+		if n == name {
+			count++
+		}
+	}
+	return count
+}
+
+// Session must be forwarded explicitly because the embedded *mockLM.Session
+// returns (*mcp.ClientSession, bool) — Go embedding forwards it but the
+// interface check requires the concrete method to be present on the outer type
+// when the embedded type satisfies a different interface member signature.
+// Re-declare here for clarity and to ensure the compiler confirms satisfaction.
+func (s *supervisorTrackingLM) Session(name string) (*mcp.ClientSession, bool) {
+	return s.mockLM.Session(name)
+}
 
 // listenLocal starts a TCP listener on 127.0.0.1:0 and returns the bound port
 // plus a close function. The listener accepts and immediately closes incoming
@@ -388,4 +438,97 @@ func TestMaybeProbeUnreachable_RecoveryE2E(t *testing.T) {
 	assert.Equal(t, 0, state.restartCount,
 		"Phase 2: full slow-poll → recovery cycle must NOT have touched restartCount")
 	tm.mu.Unlock()
+}
+
+// TestMaybeProbeUnreachable_RecoveryReRegistersWithSupervisor is the H-1
+// acceptance test: after a successful Start() on the recovery path, the
+// monitor must call AddBackendToSupervisor so the backend rejoins the suture
+// tree and gets crash-restart policy again.
+//
+// Without the H-1 fix the test fails because AddBackendToSupervisor is never
+// called (the backend was removed from suture via ErrDoNotRestart and nothing
+// re-added it). With the fix it is called exactly once after a successful
+// recovery Start().
+//
+// The test also verifies the no-probe path (still-unreachable) does NOT call
+// AddBackendToSupervisor — supervisor re-registration must only happen on
+// confirmed-reachable+successful-start.
+func TestMaybeProbeUnreachable_RecoveryReRegistersWithSupervisor(t *testing.T) {
+	// Part A: host is reachable — Start succeeds — AddBackendToSupervisor called.
+	t.Run("reachable_start_ok_reregisters", func(t *testing.T) {
+		port, closeFn := listenLocal(t)
+		defer closeFn()
+
+		lm := newSupervisorTrackingLM()
+		lm.addEntry("http-backend", models.StatusUnreachable, models.ServerConfig{
+			URL: fmt.Sprintf("http://127.0.0.1:%d/mcp", port),
+		})
+
+		mon := NewMonitor(lm, time.Second, nil)
+		mon.CheckOnce(context.Background())
+
+		require.Equal(t, 1, lm.starts,
+			"reachable backend must trigger exactly one Start call")
+		assert.Equal(t, 1, lm.reAddCount("http-backend"),
+			"H-1: AddBackendToSupervisor must be called once after a successful Start on recovery")
+	})
+
+	// Part B: host is still unreachable — Start not called — AddBackendToSupervisor not called.
+	t.Run("unreachable_no_reregister", func(t *testing.T) {
+		port := unboundLocalPort(t)
+
+		lm := newSupervisorTrackingLM()
+		lm.addEntry("http-backend", models.StatusUnreachable, models.ServerConfig{
+			URL: fmt.Sprintf("http://127.0.0.1:%d/mcp", port),
+		})
+
+		mon := NewMonitor(lm, time.Second, nil)
+		mon.CheckOnce(context.Background())
+
+		assert.Equal(t, 0, lm.starts,
+			"still-unreachable probe must not call Start")
+		assert.Equal(t, 0, lm.reAddCount("http-backend"),
+			"H-1: AddBackendToSupervisor must NOT be called when probe failed (nothing to re-register)")
+	})
+
+	// Part C: Start fails (e.g. still-unreachable at MCP level) — AddBackendToSupervisor not called.
+	t.Run("start_fails_no_reregister", func(t *testing.T) {
+		port, closeFn := listenLocal(t)
+		defer closeFn()
+
+		lm := newSupervisorTrackingLM()
+		lm.startErr = fmt.Errorf("MCP handshake failed")
+		lm.addEntry("http-backend", models.StatusUnreachable, models.ServerConfig{
+			URL: fmt.Sprintf("http://127.0.0.1:%d/mcp", port),
+		})
+
+		mon := NewMonitor(lm, time.Second, nil)
+		mon.CheckOnce(context.Background())
+
+		assert.Equal(t, 1, lm.starts,
+			"reachable probe must try Start even when Start itself fails")
+		assert.Equal(t, 0, lm.reAddCount("http-backend"),
+			"H-1: AddBackendToSupervisor must NOT be called when Start() returned an error")
+	})
+
+	// Part D: supervisor not active — AddBackendToSupervisor not called (legacy path).
+	t.Run("supervisor_inactive_no_reregister", func(t *testing.T) {
+		port, closeFn := listenLocal(t)
+		defer closeFn()
+
+		// Use plain mockLM (SupervisorActive() == false).
+		lm := newMockLM()
+		lm.addEntry("http-backend", models.StatusUnreachable, models.ServerConfig{
+			URL: fmt.Sprintf("http://127.0.0.1:%d/mcp", port),
+		})
+
+		mon := NewMonitor(lm, time.Second, nil)
+		mon.CheckOnce(context.Background())
+
+		assert.Equal(t, 1, lm.starts,
+			"reachable backend must trigger Start even in legacy (no-supervisor) mode")
+		// mockLM.AddBackendToSupervisor is a no-op stub; we just verify Start was
+		// called and no panic occurred — the guard in maybeProbeUnreachable skips
+		// the re-registration when SupervisorActive() == false.
+	})
 }

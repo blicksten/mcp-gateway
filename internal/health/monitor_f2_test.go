@@ -7,6 +7,7 @@ package health
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
 	"mcp-gateway/internal/models"
@@ -40,6 +41,9 @@ func (m *f2MockLM) Restart(_ context.Context, _ string) error {
 func (m *f2MockLM) Start(_ context.Context, _ string) error { return nil }
 
 func (m *f2MockLM) SupervisorActive() bool { return m.supervisorActive }
+
+// AddBackendToSupervisor is a no-op stub satisfying LifecycleManager.
+func (m *f2MockLM) AddBackendToSupervisor(_ string, _ *slog.Logger) {}
 
 // TestMonitor_AttemptRestart_DefersToSupervisorWhenActive: with supervisor
 // active, attemptRestart must return without calling Restart.
