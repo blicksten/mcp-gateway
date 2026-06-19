@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -21,12 +22,13 @@ import (
 
 	"github.com/failsafe-go/failsafe-go/bulkhead"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/sync/singleflight"
 )
 
 // Default thresholds.
 const (
-	DefaultPingTimeout          = 5 * time.Second
-	DefaultConsecutiveFailures  = 3
+	DefaultPingTimeout         = 5 * time.Second
+	DefaultConsecutiveFailures = 3
 	// DefaultSAPProbeFailures is the consecutive-failure threshold for the SAP
 	// reachability probe (vsp host-dial / sap-gui session check) before a live,
 	// MCP-ping-OK SAP backend is marked Degraded. Mirrors the MCP-ping threshold
@@ -34,7 +36,14 @@ const (
 	// are deliberately NEVER routed to StatusUnreachable (stdio has no slow-poll
 	// recovery); they ride the same Running/Degraded loop as every other backend,
 	// which re-probes every tick and self-recovers.
-	DefaultSAPProbeFailures     = 3
+	DefaultSAPProbeFailures = 3
+	// DefaultSAPDegradedConfirm is the consecutive-confirmation threshold for a
+	// RELIABLE "not logged in" verdict (StatusDegraded from a successful probe)
+	// before the backend is actually marked Degraded. Two ticks confirms the
+	// session is truly absent rather than a race between two probes reading the
+	// same shared STA engine at a transient moment. Lower than the I/O-error
+	// threshold (3) because this path has no transport noise.
+	DefaultSAPDegradedConfirm   = 2
 	DefaultCircuitBreakerThresh = 5
 	DefaultCircuitBreakerWindow = 300 * time.Second
 	DefaultRESTHealthTimeout    = 5 * time.Second
@@ -152,12 +161,29 @@ type serverState struct {
 	// cadence (first N at 60s, then 5min cap). Reset to 0 on transition
 	// back to StatusRunning.
 	reachProbeCount int
-	// sapProbeFailures counts consecutive SAP reachability-probe failures
-	// (vsp host-dial / sap-gui session check) while the MCP child is alive
-	// (mcpOK). Drives the Degraded threshold in checkOne so a transient blip is
-	// tolerated; reset to 0 on a successful SAP probe / non-SAP backend and by
-	// ResetCircuit. SAP backends never use the StatusUnreachable slow-poll.
-	sapProbeFailures int
+	// sapUnreachableStreak counts consecutive SAP probe I/O failures
+	// (transport/dial error → StatusUnreachable from mapSAPGUIResult / TCP probe)
+	// while the MCP child is alive (mcpOK). Tolerated up to SAPProbeFailureThreshold
+	// before the backend is marked Degraded. Reset to 0 on any good SAP outcome or
+	// by ResetCircuit. SAP backends never use the StatusUnreachable slow-poll.
+	sapUnreachableStreak int
+	// sapDegradedStreak counts consecutive RELIABLE "not logged in" verdicts
+	// (StatusDegraded from a SUCCESSFUL sap_list_sessions probe — no I/O error,
+	// but the session list is empty or the expected system is absent). Tolerated up
+	// to SAPDegradedConfirmThreshold (2) before the backend is marked Degraded.
+	// Reset to 0 on any good SAP outcome or by ResetCircuit.
+	sapDegradedStreak int
+}
+
+// sapSnapshot holds the result of a single sap_list_sessions probe shared
+// across all sap-gui-* backends in one monitor cycle. The STA COM engine is
+// global and returns the same connection list regardless of which backend
+// calls it, so probing once and sharing the result eliminates 8 concurrent
+// STA-thread contentions per cycle. (Review finding: design step 1.)
+type sapSnapshot struct {
+	res     *mcp.CallToolResult
+	err     error
+	takenAt time.Time
 }
 
 // Monitor periodically checks backend server health and manages
@@ -172,6 +198,24 @@ type Monitor struct {
 	mu     sync.Mutex
 	states map[string]*serverState
 
+	// SAP GUI shared-snapshot state (design step 1).
+	// sapSnapMu guards sapSnap; sapSnapSF deduplicates concurrent callers
+	// within the same cycle before the cache is warm.
+	sapSnapMu sync.Mutex
+	sapSnap   sapSnapshot
+	sapSnapSF singleflight.Group
+	// sapTargetFails maps backend name -> consecutive probe-failure count for
+	// target ordering (eviction): failing targets sink to the back of the
+	// candidate list so a healthy session is tried first. Only touched on
+	// the singleflight-serialised probe path — no extra lock needed beyond SF.
+	sapTargetFails    map[string]int
+	sapLastGoodTarget string
+	// sapProbeFn, when non-nil, replaces probeSAPOnce as the snapshot probe.
+	// Production leaves it nil; tests inject a stub so the real getSAPSnapshot
+	// (singleflight + TTL) and the checkOne mask run against controlled probe
+	// results without a live *mcp.ClientSession.
+	sapProbeFn func(ctx context.Context) (*mcp.CallToolResult, error)
+
 	// Configurable thresholds (exported for testing). These MUST be set
 	// only before NewMonitor's caller starts the monitor (Run/CheckOnce)
 	// and treated as read-only afterwards — they are read without the
@@ -180,9 +224,15 @@ type Monitor struct {
 	CircuitBreakerThreshold          int
 	CircuitBreakerWindow             time.Duration
 	ConsecutiveFailedStartsThreshold int
-	// SAPProbeFailureThreshold is the consecutive SAP-probe-failure count
-	// before a live (MCP-ping-OK) SAP backend is marked Degraded.
+	// SAPProbeFailureThreshold is the consecutive SAP-probe I/O failure count
+	// (transport errors → StatusUnreachable from mapSAPGUIResult) before a
+	// live (MCP-ping-OK) SAP backend is marked Degraded. Tolerates VPN blips.
 	SAPProbeFailureThreshold int
+	// SAPDegradedConfirmThreshold is the consecutive "not logged in" verdict
+	// count (StatusDegraded from a SUCCESSFUL probe) before the backend is
+	// marked Degraded. Lower than the I/O-error threshold because this path
+	// has no transport noise. (Review finding MEDIUM-2, design step 4.)
+	SAPDegradedConfirmThreshold int
 	// RestartBackoffBase/Max bound the exponential restart backoff.
 	// A base of 0 disables backoff (unit tests set this to drive many
 	// restart cycles without real time elapsing).
@@ -207,11 +257,13 @@ func NewMonitor(lm LifecycleManager, interval time.Duration, logger *slog.Logger
 			},
 		},
 		states:                           make(map[string]*serverState),
+		sapTargetFails:                   make(map[string]int),
 		ConsecutiveFailureThreshold:      DefaultConsecutiveFailures,
 		CircuitBreakerThreshold:          DefaultCircuitBreakerThresh,
 		CircuitBreakerWindow:             DefaultCircuitBreakerWindow,
 		ConsecutiveFailedStartsThreshold: DefaultConsecutiveFailedStarts,
 		SAPProbeFailureThreshold:         DefaultSAPProbeFailures,
+		SAPDegradedConfirmThreshold:      DefaultSAPDegradedConfirm,
 		RestartBackoffBase:               RestartBackoffBase,
 		RestartBackoffMax:                RestartBackoffMax,
 	}
@@ -516,30 +568,18 @@ func (m *Monitor) checkOne(ctx context.Context, entry models.ServerEntry) {
 			state.uptimeStart = time.Now()
 		}
 
-		// SAP reachability (vsp-*/sap-gui-*). The MCP child is alive (mcpOK), so
-		// a transient SAP-host/GUI-session failure is a DEGRADED condition, never
-		// a terminal StatusUnreachable: stdio backends have no slow-poll recovery
-		// (maybeProbeUnreachable is HTTP-only), so flipping them Unreachable on a
-		// single 3s probe stranded a live, ping-OK backend until a manual
-		// restart. Feed the SAP probe into the SAME running/degraded loop every
-		// backend uses — a short consecutive-failure threshold absorbs VPN/host
-		// blips, and Degraded stays routable and is re-probed every tick, so it
-		// self-recovers when SAP returns.
-		sapBad := sapStatus == models.StatusUnreachable || sapStatus == models.StatusDegraded
-		if sapBad {
-			state.sapProbeFailures++
-			sapFails := state.sapProbeFailures
+		// SAP reachability blip mask — split into two independent counters
+		// (review MEDIUM-2, design step 4). The streak bookkeeping + threshold
+		// decision live in updateSAPStreaks (unit-testable without a live MCP
+		// session); a handled verdict is published here, otherwise we fall
+		// through to the normal Running/REST path with both streaks reset.
+		if pub, reason, handled := m.updateSAPStreaks(state, sapStatus, sapReason); handled {
 			m.mu.Unlock()
-			if sapFails < m.SAPProbeFailureThreshold {
-				// Tolerate a transient blip — keep serving this tick.
-				m.lm.SetStatus(name, models.StatusRunning, "")
-				return
-			}
-			m.lm.SetStatus(name, models.StatusDegraded, sapReason)
+			m.lm.SetStatus(name, pub, reason)
 			return
 		}
-		// SAP probe passed (or backend is non-SAP / explicitly running).
-		state.sapProbeFailures = 0
+		// SAP probe passed (or backend is non-SAP / explicitly running):
+		// updateSAPStreaks already reset both streaks.
 		m.mu.Unlock()
 
 		if sapStatus == models.StatusRunning {
@@ -783,7 +823,8 @@ func (m *Monitor) ResetCircuit(ctx context.Context, name string) error {
 	state.consecutiveFailedStarts = 0        // MED-1: stale count would re-disable
 	state.lastHealthyAt = time.Time{}        // MED-1: stale health would skew gate
 	state.nextRestartAllowedAt = time.Time{} // MED-1: clear pending backoff
-	state.sapProbeFailures = 0               // clear SAP-probe streak on reset
+	state.sapUnreachableStreak = 0           // clear SAP I/O-error streak on reset
+	state.sapDegradedStreak = 0              // clear SAP "not logged in" streak on reset
 	m.mu.Unlock()
 
 	m.lm.SetStatus(name, models.StatusStopped, "")
@@ -936,30 +977,193 @@ func sapSessionMatches(jsonText, expectSystem, expectUser, expectClient string) 
 	return false
 }
 
-// checkSAPGUISession calls sap_list_sessions on a sap-gui-* backend and
-// interprets the result:
-//   - >=1 sessions in the list → (StatusRunning, "")
-//   - zero sessions or "no session"/"not connected" error → (StatusDegraded, reason)
-//   - tool missing / transport error → (StatusUnreachable, reason)
+// sapSnapshotTTL returns the cache lifetime for the shared SAP snapshot.
+// Set to half the monitor interval so one cached result covers all sap-gui-*
+// goroutines in a single ~30s cycle without leaking into the next cycle.
+// Returns 0 when interval is 0 (tests with interval=0 still deduplicate via
+// singleflight within a single CheckOnce call).
+func (m *Monitor) sapSnapshotTTL() time.Duration {
+	if m.interval <= 0 {
+		return 0
+	}
+	return m.interval / 2
+}
+
+// getSAPSnapshot returns a shared sap_list_sessions result for the current
+// monitor cycle. The first sap-gui-* goroutine to call this probes the STA
+// engine via probeSAPOnce; all subsequent callers within the TTL window read
+// the cached result without re-probing. singleflight deduplicates concurrent
+// callers that arrive before the cache is warm (design step 1).
 //
-// Returns the status to apply and the reason string. Callers must have already
-// confirmed MCP ping succeeded before calling this. The ctx passed in should
-// already carry an appropriate deadline.
-func (m *Monitor) checkSAPGUISession(ctx context.Context, name string) (models.ServerStatus, string) {
-	session, ok := m.lm.Session(name)
-	if !ok {
-		return models.StatusUnreachable, "no MCP session for sap-gui probe"
+// CRITICAL: the cache is written — with a fresh takenAt — even when the probe
+// errors, so subsequent callers within the TTL do not re-invoke probeSAPOnce
+// and regress to 8 parallel STA-thread contenders.
+func (m *Monitor) getSAPSnapshot(ctx context.Context) (*mcp.CallToolResult, error) {
+	// Fast path: cache hit. A non-positive TTL means "no cache" — always
+	// re-probe (review F1: ttl==0 must NOT mean cache-forever); singleflight
+	// still collapses concurrent callers within one cycle.
+	ttl := m.sapSnapshotTTL()
+	m.sapSnapMu.Lock()
+	if ttl > 0 && !m.sapSnap.takenAt.IsZero() && time.Since(m.sapSnap.takenAt) < ttl {
+		res, err := m.sapSnap.res, m.sapSnap.err
+		m.sapSnapMu.Unlock()
+		return res, err
+	}
+	m.sapSnapMu.Unlock()
+
+	// Slow path: probe once; singleflight collapses concurrent callers.
+	// Tests inject sapProbeFn to stub the leaf probe; production uses probeSAPOnce.
+	probe := m.probeSAPOnce
+	if m.sapProbeFn != nil {
+		probe = m.sapProbeFn
+	}
+	v, err, _ := m.sapSnapSF.Do("sap-gui-snapshot", func() (any, error) {
+		res, probeErr := probe(ctx)
+		// Write the cache unconditionally (even on error) so subsequent
+		// callers within the TTL don't re-probe (design step 1, CRITICAL note).
+		m.sapSnapMu.Lock()
+		m.sapSnap = sapSnapshot{res: res, err: probeErr, takenAt: time.Now()}
+		m.sapSnapMu.Unlock()
+		return res, probeErr
+	})
+	var res *mcp.CallToolResult
+	if v != nil {
+		res = v.(*mcp.CallToolResult)
+	}
+	return res, err
+}
+
+// probeSAPOnce selects the best available sap-gui-* backend, probes
+// sap_list_sessions through it, and returns the result. The backend
+// selection uses a fail-count eviction policy (design step 2, review HIGH):
+// targets with more consecutive probe errors sink to the back of the
+// candidate list so a session that previously hung the STA thread is not
+// tried first next cycle. A 2s per-attempt sub-timeout prevents one
+// COM-hung backend from consuming the full 5s budget.
+//
+// sapTargetFails is only written here — on the singleflight-serialised
+// probe path — so no extra mutex is needed beyond the singleflight dedup.
+func (m *Monitor) probeSAPOnce(ctx context.Context) (*mcp.CallToolResult, error) {
+	// Collect live sap-gui-* sessions (any status OK — a StatusError backend can
+	// still recover from a shared healthy snapshot).
+	sessions := make(map[string]*mcp.ClientSession)
+	var names []string
+	for _, e := range m.lm.Entries() {
+		if !sapname.IsSAPGUI(e.Name) {
+			continue
+		}
+		if sess, ok := m.lm.Session(e.Name); ok {
+			sessions[e.Name] = sess
+			names = append(names, e.Name)
+		}
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no live sap-gui session for snapshot probe")
 	}
 
-	expectSystem, expectUser, expectClient := m.sapExpectedIdentity(name)
+	// Order by the eviction policy (review HIGH + F2): ascending fail-count,
+	// last-good target first among ties, then by name.
+	order := orderSAPCandidates(names, m.sapTargetFails, m.sapLastGoodTarget)
 
-	callCtx, cancel := context.WithTimeout(ctx, DefaultPingTimeout)
-	defer cancel()
+	budget := DefaultPingTimeout
+	budgetStart := time.Now()
+	var lastRes *mcp.CallToolResult
+	var lastErr error
 
-	result, err := session.CallTool(callCtx, &mcp.CallToolParams{
-		Name: sapGUISessionProbeToolName,
+	for _, name := range order {
+		remaining := budget - time.Since(budgetStart)
+		if remaining <= 0 {
+			break
+		}
+		// Cap each attempt at 2s so one COM-hung target cannot eat the full
+		// budget and starve the healthy session behind it.
+		perAttempt := min(remaining, 2*time.Second)
+		attemptCtx, cancel := context.WithTimeout(ctx, perAttempt)
+		res, err := sessions[name].CallTool(attemptCtx, &mcp.CallToolParams{
+			Name: sapGUISessionProbeToolName,
+		})
+		cancel()
+
+		if err == nil {
+			// Success: this target is healthy — float it to the front next cycle.
+			m.sapTargetFails[name] = 0
+			m.sapLastGoodTarget = name
+			return res, nil
+		}
+		// Failure: deprioritise this target next cycle.
+		m.sapTargetFails[name]++
+		lastRes, lastErr = res, err
+	}
+
+	return lastRes, lastErr
+}
+
+// orderSAPCandidates returns backend names ordered for probe preference:
+// ascending fail-count first (a target that previously hung the STA thread
+// sinks to the back), the last-good target first among equal fail-counts
+// (review F2: wires sapLastGoodTarget), then lexicographically by name. Pure
+// (no I/O, no receiver) so the ordering/eviction policy is unit-testable.
+func orderSAPCandidates(names []string, fails map[string]int, lastGood string) []string {
+	ordered := append([]string(nil), names...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		fi, fj := fails[ordered[i]], fails[ordered[j]]
+		if fi != fj {
+			return fi < fj
+		}
+		if (ordered[i] == lastGood) != (ordered[j] == lastGood) {
+			return ordered[i] == lastGood // last-good wins the tie
+		}
+		return ordered[i] < ordered[j]
 	})
-	return mapSAPGUIResult(result, err, name, expectSystem, expectUser, expectClient, m.logger)
+	return ordered
+}
+
+// updateSAPStreaks applies a SAP probe verdict to the two independent streak
+// counters and returns the status/reason to publish plus whether the SAP path
+// handled the verdict (review MEDIUM-2, design step 4). The caller holds m.mu.
+//
+//   - StatusUnreachable — probe I/O failure (transport error / timeout);
+//     tolerated up to SAPProbeFailureThreshold (3). VPN/host blips fit here.
+//     vsp-* only ever yields this, so it rides the I/O-error streak unchanged.
+//   - StatusDegraded — RELIABLE "not logged in" from a SUCCESSFUL probe;
+//     tolerated up to SAPDegradedConfirmThreshold (2). One tolerated tick
+//     absorbs the race where the STA engine returns the list a split-second
+//     before the session appears.
+//   - anything else (StatusRunning / empty) — a good outcome: reset BOTH
+//     streaks and return handled=false so the caller runs its Running/REST path.
+//
+// The two counters are reset across each other so an alternating
+// Unreachable/Degraded sequence cannot accumulate toward either threshold.
+func (m *Monitor) updateSAPStreaks(state *serverState, sapStatus models.ServerStatus, sapReason string) (pub models.ServerStatus, reason string, handled bool) {
+	switch sapStatus {
+	case models.StatusUnreachable:
+		state.sapUnreachableStreak++
+		state.sapDegradedStreak = 0
+		if state.sapUnreachableStreak < m.SAPProbeFailureThreshold {
+			return models.StatusRunning, "", true
+		}
+		return models.StatusDegraded, sapReason, true
+	case models.StatusDegraded:
+		state.sapDegradedStreak++
+		state.sapUnreachableStreak = 0
+		if state.sapDegradedStreak < m.SAPDegradedConfirmThreshold {
+			return models.StatusRunning, "", true
+		}
+		return models.StatusDegraded, sapReason, true
+	}
+	state.sapUnreachableStreak = 0
+	state.sapDegradedStreak = 0
+	return "", "", false
+}
+
+// checkSAPGUISession derives the sap-gui-* verdict from the shared snapshot
+// produced by getSAPSnapshot (design step 3). One probe per cycle is shared
+// across all 8 sap-gui-* backends; each backend applies mapSAPGUIResult with
+// its own expected identity to derive its per-system verdict.
+func (m *Monitor) checkSAPGUISession(ctx context.Context, name string) (models.ServerStatus, string) {
+	expectSystem, expectUser, expectClient := m.sapExpectedIdentity(name)
+	res, err := m.getSAPSnapshot(ctx)
+	return mapSAPGUIResult(res, err, name, expectSystem, expectUser, expectClient, m.logger)
 }
 
 // sapExpectedIdentity returns the SAP system id (SID), SAP_USER and SAP_CLIENT

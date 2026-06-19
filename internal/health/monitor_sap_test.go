@@ -1,18 +1,20 @@
 // Regression tests for BUG-STDIO-1 through BUG-STDIO-4 (SAP stdio backend
-// health-check fix):
+// health-check fix) plus P1 reliability fixes:
 //
 //   - BUG-STDIO-1: vsp-* always reported running regardless of SAP reachability.
 //   - BUG-STDIO-2: sap-gui-* always reported running regardless of session state.
 //   - BUG-STDIO-3: lifecycle Start() did not TCP-probe SAP_URL for vsp-* backends.
 //   - BUG-STDIO-4: checkSAPGUISession session-absent path.
+//   - P1: shared snapshot (one probe per cycle), dual-counter blip mask, sticky-
+//     target eviction, takenAt-on-error cache guarantee.
 //
 // Test strategy:
 //   - vsp-* reachability: uses a wrapper that mirrors checkOne's mcpOK=true branch
 //     with the real SAP probe logic, driven via a real local TCP listener or an
 //     unbound local port (same pattern as monitor_unreachable_test.go).
-//   - sap-gui-* session check: the "no MCP session" early-return branch is fully
+//   - sap-gui-* session check: the "no live session" early-return branch is fully
 //     testable (mockLM.Session returns false). Deeper branches (CallTool result
-//     inspection) require a real *mcp.ClientSession — flagged as Escalated.
+//     inspection) are exercised via countingMockLM with injectable tool results.
 //   - Non-SAP backend: verified to take neither probe path.
 //
 // Fail-without-fix property:
@@ -102,21 +104,34 @@ func (tm *testableMonitor) checkOneWithSAPProbe(ctx context.Context, entry model
 			state.uptimeStart = time.Now()
 		}
 
-		// SAP reachability is a thresholded Degraded signal — never a terminal
-		// StatusUnreachable for stdio (mirrors monitor.go checkOne).
-		sapBad := sapStatus == models.StatusUnreachable || sapStatus == models.StatusDegraded
-		if sapBad {
-			state.sapProbeFailures++
-			sapFails := state.sapProbeFailures
+		// SAP reachability — two-counter blip mask mirrors monitor.go checkOne
+		// (design step 4, review MEDIUM-2). Never StatusUnreachable for stdio.
+		switch sapStatus {
+		case models.StatusUnreachable:
+			state.sapUnreachableStreak++
+			state.sapDegradedStreak = 0
+			streak := state.sapUnreachableStreak
 			tm.mu.Unlock()
-			if sapFails < tm.SAPProbeFailureThreshold {
+			if streak < tm.SAPProbeFailureThreshold {
+				tm.lm.SetStatus(name, models.StatusRunning, "")
+				return
+			}
+			tm.lm.SetStatus(name, models.StatusDegraded, sapReason)
+			return
+		case models.StatusDegraded:
+			state.sapDegradedStreak++
+			state.sapUnreachableStreak = 0
+			streak := state.sapDegradedStreak
+			tm.mu.Unlock()
+			if streak < tm.SAPDegradedConfirmThreshold {
 				tm.lm.SetStatus(name, models.StatusRunning, "")
 				return
 			}
 			tm.lm.SetStatus(name, models.StatusDegraded, sapReason)
 			return
 		}
-		state.sapProbeFailures = 0
+		state.sapUnreachableStreak = 0
+		state.sapDegradedStreak = 0
 		tm.mu.Unlock()
 		tm.lm.SetStatus(name, models.StatusRunning, "")
 		return
@@ -296,8 +311,10 @@ func TestCheckOne_SAPGUI_NoSession_YieldsDegradedAfterThreshold(t *testing.T) {
 }
 
 // TestCheckSAPGUISession_NoSession is a direct unit test of checkSAPGUISession
-// that pins the (StatusUnreachable, "no MCP session…") return values for the
-// session-absent path.
+// that pins the StatusUnreachable return for the no-live-session path.
+// After the P1 rewire, checkSAPGUISession delegates to getSAPSnapshot →
+// probeSAPOnce, which returns "no live sap-gui session for snapshot probe"
+// when the candidate list is empty (no session registered in the mock).
 func TestCheckSAPGUISession_NoSession(t *testing.T) {
 	mock := newMockLM()
 	// No entry for "sap-gui-ABC"; Session() returns (nil, false).
@@ -307,9 +324,9 @@ func TestCheckSAPGUISession_NoSession(t *testing.T) {
 	status, reason := mon.checkSAPGUISession(ctx, "sap-gui-ABC")
 
 	assert.Equal(t, models.StatusUnreachable, status,
-		"checkSAPGUISession must return StatusUnreachable when no session exists")
-	assert.Contains(t, reason, "no MCP session",
-		"reason must describe the missing session")
+		"checkSAPGUISession must return StatusUnreachable when no live session exists")
+	assert.Contains(t, reason, "no live sap-gui session",
+		"reason must describe the absent candidate pool")
 }
 
 // TestCheckOne_SAPGUI_WithClientSuffix_NoSession verifies that sap-gui-<SID>-<Client>
@@ -464,9 +481,12 @@ func TestCheckSAPGUISession_ResultMapping(t *testing.T) {
 		wantReasonSub string
 	}{
 		{
+			// After P1 rewire: probeSAPOnce returns "no live sap-gui session
+			// for snapshot probe" when no session is registered; mapSAPGUIResult
+			// maps that non-"not found" error to StatusUnreachable.
 			name:          "session absent -> StatusUnreachable",
 			wantStatus:    models.StatusUnreachable,
-			wantReasonSub: "no MCP session",
+			wantReasonSub: "no live sap-gui session",
 		},
 	}
 
@@ -507,15 +527,15 @@ func TestMapSAPGUIResult(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		res            *mcp.CallToolResult
-		callErr        error
-		expectSystem   string // backend's SAP system id / SID ("" = SID unknown)
-		expectUser     string // backend's configured SAP_USER ("" = identity unknown)
-		expectClient   string // backend's configured SAP_CLIENT ("" = identity unknown)
-		wantStatus     models.ServerStatus
-		wantReasonSub  string // non-empty: reason must contain this substring
-		wantEmptyReason bool  // true: reason must be exactly ""
+		name            string
+		res             *mcp.CallToolResult
+		callErr         error
+		expectSystem    string // backend's SAP system id / SID ("" = SID unknown)
+		expectUser      string // backend's configured SAP_USER ("" = identity unknown)
+		expectClient    string // backend's configured SAP_CLIENT ("" = identity unknown)
+		wantStatus      models.ServerStatus
+		wantReasonSub   string // non-empty: reason must contain this substring
+		wantEmptyReason bool   // true: reason must be exactly ""
 	}{
 		{
 			name:            "callErr contains 'not found' -> StatusRunning graceful fallback",
@@ -532,11 +552,11 @@ func TestMapSAPGUIResult(t *testing.T) {
 			wantEmptyReason: true,
 		},
 		{
-			name:           "callErr other transport error -> StatusUnreachable with probe-failed prefix",
-			res:            nil,
-			callErr:        errors.New("connection reset by peer"),
-			wantStatus:     models.StatusUnreachable,
-			wantReasonSub:  "sap-gui session probe failed:",
+			name:          "callErr other transport error -> StatusUnreachable with probe-failed prefix",
+			res:           nil,
+			callErr:       errors.New("connection reset by peer"),
+			wantStatus:    models.StatusUnreachable,
+			wantReasonSub: "sap-gui session probe failed:",
 		},
 		{
 			name:          "res.IsError=true with text content -> StatusDegraded with text in reason",
@@ -597,7 +617,7 @@ func TestMapSAPGUIResult(t *testing.T) {
 			// The Q25 backend must NOT report Running off the CTC session.
 			name: "shared user+client, only ANOTHER SID logged in -> StatusDegraded",
 			res: okResult(textContent(
-				`[{"system_name":"CTC","client":"100","user":"NAUMOV","transaction":"SNOTE"},`+
+				`[{"system_name":"CTC","client":"100","user":"NAUMOV","transaction":"SNOTE"},` +
 					`{"system_name":"Q25","client":"000","user":"","transaction":"S000"}]`)),
 			callErr:       nil,
 			expectSystem:  "Q25",
@@ -668,10 +688,10 @@ func TestSAPSIDFromName(t *testing.T) {
 		{"sap-gui-CTC-100", "100", "CTC"},
 		{"sap-gui-S23-100", "100", "S23"},
 		{"sap-gui-Q25-100", "100", "Q25"},
-		{"sap-gui-CTC-100", "", "CTC"},   // client unknown → strip final -segment
+		{"sap-gui-CTC-100", "", "CTC"},    // client unknown → strip final -segment
 		{"sap-gui-DEV-200", "100", "DEV"}, // client "100" != suffix "200" → fallback strips final -segment
-		{"vsp-CTC-100", "100", ""},       // not a sap-gui- name
-		{"orchestrator", "", ""},         // no prefix
+		{"vsp-CTC-100", "100", ""},        // not a sap-gui- name
+		{"orchestrator", "", ""},          // no prefix
 	}
 	for _, c := range cases {
 		got := sapSIDFromName(c.name, c.client)
@@ -679,7 +699,206 @@ func TestSAPSIDFromName(t *testing.T) {
 	}
 }
 
-// Compile-time guard: ensure the wrapper references the real Monitor methods so
+// ---- P1 reliability tests ---------------------------------------------------
+//
+// These tests exercise the shared-snapshot path (getSAPSnapshot / probeSAPOnce),
+// the dual-counter blip mask, the takenAt-on-error cache guarantee, and the
+// sticky-target eviction introduced in the P1 reliability fix.
+
+// These tests drive the REAL production code through the P1 seams — no
+// production logic is re-implemented:
+//   - mon.sapProbeFn stubs the leaf probe so the real getSAPSnapshot
+//     (singleflight + TTL cache) and checkSAPGUISession run without a live
+//     *mcp.ClientSession;
+//   - mon.updateSAPStreaks is the real dual-counter blip-mask called by checkOne;
+//   - orderSAPCandidates is the real, pure candidate-ordering / eviction policy.
+
+// TestSAPSnapshot_SharedAcrossBackends drives the REAL checkSAPGUISession ->
+// getSAPSnapshot path: N sap-gui-* backends in one cycle trigger EXACTLY ONE
+// underlying probe (TTL cache), and each backend derives its own verdict from
+// the shared snapshot via the real mapSAPGUIResult (CTC logged-in -> Running,
+// the rest absent -> Degraded).
+func TestSAPSnapshot_SharedAcrossBackends(t *testing.T) {
+	sessionJSON := `[{"system_name":"CTC","client":"100","user":"NAUMOV","transaction":"SESSION_MANAGER"}]`
+	okResult := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: sessionJSON}}}
+
+	mock := newMockLM()
+	backends := []string{"sap-gui-CTC-100", "sap-gui-Q25-100", "sap-gui-S23-100", "sap-gui-DEV-100"}
+	for _, name := range backends {
+		mock.addEntry(name, models.StatusRunning, models.ServerConfig{
+			Command: "/fake/sap-gui-ctl",
+			Env:     []string{"SAP_USER=NAUMOV", "SAP_CLIENT=100"},
+		})
+	}
+	mon := NewMonitor(mock, 30*time.Second, nil) // 30s interval -> 15s TTL
+	callCount := 0
+	mon.sapProbeFn = func(_ context.Context) (*mcp.CallToolResult, error) {
+		callCount++
+		return okResult, nil
+	}
+	ctx := context.Background()
+
+	for _, name := range backends {
+		status, _ := mon.checkSAPGUISession(ctx, name)
+		if name == "sap-gui-CTC-100" {
+			assert.Equal(t, models.StatusRunning, status, "%s is logged in -> Running", name)
+		} else {
+			assert.Equal(t, models.StatusDegraded, status, "%s absent from list -> Degraded", name)
+		}
+	}
+
+	assert.Equal(t, 1, callCount,
+		"N sap-gui backends in one cycle must trigger exactly ONE probe (shared snapshot)")
+}
+
+// TestSAPDualCounter_DegradedConfirm drives the REAL updateSAPStreaks: a reliable
+// Degraded verdict is tolerated for SAPDegradedConfirmThreshold-1 ticks (Running)
+// and confirmed Degraded on the threshold tick; a good verdict then falls through
+// (handled=false) and resets both streaks.
+func TestSAPDualCounter_DegradedConfirm(t *testing.T) {
+	mon := NewMonitor(newMockLM(), 1*time.Second, nil)
+	require.Equal(t, 2, mon.SAPDegradedConfirmThreshold)
+	state := &serverState{}
+
+	// Tick 1: streak 1 < 2 → tolerated (Running).
+	pub, _, handled := mon.updateSAPStreaks(state, models.StatusDegraded, "no session")
+	require.True(t, handled)
+	assert.Equal(t, models.StatusRunning, pub, "first Degraded tick tolerated")
+	assert.Equal(t, 1, state.sapDegradedStreak)
+
+	// Tick 2: streak 2 == threshold → confirmed Degraded with the reason.
+	pub, reason, handled := mon.updateSAPStreaks(state, models.StatusDegraded, "no session")
+	require.True(t, handled)
+	assert.Equal(t, models.StatusDegraded, pub, "second Degraded tick confirms Degraded")
+	assert.Equal(t, "no session", reason)
+	assert.Equal(t, 2, state.sapDegradedStreak)
+
+	// Good verdict: SAP path does not handle it; both streaks reset.
+	_, _, handled = mon.updateSAPStreaks(state, models.StatusRunning, "")
+	assert.False(t, handled, "a good verdict falls through to the Running/REST path")
+	assert.Equal(t, 0, state.sapDegradedStreak, "good tick resets sapDegradedStreak")
+	assert.Equal(t, 0, state.sapUnreachableStreak, "good tick resets sapUnreachableStreak")
+}
+
+// TestSAPDualCounter_UnreachableThreshold drives the REAL updateSAPStreaks I/O-error
+// path: tolerated up to SAPProbeFailureThreshold (3), then confirmed Degraded.
+func TestSAPDualCounter_UnreachableThreshold(t *testing.T) {
+	mon := NewMonitor(newMockLM(), 1*time.Second, nil)
+	require.Equal(t, 3, mon.SAPProbeFailureThreshold)
+	state := &serverState{}
+
+	for i := 1; i < mon.SAPProbeFailureThreshold; i++ {
+		pub, _, handled := mon.updateSAPStreaks(state, models.StatusUnreachable, "io")
+		require.True(t, handled)
+		assert.Equal(t, models.StatusRunning, pub, "tick %d tolerated", i)
+	}
+	pub, _, _ := mon.updateSAPStreaks(state, models.StatusUnreachable, "io")
+	assert.Equal(t, models.StatusDegraded, pub, "Unreachable confirmed at threshold")
+}
+
+// TestSAPDualCounter_NoCrossContamination verifies that alternating
+// Degraded/Unreachable verdicts never prematurely trip either threshold:
+// each counter resets the other on every tick, so only a CONSECUTIVE
+// run of the same verdict class reaches the threshold.
+func TestSAPDualCounter_NoCrossContamination(t *testing.T) {
+	mon := NewMonitor(newMockLM(), 1*time.Second, nil)
+	state := &serverState{}
+
+	// Pattern D, U, D, U: each verdict resets the opposing counter, so neither
+	// accumulates and the status stays Running (tolerated) every tick.
+	verdicts := []models.ServerStatus{
+		models.StatusDegraded,
+		models.StatusUnreachable,
+		models.StatusDegraded,
+		models.StatusUnreachable,
+	}
+	for i, v := range verdicts {
+		pub, _, handled := mon.updateSAPStreaks(state, v, "blip")
+		require.True(t, handled)
+		assert.Equal(t, models.StatusRunning, pub,
+			"tick %d (%s): alternating verdicts must stay tolerated", i, v)
+		assert.LessOrEqual(t, state.sapDegradedStreak, 1,
+			"tick %d: sapDegradedStreak must not accumulate when alternating", i)
+		assert.LessOrEqual(t, state.sapUnreachableStreak, 1,
+			"tick %d: sapUnreachableStreak must not accumulate when alternating", i)
+	}
+}
+
+// TestSAPSnapshot_TakenAtOnError verifies that when probeSAPOnce errors, the
+// cache takenAt is still advanced, so a second getSAPSnapshot call within the
+// TTL does NOT re-invoke the probe (CRITICAL note in design step 1).
+func TestSAPSnapshot_TakenAtOnError(t *testing.T) {
+	probeErr := errors.New("COM engine unavailable")
+	callCount := 0
+	mon := NewMonitor(newMockLM(), 30*time.Second, nil) // TTL 15s > 0
+	mon.sapProbeFn = func(_ context.Context) (*mcp.CallToolResult, error) {
+		callCount++
+		return nil, probeErr
+	}
+	ctx := context.Background()
+
+	res1, err1 := mon.getSAPSnapshot(ctx)
+	assert.Nil(t, res1)
+	assert.ErrorIs(t, err1, probeErr)
+	assert.Equal(t, 1, callCount, "first call must invoke the probe")
+
+	res2, err2 := mon.getSAPSnapshot(ctx)
+	assert.Nil(t, res2)
+	assert.ErrorIs(t, err2, probeErr)
+	assert.Equal(t, 1, callCount,
+		"second call within TTL must NOT re-probe (takenAt advanced even on error)")
+
+	mon.sapSnapMu.Lock()
+	assert.False(t, mon.sapSnap.takenAt.IsZero(), "takenAt must be set even on probe error")
+	mon.sapSnapMu.Unlock()
+}
+
+// TestSAPSnapshot_NoCacheWhenTTLZero verifies the F1 fix: interval<=0 yields
+// TTL=0, which means "no cache" — every sequential getSAPSnapshot re-invokes the
+// probe (singleflight only collapses CONCURRENT callers, not sequential ones).
+func TestSAPSnapshot_NoCacheWhenTTLZero(t *testing.T) {
+	callCount := 0
+	mon := NewMonitor(newMockLM(), 0, nil) // interval 0 -> TTL 0 -> no cache
+	mon.sapProbeFn = func(_ context.Context) (*mcp.CallToolResult, error) {
+		callCount++
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "[]"}}}, nil
+	}
+	ctx := context.Background()
+	_, _ = mon.getSAPSnapshot(ctx)
+	_, _ = mon.getSAPSnapshot(ctx)
+	assert.Equal(t, 2, callCount, "TTL=0 must re-probe each sequential call (no cache-forever)")
+}
+
+// TestOrderSAPCandidates exercises the REAL pure ordering/eviction policy used by
+// probeSAPOnce (design step 2, review HIGH + F2): ascending fail-count, last-good
+// first among ties, then lexicographic by name. This is the production function —
+// not a re-implementation — so a broken sort or fail-count key is caught here.
+func TestOrderSAPCandidates(t *testing.T) {
+	names := []string{"sap-gui-Q25-100", "sap-gui-CTC-100", "sap-gui-S23-100"}
+
+	// Eviction: a failing target (Q25, fails=2) sinks behind healthy ones; the
+	// two fails=0 targets order lexicographically.
+	got := orderSAPCandidates(names, map[string]int{"sap-gui-Q25-100": 2}, "")
+	assert.Equal(t,
+		[]string{"sap-gui-CTC-100", "sap-gui-S23-100", "sap-gui-Q25-100"}, got,
+		"failing target sorts last; equal-fail targets sort by name")
+
+	// last-good wins the tie at equal fail-count (review F2: sapLastGoodTarget wired).
+	got = orderSAPCandidates(names, map[string]int{}, "sap-gui-S23-100")
+	assert.Equal(t, "sap-gui-S23-100", got[0],
+		"last-good target floats to the front among equal fail-counts")
+
+	// Fail-count dominates the last-good preference: a failing last-good still sinks.
+	got = orderSAPCandidates(names, map[string]int{"sap-gui-S23-100": 1}, "sap-gui-S23-100")
+	assert.Equal(t, "sap-gui-S23-100", got[len(got)-1],
+		"fail-count takes precedence over last-good preference")
+}
+
+// Compile-time guard: ensure the tests reference the real Monitor methods/funcs so
 // renames are caught at compile time rather than silently skipping tests.
 var _ = (*Monitor).checkSAPGUISession
+var _ = (*Monitor).getSAPSnapshot
+var _ = (*Monitor).probeSAPOnce
+var _ = (*Monitor).updateSAPStreaks
 var _ = (*Monitor).probeReachable
+var _ = orderSAPCandidates
