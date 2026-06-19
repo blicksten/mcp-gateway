@@ -510,6 +510,7 @@ func TestMapSAPGUIResult(t *testing.T) {
 		name           string
 		res            *mcp.CallToolResult
 		callErr        error
+		expectSystem   string // backend's SAP system id / SID ("" = SID unknown)
 		expectUser     string // backend's configured SAP_USER ("" = identity unknown)
 		expectClient   string // backend's configured SAP_CLIENT ("" = identity unknown)
 		wantStatus     models.ServerStatus
@@ -579,51 +580,59 @@ func TestMapSAPGUIResult(t *testing.T) {
 			wantStatus:    models.StatusDegraded,
 			wantReasonSub: "no SAP GUI session open (empty response)",
 		},
-		// --- Q2: per-system verdict when the backend's identity is known ---
+		// --- Q2: per-system verdict (SID is the discriminator) ---
 		{
-			name: "identity known + matching session -> StatusRunning",
+			name: "own system logged in -> StatusRunning",
 			res: okResult(textContent(
 				`[{"system_name":"CTC","client":"100","user":"NAUMOV","transaction":"SESSION_MANAGER"}]`)),
 			callErr:         nil,
+			expectSystem:    "CTC",
 			expectUser:      "NAUMOV",
 			expectClient:    "100",
 			wantStatus:      models.StatusRunning,
 			wantEmptyReason: true,
 		},
 		{
-			name: "identity known + only ANOTHER system logged in -> StatusDegraded (not stranded as running)",
+			// THE bug: all backends share NAUMOV/100; only CTC is logged in.
+			// The Q25 backend must NOT report Running off the CTC session.
+			name: "shared user+client, only ANOTHER SID logged in -> StatusDegraded",
 			res: okResult(textContent(
-				`[{"system_name":"DEV","client":"200","user":"IVANOV","transaction":"SE80"}]`)),
+				`[{"system_name":"CTC","client":"100","user":"NAUMOV","transaction":"SNOTE"},`+
+					`{"system_name":"Q25","client":"000","user":"","transaction":"S000"}]`)),
 			callErr:       nil,
+			expectSystem:  "Q25",
 			expectUser:    "NAUMOV",
 			expectClient:  "100",
 			wantStatus:    models.StatusDegraded,
-			wantReasonSub: "no SAP GUI session for this system",
+			wantReasonSub: "no logged-in SAP GUI session for system Q25",
 		},
 		{
-			name: "identity known + matching session with lowercase user -> StatusRunning (case-insensitive)",
+			name: "own system present but at login screen (empty user) -> StatusDegraded",
 			res: okResult(textContent(
-				`[{"system_name":"CTC","client":"100","user":"naumov"}]`)),
+				`[{"system_name":"CTC","client":"000","user":"","transaction":"S000"}]`)),
+			callErr:       nil,
+			expectSystem:  "CTC",
+			expectUser:    "NAUMOV",
+			expectClient:  "100",
+			wantStatus:    models.StatusDegraded,
+			wantReasonSub: "no logged-in SAP GUI session for system CTC",
+		},
+		{
+			name: "own system logged in, lowercase user -> StatusRunning (case-insensitive)",
+			res: okResult(textContent(
+				`[{"system_name":"ctc","client":"100","user":"naumov"}]`)),
 			callErr:         nil,
+			expectSystem:    "CTC",
 			expectUser:      "NAUMOV",
 			expectClient:    "100",
 			wantStatus:      models.StatusRunning,
 			wantEmptyReason: true,
 		},
 		{
-			name: "identity known + matching client but different user -> StatusDegraded",
-			res: okResult(textContent(
-				`[{"system_name":"CTC","client":"100","user":"OTHERUSER"}]`)),
-			callErr:       nil,
-			expectUser:    "NAUMOV",
-			expectClient:  "100",
-			wantStatus:    models.StatusDegraded,
-			wantReasonSub: "no SAP GUI session for this system",
-		},
-		{
-			name:            "identity known + non-JSON non-empty text -> StatusRunning (fail-open, no false strand)",
+			name:            "SID known + non-JSON non-empty text -> StatusRunning (fail-open, no false strand)",
 			res:             okResult(textContent("unexpected-non-json-output")),
 			callErr:         nil,
+			expectSystem:    "CTC",
 			expectUser:      "NAUMOV",
 			expectClient:    "100",
 			wantStatus:      models.StatusRunning,
@@ -634,7 +643,7 @@ func TestMapSAPGUIResult(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// nil logger is explicitly supported by mapSAPGUIResult (guarded by != nil).
-			status, reason := mapSAPGUIResult(tt.res, tt.callErr, "sap-gui-Q00", tt.expectUser, tt.expectClient, nil)
+			status, reason := mapSAPGUIResult(tt.res, tt.callErr, "sap-gui-Q00", tt.expectSystem, tt.expectUser, tt.expectClient, nil)
 
 			assert.Equal(t, tt.wantStatus, status, "unexpected ServerStatus")
 
@@ -646,6 +655,27 @@ func TestMapSAPGUIResult(t *testing.T) {
 					"reason must contain expected substring")
 			}
 		})
+	}
+}
+
+// TestSAPSIDFromName pins the SID extraction that drives the per-system verdict:
+// a wrong SID would silently mis-match sessions. The SID must equal the
+// system_name sap_list_sessions reports (e.g. "CTC").
+func TestSAPSIDFromName(t *testing.T) {
+	cases := []struct {
+		name, client, want string
+	}{
+		{"sap-gui-CTC-100", "100", "CTC"},
+		{"sap-gui-S23-100", "100", "S23"},
+		{"sap-gui-Q25-100", "100", "Q25"},
+		{"sap-gui-CTC-100", "", "CTC"},   // client unknown → strip final -segment
+		{"sap-gui-DEV-200", "100", "DEV"}, // client "100" != suffix "200" → fallback strips final -segment
+		{"vsp-CTC-100", "100", ""},       // not a sap-gui- name
+		{"orchestrator", "", ""},         // no prefix
+	}
+	for _, c := range cases {
+		got := sapSIDFromName(c.name, c.client)
+		assert.Equal(t, c.want, got, "SID for name=%q client=%q", c.name, c.client)
 	}
 }
 

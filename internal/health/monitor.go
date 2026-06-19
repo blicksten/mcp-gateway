@@ -837,7 +837,7 @@ const sapGUISessionProbeToolName = "sap_list_sessions"
 //
 // serverName and logger are used only for the Warn log on the tool-absent path.
 // Passing a nil logger suppresses that log (useful in tests).
-func mapSAPGUIResult(res *mcp.CallToolResult, callErr error, serverName, expectUser, expectClient string, logger *slog.Logger) (models.ServerStatus, string) {
+func mapSAPGUIResult(res *mcp.CallToolResult, callErr error, serverName, expectSystem, expectUser, expectClient string, logger *slog.Logger) (models.ServerStatus, string) {
 	if callErr != nil {
 		errStr := callErr.Error()
 		// Tool missing at runtime (backend too old / tool renamed) — fall back
@@ -879,20 +879,21 @@ func mapSAPGUIResult(res *mcp.CallToolResult, callErr error, serverName, expectU
 		}
 		// Per-system verdict. SAP GUI Scripting exposes a SINGLE global engine,
 		// so sap_list_sessions returns EVERY connection on the desktop — not
-		// just this backend's system. A non-empty list therefore means "some
-		// system is logged in", which previously made ALL sap-gui-* backends
-		// report Running as soon as any one system was logged in. When we know
-		// which system this backend owns (SAP_USER + SAP_CLIENT from its env),
-		// require a session matching that identity.
-		if expectUser != "" && expectClient != "" {
-			if sapSessionMatches(text, expectUser, expectClient) {
+		// just this backend's system. The DISCRIMINATOR is the SAP system id
+		// (SID), because deployments commonly share one SAP_USER + SAP_CLIENT
+		// across many systems (e.g. NAUMOV/100 on CTC, Q25, S23, …). Matching
+		// on user+client alone made a single login (CTC) flip ALL sap-gui-*
+		// backends to Running. When we know this backend's SID, require a
+		// LOGGED-IN session (non-empty user) on THAT system.
+		if expectSystem != "" {
+			if sapSessionMatches(text, expectSystem, expectUser, expectClient) {
 				return models.StatusRunning, ""
 			}
 			return models.StatusDegraded, fmt.Sprintf(
-				"no SAP GUI session for this system (client %s, user %s) — another system may be logged in",
-				expectClient, expectUser)
+				"no logged-in SAP GUI session for system %s (client %s) — SAP Logon not signed in",
+				expectSystem, expectClient)
 		}
-		// No expected identity (env missing) → fall back to "any session counts".
+		// SID unknown (non-sap-gui name / env missing) → any session counts.
 		return models.StatusRunning, ""
 	}
 
@@ -901,23 +902,36 @@ func mapSAPGUIResult(res *mcp.CallToolResult, callErr error, serverName, expectU
 }
 
 // sapSessionMatches reports whether the sap_list_sessions JSON array contains
-// at least one session whose user (case-insensitive) and client match the
-// backend's expected identity. On JSON parse failure it returns true
-// (fail-open to the legacy "non-empty == running" behavior) so an unexpected
-// output format never strands a genuinely-healthy backend as degraded.
-func sapSessionMatches(jsonText, expectUser, expectClient string) bool {
+// at least one LOGGED-IN session for the backend's own SAP system. A session
+// qualifies when its system_name equals expectSystem (the SID, case-insensitive)
+// AND it carries a non-empty user (an empty user means the window is still at
+// the SAP login screen — open but not signed in). When expectUser/expectClient
+// are known they must also match (defence in depth). On JSON parse failure it
+// returns true (fail-open to the legacy "non-empty == running" behaviour) so an
+// unexpected output format never strands a genuinely-healthy backend.
+func sapSessionMatches(jsonText, expectSystem, expectUser, expectClient string) bool {
 	var sessions []struct {
-		User   string `json:"user"`
-		Client string `json:"client"`
+		SystemName string `json:"system_name"`
+		User       string `json:"user"`
+		Client     string `json:"client"`
 	}
 	if err := json.Unmarshal([]byte(jsonText), &sessions); err != nil {
 		return true
 	}
 	for _, s := range sessions {
-		if strings.EqualFold(strings.TrimSpace(s.User), expectUser) &&
-			strings.TrimSpace(s.Client) == expectClient {
-			return true
+		if !strings.EqualFold(strings.TrimSpace(s.SystemName), expectSystem) {
+			continue
 		}
+		if strings.TrimSpace(s.User) == "" {
+			continue // window at the login screen — not signed in
+		}
+		if expectUser != "" && !strings.EqualFold(strings.TrimSpace(s.User), expectUser) {
+			continue
+		}
+		if expectClient != "" && strings.TrimSpace(s.Client) != expectClient {
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -937,7 +951,7 @@ func (m *Monitor) checkSAPGUISession(ctx context.Context, name string) (models.S
 		return models.StatusUnreachable, "no MCP session for sap-gui probe"
 	}
 
-	expectUser, expectClient := m.sapExpectedIdentity(name)
+	expectSystem, expectUser, expectClient := m.sapExpectedIdentity(name)
 
 	callCtx, cancel := context.WithTimeout(ctx, DefaultPingTimeout)
 	defer cancel()
@@ -945,23 +959,44 @@ func (m *Monitor) checkSAPGUISession(ctx context.Context, name string) (models.S
 	result, err := session.CallTool(callCtx, &mcp.CallToolParams{
 		Name: sapGUISessionProbeToolName,
 	})
-	return mapSAPGUIResult(result, err, name, expectUser, expectClient, m.logger)
+	return mapSAPGUIResult(result, err, name, expectSystem, expectUser, expectClient, m.logger)
 }
 
-// sapExpectedIdentity returns the SAP_USER and SAP_CLIENT the named backend is
-// configured for, read from its Config.Env (set by the gateway when the SAP
-// backend is registered). Returns empty strings when the backend or the env
-// keys are absent — callers treat that as "identity unknown" and fall back to
-// the legacy any-session-counts verdict.
-func (m *Monitor) sapExpectedIdentity(name string) (user, client string) {
+// sapExpectedIdentity returns the SAP system id (SID), SAP_USER and SAP_CLIENT
+// this backend owns. user/client come from Config.Env; the SID is derived from
+// the backend name (sap-gui-<SID>-<client>) because deployments commonly share
+// one SAP_USER + SAP_CLIENT across many systems, so the SID is the only stable
+// per-system discriminator. Returns "" for any field that cannot be resolved —
+// callers treat an empty SID as "unknown" and fall back to any-session-counts.
+func (m *Monitor) sapExpectedIdentity(name string) (system, user, client string) {
 	for _, e := range m.lm.Entries() {
 		if e.Name == name {
 			user, _ = e.Config.EnvValue("SAP_USER")
 			client, _ = e.Config.EnvValue("SAP_CLIENT")
-			return user, client
+			return sapSIDFromName(name, client), user, client
 		}
 	}
-	return "", ""
+	return "", "", ""
+}
+
+// sapSIDFromName extracts the SAP system id from a sap-gui-* backend name of
+// the form "sap-gui-<SID>-<client>" (e.g. "sap-gui-CTC-100" -> "CTC"), matching
+// the system_name reported by sap_list_sessions. Strips the known client suffix
+// when available, else the final "-<segment>". Returns "" when the name does
+// not carry the sap-gui- prefix.
+func sapSIDFromName(name, client string) string {
+	const prefix = "sap-gui-"
+	if !strings.HasPrefix(name, prefix) {
+		return ""
+	}
+	rest := name[len(prefix):] // e.g. "CTC-100"
+	if client != "" && strings.HasSuffix(rest, "-"+client) {
+		return strings.TrimSuffix(rest, "-"+client)
+	}
+	if i := strings.LastIndex(rest, "-"); i > 0 {
+		return rest[:i]
+	}
+	return rest
 }
 
 // checkRESTHealth performs an HTTP GET to the health endpoint.
