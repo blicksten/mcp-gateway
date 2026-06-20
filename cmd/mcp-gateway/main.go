@@ -216,6 +216,40 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 	monitor := health.NewMonitor(lm, time.Duration(cfg.Gateway.PingInterval), logger)
 	apiServer := api.NewServer(lm, gw, monitor, cfg, configPath, logger, authCfg, version)
 
+	// TASK C2.3 — manifest wiring (§4.5). When lazy-spawn is enabled, load the
+	// durable tool-manifest from disk and wire it into both the gateway (so
+	// filteredTools serves cached tools for StatusIdle backends) and the lifecycle
+	// manager (so EnsureStarted can refresh / evict entries after a spawn).
+	//
+	// Must be called BEFORE SetupSupervisor so the manifest is available when
+	// SetupSupervisor seeds Idle entries and before ServeBackgroundSupervisor
+	// starts driving Serve() calls. Flag OFF → no manifest loaded, nil manifest,
+	// behavior is byte-identical to today.
+	if lifecycle.LazySpawnEnabled() {
+		manifestPath, pathErr := lifecycle.DefaultManifestPath()
+		if pathErr != nil {
+			logger.Warn("lazy-spawn: cannot resolve manifest path; proceeding without manifest cache",
+				"error", pathErr)
+		} else {
+			manifest, loadErr := lifecycle.LoadManifest(manifestPath)
+			if loadErr != nil {
+				// Non-fatal: LoadManifest returns a valid empty Manifest on most
+				// errors; a parse failure is the only path that returns an error
+				// alongside a valid struct. Log and continue.
+				// A partial/corrupt manifest is safe to use: Manifest.Get enforces
+				// TTL-based staleness, so any recovered stale entries will not be
+				// served or seeded as Idle — they will miss the freshness check and
+				// fall through to the eager-spawn path on the next boot.
+				logger.Warn("lazy-spawn: manifest load had errors; starting with partial cache",
+					"path", manifestPath, "error", loadErr)
+			}
+			gw.SetManifest(manifest)
+			lm.SetManifest(manifest)
+			logger.Info("lazy-spawn: manifest wired", "path", manifestPath,
+				"entries", manifest.Len())
+		}
+	}
+
 	// F1: when a backend signals notifications/tools/list_changed, Manager
 	// re-fetches that backend's tool list; our callback then triggers a
 	// gateway RebuildTools so the change propagates to all connected clients.

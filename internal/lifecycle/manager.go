@@ -17,6 +17,7 @@ import (
 
 	"mcp-gateway/internal/logbuf"
 	"mcp-gateway/internal/models"
+	"mcp-gateway/internal/sapname"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/thejerf/suture/v4"
@@ -794,15 +795,111 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 // now atomically writes BOTH supervisorTree and supervisorTokens — readers
 // of either field must observe a consistent paired write.
 func (m *Manager) SetupSupervisor(logger *slog.Logger) {
+	// Lock order: m.mu -> Manifest.mu (never acquire m.mu while holding Manifest.mu).
 	m.mu.Lock()
+
+	// TASK C2.3 §B — boot Idle-seeding + supervisor exclusion.
+	//
+	// When lazy-spawn is enabled AND a manifest is wired:
+	//   - SAP backends with a fresh manifest entry → set StatusIdle + exclude from
+	//     the supervisor token list (not spawned at boot).
+	//   - All other backends (core/non-SAP, SAP without manifest entry) → eager
+	//     spawn as today (included in the token list).
+	//
+	// Flag OFF → every backend gets a supervisor child exactly as before.
 	names := make([]string, 0, len(m.entries))
-	for name := range m.entries {
-		names = append(names, name)
+	if LazySpawnEnabled() && m.manifest != nil {
+		for name, e := range m.entries {
+			if sapname.IsSAP(name) {
+				if _, ok := m.manifest.Get(name); ok {
+					// Valid manifest entry — seed as Idle and exclude from supervisor.
+					// Option S (design §4.2): BOTH vsp-* AND sap-gui-* (COM) backends
+					// are lazy-capable and are seeded Idle here. They are woken via
+					// EnsureStarted on the first tool invocation, identical to vsp-*.
+					// IsSAP("sap-gui-OS2-100") returns true — sap-gui-* is intentionally
+					// covered by this branch, not a bug.
+					e.Status = models.StatusIdle
+					e.LastError = models.StatusIdleReason
+					logger.Info("lazy-spawn: seeding backend as Idle (manifest hit)",
+						"backend", name)
+					continue // do NOT add to supervisor names
+				}
+			}
+			// Core backend OR SAP backend with no/stale manifest entry — eager.
+			names = append(names, name)
+		}
+	} else {
+		// Flag OFF or no manifest: collect every backend (today's behavior).
+		for name := range m.entries {
+			names = append(names, name)
+		}
 	}
-	tree, tokens := newBackendSupervisorTreeWithTokens(m, m, names, logger)
+
+	// TASK C2.3 §D — build the post-start hook for eager SAP cold-starts.
+	// When the flag is ON and a manifest is wired, the hook fires after
+	// Serve() successfully calls Start() for a SAP backend that had no
+	// manifest entry (cold-start). It fetches the live tool list and persists
+	// it to the manifest so the NEXT boot finds an entry and seeds Idle.
+	// Flag OFF or nil manifest → hookFn is nil → Serve's branch is a no-op.
+	var hookFn func(string)
+	if LazySpawnEnabled() && m.manifest != nil {
+		hookFn = m.buildColdStartManifestHook(logger)
+	}
+
+	tree, tokens := newBackendSupervisorTreeWithTokens(m, m, names, logger, hookFn)
 	m.supervisorTree = tree
 	m.supervisorTokens = tokens
 	m.mu.Unlock()
+}
+
+// buildColdStartManifestHook returns a postStartHook closure for use by
+// BackendSupervisor.Serve(). The hook fires after a successful eager cold-start
+// of a SAP backend that had no manifest entry. It fetches the live tool list
+// from the now-running session and persists a manifest entry so the NEXT boot
+// can seed the backend as Idle instead of spawning eagerly.
+//
+// Only SAP backends are written to the manifest (non-SAP core backends are
+// always eager). The operation is idempotent with EnsureStarted's manifest
+// refresh path (C2.2): if both fire concurrently, the last Put/Persist wins
+// and both produce equivalent entries.
+//
+// Must be called only when LazySpawnEnabled() && m.manifest != nil.
+func (m *Manager) buildColdStartManifestHook(logger *slog.Logger) func(string) {
+	return func(name string) {
+		if !sapname.IsSAP(name) {
+			return // only cache SAP backends
+		}
+		// Retrieve config for signature computation.
+		m.mu.RLock()
+		e, ok := m.entries[name]
+		if !ok {
+			m.mu.RUnlock()
+			return
+		}
+		cfg := e.Config
+		m.mu.RUnlock()
+
+		session, sessionOK := m.Session(name)
+		if !sessionOK || session == nil {
+			return
+		}
+		fetchCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		tools, err := m.fetchTools(fetchCtx, name, session)
+		if err != nil || tools == nil {
+			logger.Warn("lazy-spawn cold-start: tool fetch failed; manifest not updated",
+				"backend", name, "error", err)
+			return
+		}
+		m.manifest.Put(name, BackendConfigSig(cfg), tools)
+		if persistErr := m.manifest.Persist(); persistErr != nil {
+			logger.Warn("lazy-spawn cold-start: manifest persist failed",
+				"backend", name, "error", persistErr)
+			return
+		}
+		logger.Info("lazy-spawn cold-start: manifest entry created for next boot",
+			"backend", name, "tools", len(tools))
+	}
 }
 
 // AddBackendToSupervisor wraps the named backend in a new child supervisor

@@ -41,6 +41,12 @@ type BackendSupervisor struct {
 	manager BackendManager
 	checker StatusChecker
 	logger  *slog.Logger
+
+	// postStartHook is an optional callback invoked immediately after a
+	// successful Start() in Serve(). Used by TASK C2.3 §D to populate the
+	// manifest for eager SAP cold-starts without modifying Manager.Start().
+	// Nil when the feature flag is OFF or manifest is not wired.
+	postStartHook func(name string)
 }
 
 // NewBackendSupervisor constructs a BackendSupervisor.
@@ -87,11 +93,35 @@ func (b *BackendSupervisor) Serve(ctx context.Context) error {
 			"backend", b.name)
 		return suture.ErrDoNotRestart
 	}
+	// TASK C2.3 §C — safety net for StatusIdle. SetupSupervisor (§B) normally
+	// excludes Idle backends from the supervisor token list so they never get a
+	// Serve() call. This gate handles the edge case where an Idle backend
+	// somehow acquired a supervisor child (e.g. via a racy AddBackendToSupervisor
+	// call after the Idle transition). ErrDoNotRestart removes it cleanly.
+	// EnsureStarted is the only authorised path to transition Idle → Running;
+	// it calls AddBackendToSupervisor after a successful spawn.
+	if b.checker.BackendStatus(b.name) == models.StatusIdle {
+		b.logger.Info("suture: backend is idle (lazy-spawn), not starting eagerly",
+			"backend", b.name)
+		return suture.ErrDoNotRestart
+	}
 
 	b.logger.Info("suture: starting backend", "backend", b.name)
 	if err := b.manager.Start(ctx, b.name); err != nil {
 		b.logger.Warn("suture: start failed", "backend", b.name, "err", err)
 		return fmt.Errorf("backend %s start: %w", b.name, err)
+	}
+
+	// TASK C2.3 §D — cold-start self-heal. After a successful eager spawn of a
+	// SAP backend that had no manifest entry, populate the manifest so the NEXT
+	// boot finds an entry and goes Idle instead of spawning eagerly again.
+	// The hook is nil when the flag is OFF, so this is a no-op in the normal path.
+	// Fired asynchronously: the hook does a 30s-bounded fetchTools MCP round-trip
+	// (buildColdStartManifestHook). Blocking Serve() here would stall suture's
+	// goroutine and, on crash-loops, cause repeated 30s stalls. The hook is
+	// best-effort, handles its own errors, and is idempotent — fire-and-forget is safe.
+	if b.postStartHook != nil {
+		go b.postStartHook(b.name)
 	}
 
 	session, ok := b.manager.Session(b.name)
@@ -201,7 +231,7 @@ func NewBackendSupervisorTree(
 	names []string,
 	logger *slog.Logger,
 ) *suture.Supervisor {
-	tree, _ := newBackendSupervisorTreeWithTokens(manager, checker, names, logger)
+	tree, _ := newBackendSupervisorTreeWithTokens(manager, checker, names, logger, nil)
 	return tree
 }
 
@@ -209,11 +239,17 @@ func NewBackendSupervisorTree(
 // returns the per-backend ServiceToken map so Manager.SetupSupervisor can
 // later RemoveAndWait a startup-time backend via the same code path as
 // runtime-added ones (Task C 2026-05-22).
+//
+// postStartHook, when non-nil, is wired into each BackendSupervisor so Serve()
+// can call it after a successful Start(). Used by TASK C2.3 §D to populate the
+// manifest for eager SAP cold-starts without modifying Manager.Start().
+// Callers that do not need this behaviour pass nil.
 func newBackendSupervisorTreeWithTokens(
 	manager BackendManager,
 	checker StatusChecker,
 	names []string,
 	logger *slog.Logger,
+	postStartHook func(name string),
 ) (*suture.Supervisor, map[string]suture.ServiceToken) {
 	rootSpec := suture.Spec{
 		EventHook: func(e suture.Event) {
@@ -228,6 +264,7 @@ func newBackendSupervisorTreeWithTokens(
 
 	for _, name := range names {
 		svc := NewBackendSupervisor(name, manager, checker, logger)
+		svc.postStartHook = postStartHook
 		childSpec := DefaultSupervisorSpec(name, logger)
 		child := suture.New("backends/"+name, childSpec)
 		child.Add(svc)

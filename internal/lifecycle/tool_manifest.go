@@ -180,6 +180,15 @@ func (m *Manifest) migrateFromLegacyPath(legacyPath string) error {
 	return nil
 }
 
+// Len returns the number of records currently held in memory (including
+// potentially stale entries — Get removes stale ones lazily on access).
+// Used for logging at startup; does not call LazySpawnEnabled.
+func (m *Manifest) Len() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.records)
+}
+
 // Get returns the cached record for a backend, if it exists and is not stale.
 // Returns (zero, false) when absent, stale (TTL expired), or flag is OFF.
 func (m *Manifest) Get(name string) (ManifestRecord, bool) {
