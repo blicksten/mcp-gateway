@@ -297,6 +297,66 @@ func TestFlagOff_EnsureStarted_StillFunctions(t *testing.T) {
 	assert.False(t, ok, "manifest.Get must return false when flag is OFF")
 }
 
+// ----- (c-real) Budget expiry with REAL spawn slower than caller budget -------
+
+// TestEnsureStarted_BudgetExpiry_RealSpawn_WarmingThenRunning exercises the
+// ErrLazyWarming path with a REAL backend process. The mock binary is used so
+// the spawn actually succeeds; the caller's budget is forced below the spawn
+// duration by inserting a pre-Start delay via testSpawnHook so the 500ms budget
+// floor expires before the spawn goroutine finishes.
+//
+// Determinism: testSpawnHook sleeps 800ms before handing off to m.Start. The
+// caller gets a context whose deadline is already past, so the budget computes
+// to 70% * <negative duration> → floored at 500ms. The 500ms budget timer fires
+// while the hook is still sleeping (800ms > 500ms), so the caller returns
+// ErrLazyWarming + StatusIdle. The goroutine then calls m.Start (the real spawn
+// succeeds in ~200-500ms for the mock binary). A subsequent EnsureStarted (with
+// a generous 30s deadline) joins the already-running singleflight result and
+// observes StatusRunning (or polls until it does). This avoids any time.Sleep in
+// the test body beyond what is needed for the "eventually" poll.
+func TestEnsureStarted_BudgetExpiry_RealSpawn_WarmingThenRunning(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping: requires building and running the mock server")
+	}
+	t.Setenv(lazySpawnEnv, "1")
+
+	binary := buildMockServer(t)
+	m, _ := buildLazyManagerWithManifest(t, binary)
+	defer func() { _ = m.Stop(context.Background(), "vsp") }()
+
+	// Install a hook that sleeps 800ms before the real Start, ensuring the
+	// 500ms budget floor fires first and the caller gets ErrLazyWarming.
+	const hookDelay = 800 * time.Millisecond
+	m.SetTestSpawnHook(func(_ string) {
+		time.Sleep(hookDelay)
+	})
+
+	// Use a context whose deadline is already past so budget floors at 500ms.
+	dl := time.Now().Add(-1 * time.Millisecond)
+	ctx, cancel := context.WithDeadline(context.Background(), dl)
+	defer cancel()
+
+	// First call: budget fires before the hook finishes sleeping → ErrLazyWarming.
+	status, err := m.EnsureStarted(ctx, "vsp")
+	assert.Equal(t, models.StatusIdle, status,
+		"first call: budget expiry must return StatusIdle")
+	assert.ErrorIs(t, err, ErrLazyWarming,
+		"first call: budget expiry must return ErrLazyWarming")
+
+	// The spawn goroutine is still running in the background. Poll until the
+	// backend reaches StatusRunning (up to 10s to cover the hook sleep + real spawn).
+	require.Eventually(t, func() bool {
+		// Use a context with a generous budget so this poll call always returns
+		// immediately from the fast path (StatusRunning) or joins the still-running
+		// singleflight if it hasn't finished yet.
+		pollCtx, pollCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer pollCancel()
+		s, e := m.EnsureStarted(pollCtx, "vsp")
+		return s == models.StatusRunning && e == nil
+	}, 10*time.Second, 100*time.Millisecond,
+		"subsequent EnsureStarted must find StatusRunning after the background spawn completes")
+}
+
 // ----- IsLazyPending ----------------------------------------------------------
 
 // TestIsLazyPending verifies the pending map lifecycle: false before, true during,

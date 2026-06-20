@@ -811,8 +811,14 @@ func (m *Manager) SetupSupervisor(logger *slog.Logger) {
 	if LazySpawnEnabled() && m.manifest != nil {
 		for name, e := range m.entries {
 			if sapname.IsSAP(name) {
-				if _, ok := m.manifest.Get(name); ok {
-					// Valid manifest entry — seed as Idle and exclude from supervisor.
+				// Guard 1 (design §4.1): validate the stored Sig against the current
+				// config sig. On a mismatch GetValid evicts the stale entry and returns
+				// false, so the backend falls through to the eager path and re-discovers
+				// its tools. The postStartHook then writes a fresh entry with the new sig.
+				currentSig := BackendConfigSig(e.Config)
+				if _, ok := m.manifest.GetValid(name, currentSig); ok {
+					// Valid manifest entry with matching sig — seed as Idle and exclude
+					// from supervisor.
 					// Option S (design §4.2): BOTH vsp-* AND sap-gui-* (COM) backends
 					// are lazy-capable and are seeded Idle here. They are woken via
 					// EnsureStarted on the first tool invocation, identical to vsp-*.
@@ -825,7 +831,7 @@ func (m *Manager) SetupSupervisor(logger *slog.Logger) {
 					continue // do NOT add to supervisor names
 				}
 			}
-			// Core backend OR SAP backend with no/stale manifest entry — eager.
+			// Core backend OR SAP backend with no/stale/sig-mismatch manifest entry — eager.
 			names = append(names, name)
 		}
 	} else {

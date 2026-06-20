@@ -36,12 +36,17 @@ import (
 // buildManifestWithEntry writes a manifest with one SAP entry to a temp dir
 // and returns the loaded *Manifest. Requires the flag to be ON (caller must
 // call t.Setenv before this).
-func buildManifestWithEntry(t *testing.T, backendName string) (*Manifest, string) {
+//
+// The sig is computed from cfg using BackendConfigSig so that GetValid (Guard 1)
+// accepts the entry during SetupSupervisor. Pass the same ServerConfig that the
+// Manager will use for backendName.
+func buildManifestWithEntry(t *testing.T, backendName string, cfg models.ServerConfig) (*Manifest, string) {
 	t.Helper()
+	sig := BackendConfigSig(cfg)
 	mPath := t.TempDir() + "/tool-manifest.json"
 	mf, err := LoadManifest(mPath)
 	require.NoError(t, err)
-	mf.Put(backendName, "test-sig", []models.ToolInfo{
+	mf.Put(backendName, sig, []models.ToolInfo{
 		{Name: "sap_tool", Description: "a SAP tool", Server: backendName},
 	})
 	require.NoError(t, mf.Persist())
@@ -76,7 +81,9 @@ func buildManagerWithSAP(t *testing.T) *Manager {
 func TestBootWiring_SAPWithManifest_SeedsIdleAndExcludesFromSupervisor(t *testing.T) {
 	t.Setenv(lazySpawnEnv, "1")
 
-	mf, _ := buildManifestWithEntry(t, "vsp-Q99")
+	// Pass the same ServerConfig that buildManagerWithSAP uses so Guard 1
+	// sig validation (GetValid) finds a matching entry and seeds Idle.
+	mf, _ := buildManifestWithEntry(t, "vsp-Q99", models.ServerConfig{Command: "/bin/false"})
 
 	m := buildManagerWithSAP(t)
 	m.SetManifest(mf)
@@ -339,6 +346,112 @@ func TestBootWiring_FlagOFF_NeverSeedsIdle(t *testing.T) {
 	m.mu.RUnlock()
 	assert.True(t, sapTok, "flag OFF: vsp-Q99 must have a supervisor token")
 	assert.True(t, coreTok, "flag OFF: orchestrator must have a supervisor token")
+}
+
+// ---------------------------------------------------------------------------
+// Test 6a: Guard 1 — sig mismatch forces eager spawn; matching sig seeds Idle
+// ---------------------------------------------------------------------------
+
+// TestBootWiring_Guard1_SigMismatch_ForcesEagerSpawn verifies Guard 1 (design §4.1):
+// when the manifest entry for a SAP backend has a Sig that does NOT match the
+// current BackendConfigSig, SetupSupervisor must NOT seed it as Idle — it must
+// fall through to the eager path (included in the supervisor names list) so the
+// backend re-discovers its tools. The stale manifest entry is also evicted.
+func TestBootWiring_Guard1_SigMismatch_ForcesEagerSpawn(t *testing.T) {
+	t.Setenv(lazySpawnEnv, "1")
+
+	const backendName = "vsp-Q99"
+
+	// Write a manifest entry with a WRONG sig (not matching BackendConfigSig of
+	// the actual config that the Manager will load).
+	mPath := t.TempDir() + "/tool-manifest.json"
+	mf, err := LoadManifest(mPath)
+	require.NoError(t, err)
+
+	// Deliberately use a sig that does NOT match the BackendConfigSig of the
+	// config below. BackendConfigSig for {Command: "/bin/false"} will differ from
+	// "deliberately-wrong-sig".
+	mf.Put(backendName, "deliberately-wrong-sig", []models.ToolInfo{
+		{Name: "stale_tool", Description: "stale", Server: backendName},
+	})
+	require.NoError(t, mf.Persist())
+
+	// Reload from disk so GetValid sees the persisted record.
+	mf2, err := LoadManifest(mPath)
+	require.NoError(t, err)
+
+	cfg := &models.Config{
+		Servers: map[string]*models.ServerConfig{
+			backendName: {Command: "/bin/false"},
+		},
+	}
+	cfg.ApplyDefaults()
+	m := NewManager(cfg, "test", slog.Default())
+	m.SetManifest(mf2)
+	m.SetupSupervisor(slog.Default())
+
+	// The backend must NOT be StatusIdle — its manifest sig was wrong, so it
+	// must be treated as uncached and go to the eager (supervisor) path.
+	entry, ok := m.Entry(backendName)
+	require.True(t, ok)
+	assert.NotEqual(t, models.StatusIdle, entry.Status,
+		"backend with wrong manifest sig must NOT be seeded as Idle")
+
+	// It must have a supervisor token (eager path).
+	m.mu.RLock()
+	_, hasToken := m.supervisorTokens[backendName]
+	m.mu.RUnlock()
+	assert.True(t, hasToken,
+		"backend with wrong manifest sig must have a supervisor token (eager spawn)")
+}
+
+// TestBootWiring_Guard1_SigMatch_SeedsIdle verifies the contrast case: when the
+// manifest entry sig MATCHES BackendConfigSig, the backend IS seeded as Idle.
+func TestBootWiring_Guard1_SigMatch_SeedsIdle(t *testing.T) {
+	t.Setenv(lazySpawnEnv, "1")
+
+	const backendName = "vsp-Q99"
+
+	cfg := &models.Config{
+		Servers: map[string]*models.ServerConfig{
+			backendName: {Command: "/bin/false"},
+		},
+	}
+	cfg.ApplyDefaults()
+
+	// Compute the CORRECT sig for this config.
+	e, ok := cfg.Servers[backendName]
+	require.True(t, ok)
+	correctSig := BackendConfigSig(*e)
+
+	// Write a manifest entry with the CORRECT sig.
+	mPath := t.TempDir() + "/tool-manifest.json"
+	mf, err := LoadManifest(mPath)
+	require.NoError(t, err)
+	mf.Put(backendName, correctSig, []models.ToolInfo{
+		{Name: "sap_tool", Description: "SAP tool", Server: backendName},
+	})
+	require.NoError(t, mf.Persist())
+
+	mf2, err := LoadManifest(mPath)
+	require.NoError(t, err)
+
+	m := NewManager(cfg, "test", slog.Default())
+	m.SetManifest(mf2)
+	m.SetupSupervisor(slog.Default())
+
+	// Backend must be seeded as Idle (matching sig).
+	entry, ok := m.Entry(backendName)
+	require.True(t, ok)
+	assert.Equal(t, models.StatusIdle, entry.Status,
+		"backend with correct manifest sig must be seeded as Idle")
+
+	// Must NOT have a supervisor token (excluded from eager spawn).
+	m.mu.RLock()
+	_, hasToken := m.supervisorTokens[backendName]
+	m.mu.RUnlock()
+	assert.False(t, hasToken,
+		"backend seeded as Idle must not have a supervisor token")
 }
 
 // ---------------------------------------------------------------------------

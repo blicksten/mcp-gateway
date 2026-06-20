@@ -19,17 +19,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// vspP01Config is the canonical ServerConfig for the "vsp-P01" backend used
+// throughout gateway_idle_test.go. Any manifest entry for vsp-P01 must use
+// lifecycle.BackendConfigSig(vspP01Config) so that GetValid (Guard 1) accepts it.
+var vspP01Config = models.ServerConfig{
+	Command: "/usr/bin/vsp",
+	Env:     []string{"SAP_URL=https://sap:8443"},
+}
+
+// vspP01Sig returns the BackendConfigSig for vspP01Config.
+// Used by tests that need to populate a manifest entry with the correct sig.
+func vspP01Sig() string {
+	return lifecycle.BackendConfigSig(vspP01Config)
+}
+
 // buildIdleTestGateway creates a Gateway with one Running backend and one Idle
 // backend using the provided manifest. The manifest may be nil.
 func buildIdleTestGateway(t *testing.T, manifest *lifecycle.Manifest) (*Gateway, *lifecycle.Manager) {
 	t.Helper()
 	cfg := &models.Config{
 		Servers: map[string]*models.ServerConfig{
-			"core": {URL: "http://127.0.0.1:19999"},
-			"vsp-P01": {
-				Command: "/usr/bin/vsp",
-				Env:     []string{"SAP_URL=https://sap:8443"},
-			},
+			"core":    {URL: "http://127.0.0.1:19999"},
+			"vsp-P01": &vspP01Config,
 		},
 	}
 	cfg.ApplyDefaults()
@@ -60,7 +71,7 @@ func TestFilteredTools_IdleIncludedWhenFlagOn(t *testing.T) {
 	path := t.TempDir() + "/tool-manifest.json"
 	m, err := lifecycle.LoadManifest(path)
 	require.NoError(t, err)
-	m.Put("vsp-P01", "sig1", []models.ToolInfo{
+	m.Put("vsp-P01", vspP01Sig(), []models.ToolInfo{
 		{Name: "sap_read", Description: "Read SAP table", Server: "vsp-P01"},
 		{Name: "sap_write", Description: "Write SAP table", Server: "vsp-P01"},
 	})
@@ -88,7 +99,7 @@ func TestFilteredTools_IdleExcludedWhenFlagOff(t *testing.T) {
 	require.NoError(t, err)
 	// Put is a no-op when flag OFF, but we still wire the manifest to the
 	// gateway to test that filteredTools ignores Get() returning false.
-	m.Put("vsp-P01", "sig1", []models.ToolInfo{
+	m.Put("vsp-P01", vspP01Sig(), []models.ToolInfo{
 		{Name: "sap_read", Description: "Read SAP table", Server: "vsp-P01"},
 	})
 
@@ -158,12 +169,13 @@ func toolNames(tools []namespacedTool) []string {
 
 // buildIdleTestGatewayWithPending creates a Gateway where "vsp-P01" has
 // StatusStarting + IsLazyPending==true (mid-spawn race window).
+// Uses the same vspP01Config as buildIdleTestGateway so manifest sigs match.
 func buildIdleTestGatewayWithPending(t *testing.T, manifest *lifecycle.Manifest) (*Gateway, *lifecycle.Manager) {
 	t.Helper()
 	cfg := &models.Config{
 		Servers: map[string]*models.ServerConfig{
 			"core":    {URL: "http://127.0.0.1:19999"},
-			"vsp-P01": {Command: "/usr/bin/vsp", Env: []string{"SAP_URL=https://sap:8443"}},
+			"vsp-P01": &vspP01Config,
 		},
 	}
 	cfg.ApplyDefaults()
@@ -192,7 +204,7 @@ func TestFilteredTools_LazyPendingIncludesTools(t *testing.T) {
 	path := t.TempDir() + "/tool-manifest.json"
 	m, err := lifecycle.LoadManifest(path)
 	require.NoError(t, err)
-	m.Put("vsp-P01", "sig1", []models.ToolInfo{
+	m.Put("vsp-P01", vspP01Sig(), []models.ToolInfo{
 		{Name: "sap_read", Description: "Read SAP table", Server: "vsp-P01"},
 	})
 	require.NoError(t, m.Persist())
@@ -217,7 +229,7 @@ func TestFilteredTools_StartingNotPendingExcluded(t *testing.T) {
 	path := t.TempDir() + "/tool-manifest.json"
 	m, err := lifecycle.LoadManifest(path)
 	require.NoError(t, err)
-	m.Put("vsp-P01", "sig1", []models.ToolInfo{
+	m.Put("vsp-P01", vspP01Sig(), []models.ToolInfo{
 		{Name: "sap_read", Description: "Read SAP table", Server: "vsp-P01"},
 	})
 	require.NoError(t, m.Persist())
@@ -244,7 +256,9 @@ func TestFilteredTools_IdleOverBudgetConsolidated(t *testing.T) {
 	m, err := lifecycle.LoadManifest(path)
 	require.NoError(t, err)
 	// Put 3 tools; budget will be 2, so 1 excess tool must be folded.
-	m.Put("vsp-P01", "sig1", []models.ToolInfo{
+	// The sig must match BackendConfigSig for the config used below.
+	overBudgetCfg := models.ServerConfig{Command: "/usr/bin/vsp"}
+	m.Put("vsp-P01", lifecycle.BackendConfigSig(overBudgetCfg), []models.ToolInfo{
 		{Name: "sap_read", Description: "Read", Server: "vsp-P01"},
 		{Name: "sap_write", Description: "Write", Server: "vsp-P01"},
 		{Name: "sap_delete", Description: "Delete", Server: "vsp-P01"},
@@ -253,7 +267,7 @@ func TestFilteredTools_IdleOverBudgetConsolidated(t *testing.T) {
 
 	cfg := &models.Config{
 		Servers: map[string]*models.ServerConfig{
-			"vsp-P01": {Command: "/usr/bin/vsp"},
+			"vsp-P01": &overBudgetCfg,
 		},
 		Gateway: models.GatewaySettings{
 			ToolFilter: &models.ToolFilter{

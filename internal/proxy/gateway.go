@@ -836,9 +836,13 @@ func (g *Gateway) filteredTools() []namespacedTool {
 			if g.manifest == nil {
 				continue // flag OFF or manifest not wired — skip
 			}
-			rec, ok := g.manifest.Get(entry.Name)
+			// Guard 1 (design §4.1): validate the cached sig against the current config.
+			// GetValid evicts the entry and returns false on a sig mismatch, preventing
+			// stale tools from a changed config being served while the backend is Idle.
+			currentSig := lifecycle.BackendConfigSig(entry.Config)
+			rec, ok := g.manifest.GetValid(entry.Name, currentSig)
 			if !ok {
-				continue // no cached tools — skip
+				continue // no cached tools or sig mismatch — skip
 			}
 			if !entry.Config.ExposeToolsEnabled() {
 				continue

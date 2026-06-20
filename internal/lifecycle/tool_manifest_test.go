@@ -429,6 +429,98 @@ func TestManifest_EmptyToolList(t *testing.T) {
 	assert.Empty(t, rec.Tools)
 }
 
+// TestManifest_GetValid_SigMatch verifies that GetValid returns the record when
+// the stored sig matches currentSig.
+func TestManifest_GetValid_SigMatch(t *testing.T) {
+	withLazySpawn(t)
+	path := tempManifestPath(t)
+
+	m, err := LoadManifest(path)
+	require.NoError(t, err)
+
+	const sig = "abc123"
+	m.Put("vsp-P01", sig, []models.ToolInfo{{Name: "tool_a", Server: "vsp-P01"}})
+
+	rec, ok := m.GetValid("vsp-P01", sig)
+	require.True(t, ok, "GetValid must return true when sig matches")
+	assert.Equal(t, sig, rec.Sig)
+	assert.Equal(t, "tool_a", rec.Tools[0].Name)
+}
+
+// TestManifest_GetValid_SigMismatch verifies that GetValid returns false and
+// evicts the entry when the stored sig does not match currentSig.
+func TestManifest_GetValid_SigMismatch(t *testing.T) {
+	withLazySpawn(t)
+	path := tempManifestPath(t)
+
+	m, err := LoadManifest(path)
+	require.NoError(t, err)
+
+	m.Put("vsp-P01", "old-sig", []models.ToolInfo{{Name: "old_tool", Server: "vsp-P01"}})
+
+	// Call GetValid with a DIFFERENT sig (simulating a config change).
+	rec, ok := m.GetValid("vsp-P01", "new-sig")
+	assert.False(t, ok, "GetValid must return false on sig mismatch")
+	assert.Equal(t, ManifestRecord{}, rec, "GetValid must return zero record on mismatch")
+
+	// The entry must have been evicted: a subsequent Get should also return false.
+	_, stillCached := m.Get("vsp-P01")
+	assert.False(t, stillCached, "GetValid must evict the entry on sig mismatch")
+}
+
+// TestManifest_GetValid_TTLStillEnforced verifies that GetValid still evicts
+// a TTL-expired entry even when the sig matches.
+func TestManifest_GetValid_TTLStillEnforced(t *testing.T) {
+	withLazySpawn(t)
+	path := tempManifestPath(t)
+
+	const sig = "stalesig"
+	staleTime := time.Now().UTC().Add(-(manifestTTL + time.Hour))
+	f := manifestFile{
+		SchemaVersion: manifestSchemaVersion,
+		Records: []ManifestRecord{
+			{
+				Name:          "vsp-STALE",
+				Sig:           sig,
+				Tools:         []CachedTool{{Name: "old_tool"}},
+				DiscoveredAt:  staleTime,
+				SchemaVersion: manifestSchemaVersion,
+			},
+		},
+	}
+	body, err := json.Marshal(f)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, body, 0o600))
+
+	m, err := LoadManifest(path)
+	require.NoError(t, err)
+
+	// Even with a matching sig, the TTL-expired entry must return false.
+	_, ok := m.GetValid("vsp-STALE", sig)
+	assert.False(t, ok, "GetValid must return false for TTL-expired entry even on sig match")
+}
+
+// TestManifest_GetValid_FlagOff verifies that GetValid returns false when the
+// feature flag is OFF, regardless of sig.
+func TestManifest_GetValid_FlagOff(t *testing.T) {
+	t.Setenv(lazySpawnEnv, "") // OFF
+	path := tempManifestPath(t)
+
+	m, err := LoadManifest(path)
+	require.NoError(t, err)
+
+	// Bypass Put (which is a no-op when flag OFF) by writing directly to records.
+	m.records["vsp-P01"] = ManifestRecord{
+		Name:          "vsp-P01",
+		Sig:           "somesig",
+		DiscoveredAt:  time.Now(),
+		SchemaVersion: manifestSchemaVersion,
+	}
+
+	_, ok := m.GetValid("vsp-P01", "somesig")
+	assert.False(t, ok, "GetValid must return false when flag is OFF")
+}
+
 // TestManifest_OverwriteExisting verifies that Put replaces an existing record.
 func TestManifest_OverwriteExisting(t *testing.T) {
 	withLazySpawn(t)

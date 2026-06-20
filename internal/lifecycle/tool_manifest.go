@@ -191,12 +191,44 @@ func (m *Manifest) Len() int {
 
 // Get returns the cached record for a backend, if it exists and is not stale.
 // Returns (zero, false) when absent, stale (TTL expired), or flag is OFF.
+// Does NOT validate the stored Sig against the current config — use GetValid
+// when the caller has the current BackendConfigSig available.
 func (m *Manifest) Get(name string) (ManifestRecord, bool) {
 	if !LazySpawnEnabled() {
 		return ManifestRecord{}, false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.getUnderLock(name)
+}
+
+// GetValid returns the cached record for a backend only when the stored Sig
+// matches currentSig (Guard 1 — design §4.1). Returns (zero, false) when the
+// record is absent, TTL-stale, flag-OFF, or the stored Sig does not match
+// currentSig. On a sig mismatch the stale entry is evicted so the backend is
+// treated as uncached and re-discovered on the next eager spawn.
+func (m *Manifest) GetValid(name, currentSig string) (ManifestRecord, bool) {
+	if !LazySpawnEnabled() {
+		return ManifestRecord{}, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.getUnderLock(name)
+	if !ok {
+		return ManifestRecord{}, false
+	}
+	if r.Sig != currentSig {
+		// Config changed since the manifest was written — evict the stale entry
+		// so the backend is treated as uncached and re-discovers on next spawn.
+		delete(m.records, name)
+		return ManifestRecord{}, false
+	}
+	return r, true
+}
+
+// getUnderLock is the shared inner body of Get and GetValid.
+// Caller must hold m.mu.
+func (m *Manifest) getUnderLock(name string) (ManifestRecord, bool) {
 	r, ok := m.records[name]
 	if !ok {
 		return ManifestRecord{}, false

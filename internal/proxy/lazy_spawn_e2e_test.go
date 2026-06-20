@@ -35,6 +35,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -88,6 +89,114 @@ func pollManifestOnDisk(t *testing.T, path, backendName string, deadline time.Du
 		time.Sleep(20 * time.Millisecond)
 	}
 	return lifecycle.ManifestRecord{}, false
+}
+
+// TestDegradeRemovesTool_E2E is the served-catalog-level proof for Guard 2
+// (design §4.1 / C2.2). It asserts three properties end-to-end with flag ON:
+//
+//  1. While the backend is StatusIdle with a valid manifest entry, filteredTools
+//     ADVERTISES the cached tool (tools visible before spawn).
+//  2. Router.Call for that tool triggers EnsureStarted, which attempts a real
+//     subprocess spawn with an INVALID command. The spawn fails.
+//  3. After the failed invoke, filteredTools NO LONGER includes the backend's
+//     tools (manifest entry evicted, status = StatusError).
+//
+// This is the REST/served-catalog-level proof that the degrade removes the tool
+// from the advertised list, not just an internal state assertion.
+func TestDegradeRemovesTool_E2E(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping lazy-spawn degrade E2E: requires real filesystem for manifest")
+	}
+	t.Setenv("MCP_GATEWAY_LAZY_SPAWN", "1")
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	const backendName = "vsp-Q99"
+	// An invalid command guarantees the spawn fails immediately.
+	const invalidCmd = "/nonexistent/binary/that/cannot/spawn"
+
+	cfg := &models.Config{
+		Servers: map[string]*models.ServerConfig{
+			backendName: {Command: invalidCmd},
+		},
+	}
+	cfg.ApplyDefaults()
+
+	// Build a manifest entry with the CORRECT sig for the invalid-command config.
+	// The sig must match so GetValid returns the entry and filteredTools serves tools.
+	backendSig := lifecycle.BackendConfigSig(*cfg.Servers[backendName])
+	manifestPath := filepath.Join(t.TempDir(), "tool-manifest.json")
+	mf, err := lifecycle.LoadManifest(manifestPath)
+	require.NoError(t, err)
+	mf.Put(backendName, backendSig, []models.ToolInfo{{Name: "sap_ping", Description: "Ping SAP", Server: backendName}})
+	require.NoError(t, mf.Persist())
+
+	// Reload from disk so GetValid operates on the persisted sig.
+	mfLoaded, err := lifecycle.LoadManifest(manifestPath)
+	require.NoError(t, err)
+
+	lm := lifecycle.NewManager(cfg, "test", logger)
+	lm.SetStatus(backendName, models.StatusIdle, models.StatusIdleReason)
+	lm.SetManifest(mfLoaded)
+
+	// Wire a toolsChangedCb so EnsureStarted's failure path can fire it.
+	// filteredTools reads from the manifest; the cb drives eviction notification.
+	// atomic.Bool: the callback runs in EnsureStarted's singleflight goroutine,
+	// so the flag is written off the test goroutine — synchronize to stay race-free
+	// under `go test -race`.
+	var evictFired atomic.Bool
+	lm.SetToolsChangedCallback(func(name string) {
+		if name == backendName {
+			evictFired.Store(true)
+		}
+	})
+
+	gw := New(cfg, lm, "test", logger)
+	gw.SetManifest(mfLoaded)
+
+	// ---- Assertion (a): tools ADVERTISED while Idle ----
+	toolsBefore := gw.filteredTools()
+	var foundBefore bool
+	for _, nt := range toolsBefore {
+		if nt.server == backendName {
+			foundBefore = true
+			break
+		}
+	}
+	require.True(t, foundBefore,
+		"degrade-e2e (a): filteredTools must advertise idle backend's cached tool before first invoke")
+
+	// ---- Assertion (b): Router.Call triggers spawn which FAILS ----
+	callCtx, callCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer callCancel()
+
+	_, callErr := gw.Router().Call(callCtx, backendName+"__sap_ping", map[string]any{})
+	require.Error(t, callErr,
+		"degrade-e2e (b): Router.Call must return an error when the spawn command is invalid")
+
+	// ---- Assertion (c): tools NO LONGER advertised after failed spawn ----
+	// The manifest entry should have been evicted by EnsureStarted's failure path.
+	// Allow a brief moment for the toolsChangedCb goroutine to complete.
+	require.Eventually(t, func() bool {
+		toolsAfter := gw.filteredTools()
+		for _, nt := range toolsAfter {
+			if nt.server == backendName {
+				return false // still advertised — not done yet
+			}
+		}
+		return true
+	}, 3*time.Second, 20*time.Millisecond,
+		"degrade-e2e (c): filteredTools must NOT advertise backend's tools after failed spawn (manifest evicted)")
+
+	// Confirm the backend reached StatusError.
+	entry, ok := lm.Entry(backendName)
+	require.True(t, ok)
+	assert.Equal(t, models.StatusError, entry.Status,
+		"degrade-e2e: backend must be StatusError after spawn failure")
+
+	// Confirm toolsChangedCb was fired (signals the gateway to refresh).
+	assert.True(t, evictFired.Load(),
+		"degrade-e2e: toolsChangedCb must have fired with the backend name after degrade")
 }
 
 // TestLazySpawnE2E is the C2 plan GATE test. It exercises five assertions:
