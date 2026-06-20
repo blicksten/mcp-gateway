@@ -111,6 +111,11 @@ type Manager struct {
 	lazyPendingMu sync.Mutex
 	lazyPending   map[string]struct{}
 	manifest     *Manifest
+
+	// TASK T1 — lazy-spawn observability counters. Atomic; incremented from the
+	// detached spawn goroutines (EnsureStarted) and at boot under m.mu
+	// (SetupSupervisor), read by the metrics HTTP handler. See lazy_metrics.go.
+	lazyMetrics lazyMetrics
 }
 
 // NewManager creates a lifecycle manager from the given config.
@@ -816,7 +821,16 @@ func (m *Manager) SetupSupervisor(logger *slog.Logger) {
 				// false, so the backend falls through to the eager path and re-discovers
 				// its tools. The postStartHook then writes a fresh entry with the new sig.
 				currentSig := BackendConfigSig(e.Config)
-				if _, ok := m.manifest.GetValid(name, currentSig); ok {
+				// Record contents are served lazily by filteredTools, so only the
+				// outcome matters here.
+				_, outcome := m.manifest.GetValidWithOutcome(name, currentSig)
+				if outcome == ManifestSigMismatch {
+					// TASK T1: a stale entry existed but its config sig changed —
+					// it was evicted and the backend falls through to eager
+					// re-discovery. Count this distinctly from a cold-start miss.
+					m.lazyMetrics.sigMismatchRediscover.Add(1)
+				}
+				if outcome == ManifestHit {
 					// Valid manifest entry with matching sig — seed as Idle and exclude
 					// from supervisor.
 					// Option S (design §4.2): BOTH vsp-* AND sap-gui-* (COM) backends

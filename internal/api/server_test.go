@@ -720,6 +720,66 @@ func TestMetrics_TokenEstimation_Multibyte(t *testing.T) {
 	assert.Equal(t, 1, resp.Tokens.EstDescTokens)
 }
 
+// --- TASK T1: lazy-spawn observability counters on /api/v1/metrics ---
+
+// TestMetrics_LazySpawn_OmittedWhenFlagOff verifies the byte-identical-when-OFF
+// contract: with MCP_GATEWAY_LAZY_SPAWN disabled the metrics payload must NOT
+// carry a lazy_spawn block (nil pointer → omitempty drops the key entirely).
+func TestMetrics_LazySpawn_OmittedWhenFlagOff(t *testing.T) {
+	t.Setenv("MCP_GATEWAY_LAZY_SPAWN", "0")
+	srv, _ := setupTestServerWithMonitor(t)
+	handler := srv.Handler()
+
+	rr := doRequest(t, handler, "GET", "/api/v1/metrics", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.NotContains(t, rr.Body.String(), "lazy_spawn",
+		"flag OFF: the lazy_spawn key must be absent from the JSON payload")
+
+	var resp models.MetricsResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Nil(t, resp.LazySpawn, "flag OFF: LazySpawn must be nil")
+}
+
+// TestMetrics_LazySpawn_PresentAndCountsWhenFlagOn drives a REAL sig-mismatch
+// boot pass (SetupSupervisor over a manifest whose stored sig is wrong) and then
+// reads the counter back through the HTTP endpoint — an end-to-end check that the
+// counter increments at the boot boundary and is surfaced on /api/v1/metrics.
+func TestMetrics_LazySpawn_PresentAndCountsWhenFlagOn(t *testing.T) {
+	t.Setenv("MCP_GATEWAY_LAZY_SPAWN", "1")
+	srv, lm := setupTestServerWithMonitor(t)
+	handler := srv.Handler()
+
+	// A SAP backend whose manifest entry carries a non-matching sig.
+	require.NoError(t, lm.AddServer("vsp-Q99", &models.ServerConfig{Command: "/bin/false"}))
+
+	mPath := t.TempDir() + "/tool-manifest.json"
+	mf, err := lifecycle.LoadManifest(mPath)
+	require.NoError(t, err)
+	mf.Put("vsp-Q99", "deliberately-wrong-sig",
+		[]models.ToolInfo{{Name: "stale", Server: "vsp-Q99"}})
+	require.NoError(t, mf.Persist())
+	mf2, err := lifecycle.LoadManifest(mPath)
+	require.NoError(t, err)
+
+	lm.SetManifest(mf2)
+	lm.SetupSupervisor(testLogger()) // boot pass records one sig mismatch
+
+	rr := doRequest(t, handler, "GET", "/api/v1/metrics", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp models.MetricsResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NotNil(t, resp.LazySpawn, "flag ON: LazySpawn block must be present")
+	assert.Equal(t, int64(1), resp.LazySpawn.SigMismatchRediscover,
+		"the boot sig-mismatch must be surfaced on /api/v1/metrics")
+	// The whole struct must round-trip through the handler: the other three
+	// counters are wired and serialized (zero here — no spawn/warming/degrade
+	// occurred), guarding against a dropped/mis-wired field.
+	assert.Equal(t, int64(0), resp.LazySpawn.SpawnOnInvoke)
+	assert.Equal(t, int64(0), resp.LazySpawn.WarmingReturned)
+	assert.Equal(t, int64(0), resp.LazySpawn.DegradeEvicted)
+}
+
 // --- Phase D.1: handleShutdown tests ---
 
 // newAuthedServerWithShutdown builds a test server with Bearer auth + admin

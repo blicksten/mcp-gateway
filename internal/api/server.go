@@ -1821,6 +1821,12 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 			EstTotalTokens:  descTokens + schemaTokens,
 		},
 	}
+	// TASK T1: surface lazy-spawn counters only when the feature is enabled so
+	// the default-config payload is byte-identical to pre-T1 (nil → omitted).
+	if lifecycle.LazySpawnEnabled() {
+		snap := s.lm.LazyMetricsSnapshot()
+		resp.LazySpawn = &snap
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 

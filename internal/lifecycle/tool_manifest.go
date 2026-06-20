@@ -202,38 +202,83 @@ func (m *Manifest) Get(name string) (ManifestRecord, bool) {
 	return m.getUnderLock(name)
 }
 
+// ManifestLookup classifies the outcome of a signature-validated lookup
+// (GetValidWithOutcome). It lets a caller distinguish a plain cache miss
+// (cold-start) from a stale-signature eviction so that, e.g., the TASK T1
+// sig_mismatch_rediscover counter only fires on a real config change.
+type ManifestLookup int
+
+const (
+	// ManifestHit — a fresh entry whose stored Sig matches the current config.
+	ManifestHit ManifestLookup = iota
+	// ManifestAbsent — no entry for this backend (cold-start) or the flag is OFF.
+	ManifestAbsent
+	// ManifestStale — an entry existed but exceeded the TTL; it was evicted.
+	ManifestStale
+	// ManifestSigMismatch — an entry existed within TTL but its stored Sig did
+	// not match the current config (config changed); it was evicted.
+	ManifestSigMismatch
+)
+
 // GetValid returns the cached record for a backend only when the stored Sig
 // matches currentSig (Guard 1 — design §4.1). Returns (zero, false) when the
 // record is absent, TTL-stale, flag-OFF, or the stored Sig does not match
 // currentSig. On a sig mismatch the stale entry is evicted so the backend is
 // treated as uncached and re-discovered on the next eager spawn.
 func (m *Manifest) GetValid(name, currentSig string) (ManifestRecord, bool) {
+	r, outcome := m.GetValidWithOutcome(name, currentSig)
+	return r, outcome == ManifestHit
+}
+
+// GetValidWithOutcome is GetValid with the classified lookup outcome exposed.
+// Eviction semantics are identical to GetValid (stale and sig-mismatch entries
+// are evicted under the lock). When the flag is OFF it returns ManifestAbsent
+// without touching the map.
+func (m *Manifest) GetValidWithOutcome(name, currentSig string) (ManifestRecord, ManifestLookup) {
 	if !LazySpawnEnabled() {
-		return ManifestRecord{}, false
+		return ManifestRecord{}, ManifestAbsent
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	r, ok := m.getUnderLock(name)
+	return m.classifyUnderLock(name, currentSig)
+}
+
+// isStale reports whether a record has exceeded the manifest TTL. Single source
+// of truth for the staleness check shared by getUnderLock and classifyUnderLock
+// so the two eviction paths cannot drift.
+func (r ManifestRecord) isStale() bool {
+	return time.Since(r.DiscoveredAt) > manifestTTL
+}
+
+// classifyUnderLock resolves a backend lookup to a record + outcome, evicting
+// the entry on TTL-staleness or sig mismatch. Caller must hold m.mu.
+func (m *Manifest) classifyUnderLock(name, currentSig string) (ManifestRecord, ManifestLookup) {
+	r, ok := m.records[name]
 	if !ok {
-		return ManifestRecord{}, false
+		return ManifestRecord{}, ManifestAbsent
+	}
+	if r.isStale() {
+		// Stale — treat as absent so caller re-discovers.
+		delete(m.records, name)
+		return ManifestRecord{}, ManifestStale
 	}
 	if r.Sig != currentSig {
 		// Config changed since the manifest was written — evict the stale entry
 		// so the backend is treated as uncached and re-discovers on next spawn.
 		delete(m.records, name)
-		return ManifestRecord{}, false
+		return ManifestRecord{}, ManifestSigMismatch
 	}
-	return r, true
+	return r, ManifestHit
 }
 
-// getUnderLock is the shared inner body of Get and GetValid.
+// getUnderLock is the shared inner body of Get (no signature check).
 // Caller must hold m.mu.
 func (m *Manifest) getUnderLock(name string) (ManifestRecord, bool) {
 	r, ok := m.records[name]
 	if !ok {
 		return ManifestRecord{}, false
 	}
-	if time.Since(r.DiscoveredAt) > manifestTTL {
+	if r.isStale() {
 		// Stale — treat as absent so caller re-discovers.
 		delete(m.records, name)
 		return ManifestRecord{}, false

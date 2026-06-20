@@ -450,6 +450,35 @@ type MetricsResponse struct {
 	GatewayUptime Duration           `json:"gateway_uptime"`
 	Servers       []ServerMetricsInfo `json:"servers"`
 	Tokens        TokenMetrics       `json:"tokens"`
+	// LazySpawn carries the C2 lazy-spawn observability counters (TASK T1).
+	// It is populated only when the MCP_GATEWAY_LAZY_SPAWN flag is enabled;
+	// nil (and omitted from JSON) when the feature is OFF, so the default-config
+	// metrics payload stays byte-identical to pre-T1.
+	LazySpawn *LazySpawnMetrics `json:"lazy_spawn,omitempty"`
+}
+
+// LazySpawnMetrics holds monotonic observability counters for the C2 lazy-spawn
+// feature (TASK T1). Counters are cumulative since gateway start. They let an
+// operator watch a canary and see warming/degrade/mismatch/spawn rates.
+type LazySpawnMetrics struct {
+	// SpawnOnInvoke counts successful on-demand spawns triggered by a tool
+	// invocation against a StatusIdle backend.
+	SpawnOnInvoke int64 `json:"spawn_on_invoke"`
+	// WarmingReturned counts ErrLazyWarming responses returned to callers whose
+	// budget expired while a background spawn was still in progress.
+	// Note: a caller whose context cancels at the same instant the spawn result
+	// lands may receive ErrLazyWarming even though that spawn ultimately
+	// succeeded (the select resolves ctx.Done over the result channel). The
+	// counters are independent: SpawnOnInvoke + WarmingReturned does not equal a
+	// total attempt count.
+	WarmingReturned int64 `json:"warming_returned"`
+	// DegradeEvicted counts Guard-2 events: a lazy spawn failed, the backend was
+	// marked StatusError, and its manifest entry was evicted (tool un-advertised).
+	DegradeEvicted int64 `json:"degrade_evicted"`
+	// SigMismatchRediscover counts boot-seed events where a manifest entry's
+	// stored signature did not match the current config, forcing an eager
+	// re-discovery instead of seeding StatusIdle.
+	SigMismatchRediscover int64 `json:"sig_mismatch_rediscover"`
 }
 
 // ServerMetricsInfo holds operational metrics for a single backend server.

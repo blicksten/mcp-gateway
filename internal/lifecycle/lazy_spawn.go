@@ -143,6 +143,8 @@ func (m *Manager) EnsureStarted(ctx context.Context, name string) (models.Server
 			if cb := m.toolsChangedCb; cb != nil {
 				cb(name)
 			}
+			// TASK T1: Guard-2 degrade — spawn failed, status Error, manifest evicted.
+			m.lazyMetrics.degradeEvicted.Add(1)
 			return models.StatusError, err
 		}
 
@@ -169,6 +171,9 @@ func (m *Manager) EnsureStarted(ctx context.Context, name string) (models.Server
 			cb(name)
 		}
 
+		// TASK T1: successful on-demand spawn (counted once per singleflight,
+		// not per coalesced caller).
+		m.lazyMetrics.spawnOnInvoke.Add(1)
 		return models.StatusRunning, nil
 	})
 
@@ -187,8 +192,12 @@ func (m *Manager) EnsureStarted(ctx context.Context, name string) (models.Server
 		}
 		return status, res.Err
 	case <-t.C:
+		// TASK T1: caller budget expired; warming returned. Spawn continues.
+		m.lazyMetrics.warmingReturned.Add(1)
 		return models.StatusIdle, ErrLazyWarming
 	case <-ctx.Done():
+		// TASK T1: caller context cancelled before spawn finished; warming returned.
+		m.lazyMetrics.warmingReturned.Add(1)
 		return models.StatusIdle, ErrLazyWarming
 	}
 }
