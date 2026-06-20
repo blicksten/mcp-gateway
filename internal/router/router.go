@@ -8,15 +8,25 @@ import (
 	"sync/atomic"
 	"time"
 
+	"mcp-gateway/internal/lifecycle"
 	"mcp-gateway/internal/models"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // SessionProvider returns the active MCP client session for a backend.
+// EnsureStarted and IsLazyPending support the TASK C2.2 lazy-spawn path;
+// when the flag is OFF, Call/CallDirect never invoke them.
 type SessionProvider interface {
 	Session(name string) (*mcp.ClientSession, bool)
 	Entry(name string) (models.ServerEntry, bool)
+	// EnsureStarted triggers an on-demand spawn for an Idle backend and blocks
+	// until the backend is Running, the caller's budget expires, or the spawn
+	// fails. Returns (StatusRunning, nil) on success, (StatusIdle, ErrLazyWarming)
+	// on budget expiry, or (StatusError, err) on spawn failure.
+	EnsureStarted(ctx context.Context, name string) (models.ServerStatus, error)
+	// IsLazyPending reports whether a lazy spawn is currently in flight for name.
+	IsLazyPending(name string) bool
 }
 
 // Router routes namespaced tool calls to the appropriate backend.
@@ -91,7 +101,28 @@ func (r *Router) Call(ctx context.Context, namespacedTool string, args map[strin
 		return nil, fmt.Errorf("server %q not found", server)
 	}
 	if entry.Status != models.StatusRunning && entry.Status != models.StatusDegraded {
-		return nil, fmt.Errorf("server %q is not running (status: %s)", server, entry.Status)
+		// TASK C2.2: when the flag is ON and the backend is Idle (or has a
+		// spawn already in flight), trigger or join a lazy spawn before
+		// dispatching. On success, re-fetch entry and fall through to dispatch.
+		// Flag OFF leaves this block unreachable — the else branch returns the
+		// original rejection error, preserving flag-OFF byte-identity.
+		if lifecycle.LazySpawnEnabled() &&
+			(entry.Status == models.StatusIdle || r.sp.IsLazyPending(server)) {
+			status, err := r.sp.EnsureStarted(ctx, server)
+			if err != nil {
+				return nil, fmt.Errorf("server %q: %w", server, err)
+			}
+			if status != models.StatusRunning && status != models.StatusDegraded {
+				return nil, fmt.Errorf("server %q is not running after spawn (status: %s)", server, status)
+			}
+			// Re-fetch entry so the session look-up below sees the live state.
+			entry, exists = r.sp.Entry(server)
+			if !exists {
+				return nil, fmt.Errorf("server %q disappeared after spawn", server)
+			}
+		} else {
+			return nil, fmt.Errorf("server %q is not running (status: %s)", server, entry.Status)
+		}
 	}
 
 	session, ok := r.sp.Session(server)
@@ -118,7 +149,23 @@ func (r *Router) CallDirect(ctx context.Context, server, tool string, args map[s
 		return nil, fmt.Errorf("server %q not found", server)
 	}
 	if entry.Status != models.StatusRunning && entry.Status != models.StatusDegraded {
-		return nil, fmt.Errorf("server %q is not available (status: %s)", server, entry.Status)
+		// TASK C2.2: same lazy-spawn path as Call (see Call for rationale).
+		if lifecycle.LazySpawnEnabled() &&
+			(entry.Status == models.StatusIdle || r.sp.IsLazyPending(server)) {
+			status, err := r.sp.EnsureStarted(ctx, server)
+			if err != nil {
+				return nil, fmt.Errorf("server %q: %w", server, err)
+			}
+			if status != models.StatusRunning && status != models.StatusDegraded {
+				return nil, fmt.Errorf("server %q is not available after spawn (status: %s)", server, status)
+			}
+			entry, exists = r.sp.Entry(server)
+			if !exists {
+				return nil, fmt.Errorf("server %q disappeared after spawn", server)
+			}
+		} else {
+			return nil, fmt.Errorf("server %q is not available (status: %s)", server, entry.Status)
+		}
 	}
 
 	session, ok := r.sp.Session(server)

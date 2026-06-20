@@ -226,6 +226,19 @@ func (m *Manifest) Put(name, sig string, tools []models.ToolInfo) {
 	}
 }
 
+// Remove deletes the manifest entry for a backend.
+// When the feature flag is OFF, Remove is a no-op.
+// Called by the lazy-spawn coordinator on spawn failure so a broken backend
+// is no longer advertised (Guard 2 — C2.2).
+func (m *Manifest) Remove(name string) {
+	if !LazySpawnEnabled() {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.records, name)
+}
+
 // Persist atomically flushes the in-memory manifest to disk.
 // When the feature flag is OFF, Persist is a no-op.
 // Callers must hold no lock before calling Persist.

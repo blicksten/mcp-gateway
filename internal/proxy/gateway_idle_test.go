@@ -153,3 +153,138 @@ func toolNames(tools []namespacedTool) []string {
 	}
 	return names
 }
+
+// ----- Fix 8: IsLazyPending + over-budget consolidation tests -----------------
+
+// buildIdleTestGatewayWithPending creates a Gateway where "vsp-P01" has
+// StatusStarting + IsLazyPending==true (mid-spawn race window).
+func buildIdleTestGatewayWithPending(t *testing.T, manifest *lifecycle.Manifest) (*Gateway, *lifecycle.Manager) {
+	t.Helper()
+	cfg := &models.Config{
+		Servers: map[string]*models.ServerConfig{
+			"core":    {URL: "http://127.0.0.1:19999"},
+			"vsp-P01": {Command: "/usr/bin/vsp", Env: []string{"SAP_URL=https://sap:8443"}},
+		},
+	}
+	cfg.ApplyDefaults()
+	logger := slog.Default()
+	lm := lifecycle.NewManager(cfg, "test", logger)
+
+	lm.SetStatus("core", models.StatusRunning, "")
+	lm.SetTools("core", []models.ToolInfo{
+		{Name: "core_tool", Description: "Core tool", Server: "core"},
+	})
+	// vsp-P01 is mid-spawn: StatusStarting (not Idle, not Running) with IsLazyPending.
+	lm.SetStatus("vsp-P01", models.StatusStarting, "")
+
+	gw := New(cfg, lm, "test", logger)
+	if manifest != nil {
+		gw.SetManifest(manifest)
+	}
+	return gw, lm
+}
+
+// TestFilteredTools_LazyPendingIncludesTools verifies that a backend with
+// StatusStarting + IsLazyPending==true appears in filteredTools (tools from manifest).
+func TestFilteredTools_LazyPendingIncludesTools(t *testing.T) {
+	t.Setenv("MCP_GATEWAY_LAZY_SPAWN", "1")
+
+	path := t.TempDir() + "/tool-manifest.json"
+	m, err := lifecycle.LoadManifest(path)
+	require.NoError(t, err)
+	m.Put("vsp-P01", "sig1", []models.ToolInfo{
+		{Name: "sap_read", Description: "Read SAP table", Server: "vsp-P01"},
+	})
+	require.NoError(t, m.Persist())
+
+	gw, lm := buildIdleTestGatewayWithPending(t, m)
+	// Mark vsp-P01 as lazy-pending so IsLazyPending returns true.
+	lm.SetLazyPendingForTest("vsp-P01")
+	defer lm.ClearLazyPendingForTest("vsp-P01")
+
+	tools := gw.filteredTools()
+	names := toolNames(tools)
+
+	assert.Contains(t, names, "vsp-P01__sap_read",
+		"lazy-pending backend tools must appear in filteredTools during mid-spawn window")
+}
+
+// TestFilteredTools_StartingNotPendingExcluded verifies that StatusStarting with
+// IsLazyPending==false (not a lazy spawn) does NOT appear in filteredTools.
+func TestFilteredTools_StartingNotPendingExcluded(t *testing.T) {
+	t.Setenv("MCP_GATEWAY_LAZY_SPAWN", "1")
+
+	path := t.TempDir() + "/tool-manifest.json"
+	m, err := lifecycle.LoadManifest(path)
+	require.NoError(t, err)
+	m.Put("vsp-P01", "sig1", []models.ToolInfo{
+		{Name: "sap_read", Description: "Read SAP table", Server: "vsp-P01"},
+	})
+	require.NoError(t, m.Persist())
+
+	// IsLazyPending is false for vsp-P01 (not set).
+	gw, _ := buildIdleTestGatewayWithPending(t, m)
+
+	tools := gw.filteredTools()
+	names := toolNames(tools)
+
+	for _, n := range names {
+		assert.NotContains(t, n, "vsp-P01",
+			"StatusStarting without IsLazyPending must NOT appear in filteredTools")
+	}
+}
+
+// TestFilteredTools_IdleOverBudgetConsolidated verifies that an Idle backend with
+// more manifest tools than PerServerBudget emits a synthetic more_tools entry
+// instead of silently dropping the excess (Fix 2).
+func TestFilteredTools_IdleOverBudgetConsolidated(t *testing.T) {
+	t.Setenv("MCP_GATEWAY_LAZY_SPAWN", "1")
+
+	path := t.TempDir() + "/tool-manifest.json"
+	m, err := lifecycle.LoadManifest(path)
+	require.NoError(t, err)
+	// Put 3 tools; budget will be 2, so 1 excess tool must be folded.
+	m.Put("vsp-P01", "sig1", []models.ToolInfo{
+		{Name: "sap_read", Description: "Read", Server: "vsp-P01"},
+		{Name: "sap_write", Description: "Write", Server: "vsp-P01"},
+		{Name: "sap_delete", Description: "Delete", Server: "vsp-P01"},
+	})
+	require.NoError(t, m.Persist())
+
+	cfg := &models.Config{
+		Servers: map[string]*models.ServerConfig{
+			"vsp-P01": {Command: "/usr/bin/vsp"},
+		},
+		Gateway: models.GatewaySettings{
+			ToolFilter: &models.ToolFilter{
+				PerServerBudget:   2,
+				ConsolidateExcess: true,
+			},
+		},
+	}
+	cfg.ApplyDefaults()
+	lm := lifecycle.NewManager(cfg, "test", slog.Default())
+	lm.SetStatus("vsp-P01", models.StatusIdle, models.StatusIdleReason)
+
+	gw := New(cfg, lm, "test", slog.Default())
+	gw.SetManifest(m)
+
+	tools := gw.filteredTools()
+	names := toolNames(tools)
+
+	// The two within-budget tools must appear directly.
+	assert.Contains(t, names, "vsp-P01__sap_read", "first within-budget tool must appear")
+	assert.Contains(t, names, "vsp-P01__sap_write", "second within-budget tool must appear")
+
+	// The excess tool must be folded into a more_tools meta-tool.
+	assert.Contains(t, names, "vsp-P01__more_tools",
+		"excess tool must be folded into more_tools meta-tool, not silently dropped")
+
+	// Verify the meta-tool carries the excess tool in allowedTools.
+	for _, tool := range tools {
+		if tool.namespaced == "vsp-P01__more_tools" {
+			assert.Contains(t, tool.allowedTools, "sap_delete",
+				"more_tools allowedTools must include the excess tool")
+		}
+	}
+}

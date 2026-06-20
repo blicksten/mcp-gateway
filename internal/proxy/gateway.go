@@ -824,11 +824,15 @@ func (g *Gateway) filteredTools() []namespacedTool {
 
 	var allTools []namespacedTool
 	for _, entry := range entries {
-		// TASK C2.1: include StatusIdle backends when the manifest cache has
-		// their tools, so MCP clients can see and invoke idle SAP tools.
-		// For Idle backends we read tools from the manifest, not entry.Tools.
+		// TASK C2.1/C2.2: include StatusIdle backends when the manifest cache
+		// has their tools, so MCP clients can see and invoke idle SAP tools.
+		// Also include backends that are currently undergoing a lazy spawn
+		// (IsLazyPending) — their status transitions to StatusStarting for the
+		// brief window between EnsureStarted entry and StatusRunning, which
+		// would otherwise hide their tools from the list.
+		// For Idle/pending backends we read tools from the manifest, not entry.Tools.
 		// Core/eager (Running/Degraded) backends use their live entry.Tools.
-		if entry.Status == models.StatusIdle {
+		if entry.Status == models.StatusIdle || g.lm.IsLazyPending(entry.Name) {
 			if g.manifest == nil {
 				continue // flag OFF or manifest not wired — skip
 			}
@@ -846,11 +850,16 @@ func (g *Gateway) filteredTools() []namespacedTool {
 			if filter != nil && filter.PerServerBudget > 0 {
 				budget = filter.PerServerBudget
 			}
-			// TODO(C2.2): Idle branch does not apply ConsolidateExcess — tools beyond
-			// PerServerBudget are dropped, not folded into a meta-tool.
+			consolidate := budget > 0 && filter != nil && filter.ConsolidateExcess
+
 			count := 0
+			var excessTools []string
 			for _, ct := range rec.Tools {
 				if budget > 0 && count >= budget {
+					if consolidate {
+						excessTools = append(excessTools, ct.Name)
+						continue
+					}
 					break
 				}
 				allTools = append(allTools, namespacedTool{
@@ -861,6 +870,43 @@ func (g *Gateway) filteredTools() []namespacedTool {
 					inputSchema: ct.InputSchema,
 				})
 				count++
+			}
+
+			// Mirror the Running path: fold over-budget tools into a meta-tool
+			// so every tool remains reachable while the backend is Idle.
+			if len(excessTools) > 0 {
+				for _, tn := range excessTools {
+					if tn == metaToolName {
+						g.logger.Warn("backend tool name collides with meta-tool reserved name",
+							"server", entry.Name, "tool", metaToolName)
+					}
+				}
+				var desc string
+				if len(excessTools) <= metaToolDescMaxNames {
+					desc = "Access additional tools: " + strings.Join(excessTools, ", ")
+				} else {
+					desc = "Access additional tools: " + strings.Join(excessTools[:metaToolDescMaxNames], ", ") +
+						fmt.Sprintf(" ... and %d more", len(excessTools)-metaToolDescMaxNames)
+				}
+				allTools = append(allTools, namespacedTool{
+					server:      entry.Name,
+					name:        metaToolName,
+					description: desc,
+					namespaced:  g.router.NamespacedTool(entry.Name, metaToolName),
+					inputSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"tool_name": map[string]any{
+								"type": "string",
+								"enum": excessTools,
+							},
+							"arguments": map[string]any{"type": "object"},
+						},
+						"required": []string{"tool_name"},
+					},
+					synthetic:    true,
+					allowedTools: excessTools,
+				})
 			}
 			continue
 		}

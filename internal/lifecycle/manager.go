@@ -20,6 +20,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/thejerf/suture/v4"
+	"golang.org/x/sync/singleflight"
 )
 
 // entry holds runtime state for one backend server.
@@ -88,6 +89,27 @@ type Manager struct {
 	// invariant; no atomic.Pointer needed).
 	testStopHook  func(name string) error
 	testRemoveHook func(name string) error // non-nil only in tests
+	// testSpawnHook is called by EnsureStarted's singleflight goroutine
+	// immediately before m.Start. Non-nil only in tests; used to count
+	// actual Start invocations without touching the production Start body.
+	testSpawnHook func(name string)
+
+	// TASK C2.2 — lazy-spawn coordinator fields.
+	//
+	// sfGroup deduplicates concurrent EnsureStarted calls for the same backend
+	// so exactly ONE Start is issued regardless of N simultaneous first-invokes.
+	//
+	// lazyPending tracks which backends have an in-flight spawn. Visible to
+	// filteredTools via IsLazyPending so tools stay advertised during the brief
+	// StatusStarting window between spawn start and StatusRunning.
+	//
+	// manifest is wired by SetManifest (called from main.go after the manifest
+	// is loaded). Nil when the flag is OFF or manifest was not loaded — every
+	// caller nil-checks before use.
+	sfGroup      singleflight.Group
+	lazyPendingMu sync.Mutex
+	lazyPending   map[string]struct{}
+	manifest     *Manifest
 }
 
 // NewManager creates a lifecycle manager from the given config.
@@ -121,12 +143,13 @@ func NewManager(cfg *models.Config, version string, logger *slog.Logger) *Manage
 	}
 
 	m := &Manager{
-		entries:  make(map[string]*entry),
-		impl:     &mcp.Implementation{Name: "mcp-gateway", Version: version},
-		logger:   logger,
-		job:      job,
-		jobValid: jobValid,
-		registry: registry,
+		entries:     make(map[string]*entry),
+		impl:        &mcp.Implementation{Name: "mcp-gateway", Version: version},
+		logger:      logger,
+		job:         job,
+		jobValid:    jobValid,
+		registry:    registry,
+		lazyPending: make(map[string]struct{}),
 	}
 	for name, sc := range cfg.Servers {
 		m.entries[name] = &entry{
@@ -192,6 +215,18 @@ func (m *Manager) Session(name string) (*mcp.ClientSession, bool) {
 // is installed for every backend connection.
 func (m *Manager) SetToolsChangedCallback(cb func(name string)) {
 	m.toolsChangedCb = cb
+}
+
+// SetManifest wires the tool-manifest cache to the manager so EnsureStarted
+// can refresh manifest entries after a successful lazy spawn and evict them
+// on spawn failure (Guard 2 — C2.2). Call this before ServeBackgroundSupervisor.
+// Nil is safe; the lazy-spawn coordinator nil-checks before every access.
+//
+// NOTE: wired in C2.3 boot path (design §4.5); until then lazy-spawn stays
+// dormant even with the flag ON. The C2.3 phase also calls LoadManifest,
+// gw.SetManifest, lm.SetManifest, and sets backends to StatusIdle at boot.
+func (m *Manager) SetManifest(manifest *Manifest) {
+	m.manifest = manifest
 }
 
 // Start connects to a backend server. It must not be called while
@@ -1001,6 +1036,29 @@ func (m *Manager) SetTestStopHook(hook func(name string) error) {
 // when removal of the old entry fails. Must be called before concurrent traffic.
 func (m *Manager) SetTestRemoveHook(hook func(name string) error) {
 	m.testRemoveHook = hook
+}
+
+// SetTestSpawnHook installs a hook called by EnsureStarted's singleflight
+// goroutine immediately before m.Start. Use this in tests to count distinct
+// Start invocations without modifying the production Start body.
+func (m *Manager) SetTestSpawnHook(hook func(name string)) {
+	m.testSpawnHook = hook
+}
+
+// SetLazyPendingForTest marks name as lazy-pending in the lazyPending map.
+// Used only in tests to simulate the mid-spawn race window without a real spawn.
+func (m *Manager) SetLazyPendingForTest(name string) {
+	m.lazyPendingMu.Lock()
+	m.lazyPending[name] = struct{}{}
+	m.lazyPendingMu.Unlock()
+}
+
+// ClearLazyPendingForTest removes name from the lazyPending map.
+// Used only in tests to clean up after SetLazyPendingForTest.
+func (m *Manager) ClearLazyPendingForTest(name string) {
+	m.lazyPendingMu.Lock()
+	delete(m.lazyPending, name)
+	m.lazyPendingMu.Unlock()
 }
 
 // RemoveResult carries the outcome of a RemoveServer call.
