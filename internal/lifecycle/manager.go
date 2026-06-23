@@ -32,8 +32,8 @@ type entry struct {
 	session   *mcp.ClientSession
 	client    *mcp.Client
 	transport mcp.Transport
-	cmd       *exec.Cmd // non-nil for stdio backends
-	starting  bool       // guards against concurrent Start calls
+	cmd       *exec.Cmd    // non-nil for stdio backends
+	starting  bool         // guards against concurrent Start calls
 	logs      *logbuf.Ring // captured stderr output
 }
 
@@ -41,10 +41,10 @@ type entry struct {
 // All mutations go through Manager methods; health monitor and proxy
 // read state via exported accessors.
 type Manager struct {
-	mu       sync.RWMutex
-	entries  map[string]*entry
-	impl     *mcp.Implementation
-	logger   *slog.Logger
+	mu        sync.RWMutex
+	entries   map[string]*entry
+	impl      *mcp.Implementation
+	logger    *slog.Logger
 	job       jobHandle   // Windows Job Object; no-op zero value on other platforms
 	jobValid  bool        // true if newJobObject succeeded
 	jobClose  sync.Once   // guards closeJobObject against double-close
@@ -236,6 +236,24 @@ func (m *Manager) Entry(name string) (models.ServerEntry, bool) {
 		return models.ServerEntry{}, false
 	}
 	return e.ServerEntry, true
+}
+
+// JobObjectInfo reports the state of the Windows Job Object used to clean up
+// child backends when the gateway exits (KILL_ON_JOB_CLOSE). It is consumed by
+// the Phase-3 debug dump (GET /api/v1/debug/dump). Nil-safe: a nil Manager
+// reports a disabled job object.
+//
+//   - enabled: the job object was created successfully (jobValid). On non-
+//     Windows platforms newJobObject is a no-op, so enabled is false there.
+//   - killOnClose: true exactly when the job is enabled — newJobObject always
+//     sets JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE when it succeeds (job_windows.go).
+func (m *Manager) JobObjectInfo() (enabled, killOnClose bool) {
+	if m == nil {
+		return false, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.jobValid, m.jobValid
 }
 
 // Session returns the active MCP client session for a backend.

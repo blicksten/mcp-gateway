@@ -230,17 +230,17 @@ func NewServer(
 		logger = slog.Default()
 	}
 	return &Server{
-		lm:              lm,
-		gw:              gw,
-		monitor:         monitor,
-		cfg:             cfg,
-		configPath:      configPath,
-		logger:          logger,
-		authToken:       authCfg.Token,
-		authEnabled:     authCfg.Enabled,
-		adminToken:      authCfg.AdminToken,
-		adminEnabled:    authCfg.AdminEnabled,
-		version:         version,
+		lm:           lm,
+		gw:           gw,
+		monitor:      monitor,
+		cfg:          cfg,
+		configPath:   configPath,
+		logger:       logger,
+		authToken:    authCfg.Token,
+		authEnabled:  authCfg.Enabled,
+		adminToken:   authCfg.AdminToken,
+		adminEnabled: authCfg.AdminEnabled,
+		version:      version,
 		// T0.7.1 disk persistence (2026-05-23): registry survives daemon
 		// restart. When DefaultSessionRegistryDiskPath() returns "" (no
 		// resolvable home dir), the registry silently falls back to
@@ -433,13 +433,14 @@ func (s *Server) TriggerPluginReannounce() {
 // Handler returns the chi router with all routes mounted.
 //
 // Middleware policy (ADR-0003 §policy-matrix):
-//   Public     GET /api/v1/health, /api/v1/version — no auth, no csrf
-//   Authed REST  all other /api/v1/* — auth THEN csrf (cheap 401 first)
-//   SSE /logs  separate group; auth BEFORE Throttle(20) so unauthed
-//              clients cannot exhaust the throttle budget (T12A.3d)
-//   MCP transports /mcp, /sse — policy from GatewaySettings.AuthMCPTransport
-//                 (loopback-only default; bearer-required when remote)
-//   /api/* redirect — 307 to /api/v1; csrf/auth applied at destination
+//
+//	Public     GET /api/v1/health, /api/v1/version — no auth, no csrf
+//	Authed REST  all other /api/v1/* — auth THEN csrf (cheap 401 first)
+//	SSE /logs  separate group; auth BEFORE Throttle(20) so unauthed
+//	           clients cannot exhaust the throttle budget (T12A.3d)
+//	MCP transports /mcp, /sse — policy from GatewaySettings.AuthMCPTransport
+//	              (loopback-only default; bearer-required when remote)
+//	/api/* redirect — 307 to /api/v1; csrf/auth applied at destination
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
@@ -518,6 +519,10 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/servers/{name}/call", s.handleCallTool)
 			r.Get("/tools", s.handleListTools)
 			r.Get("/metrics", s.handleMetrics)
+			// Phase-3 on-demand redacted state dump (PLAN-logging-instrument
+			// §D.1). A sensitive read, so it lives in the authed (Bearer)
+			// group alongside the other reads — never exposes secret values.
+			r.Get("/debug/dump", s.handleDebugDump)
 		})
 
 		// Admin-only group — daemon-control endpoints (MCPR.3) and
