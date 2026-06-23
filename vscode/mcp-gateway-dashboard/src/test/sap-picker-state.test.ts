@@ -473,11 +473,52 @@ describe('sap-picker-state — buildCloudVspArgs (module 1)', () => {
 		);
 	});
 
+	it('omits BOTH conditional flags when readOnly and featureRap are false', () => {
+		// Edge: operator opts out of both per-row toggles — only the
+		// cookie-file launcher tokens remain. Order is still deterministic.
+		assert.deepStrictEqual(
+			buildCloudVspArgs({ ...fullCloud, readOnly: false, featureRap: false }),
+			['--cookie-file', '/abs/path/cookies.txt'],
+		);
+	});
+
+	it('emits BOTH conditional flags when readOnly and featureRap are true', () => {
+		// Symmetry guard against the both-false case: read-only first,
+		// then feature-rap on, then cookie-file — the canonical full shape.
+		assert.deepStrictEqual(
+			buildCloudVspArgs({ ...fullCloud, readOnly: true, featureRap: true }),
+			['--read-only', '--feature-rap', 'on', '--cookie-file', '/abs/path/cookies.txt'],
+		);
+	});
+
 	it('keeps --cookie-file + path as two separate tokens', () => {
 		const args = buildCloudVspArgs(fullCloud);
 		const idx = args.indexOf('--cookie-file');
 		assert.ok(idx >= 0, '--cookie-file flag must be present');
 		assert.strictEqual(args[idx + 1], '/abs/path/cookies.txt');
+	});
+
+	it('keeps a Windows cookie path with spaces as ONE literal token (no splitting)', () => {
+		// Real-world: KeePass/temp cookie files often live under a path with
+		// spaces ("C:\\Users\\My Name\\AppData\\..."). The launcher must receive
+		// the path as a single arg token — never split on the space — so the
+		// child process sees the exact file. No quoting is added by this layer:
+		// argv passing keeps it literal.
+		const winPath = 'C:\\Users\\My Name\\AppData\\Local\\cookies.txt';
+		const args = buildCloudVspArgs({ ...fullCloud, cookieFile: winPath });
+		const idx = args.indexOf('--cookie-file');
+		assert.strictEqual(args.length, idx + 2, 'cookie path must be exactly one trailing token');
+		assert.strictEqual(args[idx + 1], winPath, 'path must be passed byte-for-byte, not split on spaces');
+	});
+
+	it('keeps a forward-slash Windows cookie path as ONE literal token', () => {
+		// Mixed/forward-slash Windows paths (C:/...) are valid and used by some
+		// tooling. Same contract: two tokens, path verbatim.
+		const fwdPath = 'C:/Users/My Name/AppData/Local/cookies.txt';
+		const args = buildCloudVspArgs({ ...fullCloud, cookieFile: fwdPath });
+		const idx = args.indexOf('--cookie-file');
+		assert.strictEqual(args[idx + 1], fwdPath);
+		assert.strictEqual(args.length, idx + 2);
 	});
 
 	it('contains no secret-bearing token (cookie referenced by path only)', () => {

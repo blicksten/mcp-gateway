@@ -1,4 +1,5 @@
 import './mock-vscode';
+import { mockConfigValues } from './mock-vscode';
 import { strict as assert } from 'node:assert';
 import { describe, it, afterEach } from 'mocha';
 import { SapPickerPanel } from '../webview/sap-picker-panel';
@@ -158,6 +159,141 @@ describe('cloud enrichConfigWithCreds (module 2)', () => {
 			assert.ok(!/PASSWORD|COOKIE|TOKEN/i.test(e.split('=', 1)[0]),
 				`env key looks secret-bearing: ${e}`);
 		}
+	});
+
+	it('two cloud systems in one panel enrich INDEPENDENTLY (per-row SAP_URL/SAP_CLIENT)', async () => {
+		// Two distinct cloud rows live in the same panel.rows array; each add op
+		// must pick up its OWN row's cloud params + client, never bleed the other
+		// system's URL or client into the result. enrichConfigWithCreds finds the
+		// row by op.rowKey, so this proves per-row isolation.
+		installFetchSpy();
+		const rows = [
+			cloudRow({
+				snapshot: snapRow({ sid: 'CLD', client: '100' }), kind: 'cloud',
+				cloud: { ...CLOUD, sapUrl: 'https://tenant-a.s4hana.cloud' },
+			}),
+			cloudRow({
+				snapshot: snapRow({ sid: 'CLX', client: '200' }), kind: 'cloud',
+				cloud: { ...CLOUD, sapUrl: 'https://tenant-b.s4hana.cloud', lang: 'DE' },
+			}),
+		];
+		const panel = panelWithRows(rows);
+
+		const outA = await panel.enrichConfigWithCreds({
+			component: 'vsp', rowKey: 'CLD-100', serverName: 'vsp-CLD-100', config: { command: '/opt/vsp' },
+		});
+		const outB = await panel.enrichConfigWithCreds({
+			component: 'vsp', rowKey: 'CLX-200', serverName: 'vsp-CLX-200', config: { command: '/opt/vsp' },
+		});
+
+		const envA = outA.env as string[];
+		const envB = outB.env as string[];
+		// Row A: tenant-a, client 100, default EN.
+		assert.ok(envA.includes('SAP_URL=https://tenant-a.s4hana.cloud'));
+		assert.ok(envA.includes('SAP_CLIENT=100'));
+		assert.ok(envA.includes('SAP_LANGUAGE=EN'));
+		// Row B: tenant-b, client 200, DE — and NO bleed of A's values.
+		assert.ok(envB.includes('SAP_URL=https://tenant-b.s4hana.cloud'));
+		assert.ok(envB.includes('SAP_CLIENT=200'));
+		assert.ok(envB.includes('SAP_LANGUAGE=DE'));
+		assert.ok(!envB.some((e) => e === 'SAP_URL=https://tenant-a.s4hana.cloud'),
+			'row B must not inherit row A SAP_URL');
+		assert.ok(!envB.some((e) => e === 'SAP_CLIENT=100'),
+			'row B must not inherit row A SAP_CLIENT');
+		assert.strictEqual(fetchSpyCalls, 0);
+	});
+
+	it('cloud row preserves a leading-zero client (080 stays 080, not 80)', async () => {
+		// SAP clients are 3-char strings; a leading zero must survive into
+		// SAP_CLIENT verbatim (never coerced through a number). Contrast 080 vs 100.
+		installFetchSpy();
+		const rows = [
+			cloudRow({ snapshot: snapRow({ sid: 'CLD', client: '080' }), kind: 'cloud', cloud: CLOUD }),
+			cloudRow({ snapshot: snapRow({ sid: 'CLD', client: '100' }), kind: 'cloud', cloud: CLOUD }),
+		];
+		const panel = panelWithRows(rows);
+		const out080 = await panel.enrichConfigWithCreds({
+			component: 'vsp', rowKey: 'CLD-080', serverName: 'vsp-CLD-080', config: { command: '/opt/vsp' },
+		});
+		const out100 = await panel.enrichConfigWithCreds({
+			component: 'vsp', rowKey: 'CLD-100', serverName: 'vsp-CLD-100', config: { command: '/opt/vsp' },
+		});
+		assert.ok((out080.env as string[]).includes('SAP_CLIENT=080'), 'leading zero preserved');
+		assert.ok(!(out080.env as string[]).includes('SAP_CLIENT=80'), 'must not strip leading zero');
+		assert.ok((out100.env as string[]).includes('SAP_CLIENT=100'));
+		assert.strictEqual(fetchSpyCalls, 0);
+	});
+});
+
+describe('on-prem enrichConfigWithCreds regression (cloud branch must NOT leak)', () => {
+	const realFetch = importer.fetchSapCredentials;
+
+	afterEach(() => {
+		(importer as { fetchSapCredentials: unknown }).fetchSapCredentials = realFetch;
+		for (const k of Object.keys(mockConfigValues)) { delete mockConfigValues[k]; }
+	});
+
+	function onPremRow(over: Partial<RowState> & { snapshot: PickerSnapshotRow }): RowState {
+		return cloudRow(over); // same shape helper; just no kind/cloud set
+	}
+
+	it('on-prem vsp add still injects SAP_ENABLE_TRANSPORTS + SAP_MODE and calls KeePass', async () => {
+		// Defence: prove the cloud early-return did NOT swallow the on-prem path.
+		// A row with NO kind/cloud must go through fetchSapCredentials and end up
+		// with the on-prem-only env keys (SAP_ENABLE_TRANSPORTS, SAP_MODE).
+		let fetchCalls = 0;
+		(importer as { fetchSapCredentials: unknown }).fetchSapCredentials = async () => {
+			fetchCalls++;
+			// Minimal credential set the on-prem branch folds into env.
+			return { SAP_USER: 'TESTUSER', SAP_CLIENT: '100' };
+		};
+		// Settings the on-prem branch consults (defaults true/expert, but pin
+		// them explicitly so the test does not depend on schema defaults).
+		mockConfigValues['mcpGateway.sapEnableTransports'] = true;
+		mockConfigValues['mcpGateway.sapMode'] = 'expert';
+
+		const rows = [onPremRow({ snapshot: snapRow({ sid: 'DEV', client: '100' }) })];
+		const panel = panelWithRows(rows);
+		const out = await panel.enrichConfigWithCreds({
+			component: 'vsp', rowKey: 'DEV-100', serverName: 'vsp-DEV-100', config: { command: '/opt/vsp' },
+		});
+
+		const env = out.env as string[];
+		assert.ok(Array.isArray(env));
+		// On-prem-only env keys must be present (cloud branch never sets these).
+		assert.ok(env.includes('SAP_ENABLE_TRANSPORTS=true'),
+			'on-prem vsp must inject SAP_ENABLE_TRANSPORTS=true');
+		assert.ok(env.some((e) => e.startsWith('SAP_MODE=')),
+			'on-prem vsp must inject SAP_MODE');
+		assert.ok(env.includes('SAP_MODE=expert'));
+		// KeePass fetcher WAS called (the on-prem credential path ran).
+		assert.strictEqual(fetchCalls, 1, 'on-prem path must call fetchSapCredentials exactly once');
+		// And the fetched on-prem cred made it into env.
+		assert.ok(env.includes('SAP_USER=TESTUSER'));
+	});
+
+	it('on-prem add does NOT receive the cloud-only env shape', async () => {
+		// The cloud branch injects EXACTLY SAP_URL/SAP_CLIENT/SAP_LANGUAGE and
+		// returns early without SAP_ENABLE_TRANSPORTS/SAP_MODE. An on-prem row
+		// must NOT match that fingerprint — proves no cross-contamination.
+		(importer as { fetchSapCredentials: unknown }).fetchSapCredentials = async () => {
+			return { SAP_USER: 'TESTUSER' };
+		};
+		mockConfigValues['mcpGateway.sapEnableTransports'] = true;
+		mockConfigValues['mcpGateway.sapMode'] = 'focused';
+
+		const rows = [onPremRow({ snapshot: snapRow({ sid: 'DEV', client: '100' }) })];
+		const panel = panelWithRows(rows);
+		const out = await panel.enrichConfigWithCreds({
+			component: 'vsp', rowKey: 'DEV-100', serverName: 'vsp-DEV-100', config: { command: '/opt/vsp' },
+		});
+		const env = out.env as string[];
+		// The cloud fingerprint is "exactly 3 keys, all SAP_URL/CLIENT/LANGUAGE".
+		// An on-prem row carries strictly more (SAP_MODE/SAP_ENABLE_TRANSPORTS),
+		// so it can never be mistaken for a cloud enrichment.
+		assert.ok(env.includes('SAP_MODE=focused'));
+		assert.ok(env.includes('SAP_ENABLE_TRANSPORTS=true'));
+		assert.ok(env.length > 3, 'on-prem env must carry more than the 3 cloud-only keys');
 	});
 });
 
