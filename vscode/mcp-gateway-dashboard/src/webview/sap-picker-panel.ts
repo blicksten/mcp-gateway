@@ -1067,6 +1067,27 @@ export class SapPickerPanel {
 		const baseConfig = (op.config ?? {}) as Record<string, unknown>;
 		const row = this.rows.find((x) => x.key === op.rowKey);
 		if (!row) { return baseConfig; }
+
+		// Cloud flavour (vsp only): the ADT-over-HTTPS cookie session needs no
+		// KeePass password. Inject ONLY SAP_URL / SAP_CLIENT / SAP_LANGUAGE and
+		// return early — never call fetchSapCredentials, never emit SAP_USER /
+		// SAP_PASSWORD / SAP_ENABLE_TRANSPORTS / SAP_MODE. The cookie file is
+		// referenced by path in the launcher args (built in sap-picker-state),
+		// so no secret value ever passes through this method.
+		if (op.component === 'vsp' && row.kind === 'cloud' && row.cloud) {
+			const envFromBase = Array.isArray(baseConfig.env) ? (baseConfig.env as unknown[]) : [];
+			const envOut: string[] = [];
+			for (const e of envFromBase) {
+				if (typeof e === 'string') { envOut.push(e); }
+			}
+			envOut.push(`SAP_URL=${row.cloud.sapUrl}`);
+			envOut.push(`SAP_CLIENT=${row.snapshot.client}`);
+			envOut.push(`SAP_LANGUAGE=${row.cloud.lang ?? 'EN'}`);
+			logger.info('sap-picker',
+				`enrichConfig(${op.serverName}): cloud row — injected SAP_URL/SAP_CLIENT/SAP_LANGUAGE, skipped KeePass`);
+			return { ...baseConfig, env: envOut };
+		}
+
 		if (!this.lastInputs) {
 			logger.warn('sap-picker', `enrichConfig(${op.serverName}): no lastInputs — cred fetch skipped`);
 			return baseConfig;
