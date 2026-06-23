@@ -17,6 +17,7 @@ import (
 
 	"mcp-gateway/internal/logbuf"
 	"mcp-gateway/internal/models"
+	"mcp-gateway/internal/obs"
 	"mcp-gateway/internal/sapname"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -88,7 +89,7 @@ type Manager struct {
 	// Set only before the manager begins servicing concurrent requests; no
 	// concurrent writes in production (F-05 — write-once-before-traffic
 	// invariant; no atomic.Pointer needed).
-	testStopHook  func(name string) error
+	testStopHook   func(name string) error
 	testRemoveHook func(name string) error // non-nil only in tests
 	// testSpawnHook is called by EnsureStarted's singleflight goroutine
 	// immediately before m.Start. Non-nil only in tests; used to count
@@ -116,6 +117,40 @@ type Manager struct {
 	// detached spawn goroutines (EnsureStarted) and at boot under m.mu
 	// (SetupSupervisor), read by the metrics HTTP handler. See lazy_metrics.go.
 	lazyMetrics lazyMetrics
+
+	// emitter is the shared obs event emitter (PLAN-logging-instrument.md
+	// Phase 1). Nil-safe: every obs.Emitter method tolerates a nil receiver,
+	// so a Manager constructed without SetEmitter (tests, legacy callers)
+	// simply emits nothing. Set once at startup before traffic.
+	emitter *obs.Emitter
+}
+
+// SetEmitter wires the shared obs event emitter. Called once at startup from
+// main.go before any backend traffic. A nil emitter is tolerated (all emit
+// call sites nil-check via the emitter's own nil-safe methods).
+func (m *Manager) SetEmitter(e *obs.Emitter) {
+	m.emitter = e
+}
+
+// emitKill records a backend kill: it emits the structured `backend.kill`
+// event AND pushes the same fact to the emitter's KillRing so the future
+// /debug/dump (PLAN §D.1) can answer "who killed what, and why" without log
+// archaeology. Nil-safe and zero-cost when tracing is off — the Enabled()
+// check short-circuits before any allocation, and Kills() returns nil on a
+// disabled/absent emitter so Push is a no-op.
+func (m *Manager) emitKill(ctx context.Context, name string, pid int, actor, reason, method string) {
+	if !m.emitter.Enabled() {
+		return
+	}
+	m.emitter.EmitCtx(ctx, "lifecycle", "backend.kill", "warn", actor, name, reason,
+		map[string]any{"pid": pid, "method": method})
+	m.emitter.Kills().Push(obs.KillEvent{
+		Backend: name,
+		Pid:     pid,
+		Actor:   actor,
+		Reason:  reason,
+		Method:  method,
+	})
 }
 
 // NewManager creates a lifecycle manager from the given config.
@@ -464,7 +499,15 @@ func (m *Manager) connectStdio(ctx context.Context, name string, client *mcp.Cli
 	}()
 
 	transport := &mcp.CommandTransport{Command: cmd}
+	connectStart := time.Now()
 	session, err := client.Connect(ctx, transport, nil)
+	// obs: backend.spawn — the OS child now exists (CommandTransport.Connect
+	// starts it). Emitted regardless of handshake outcome so a backend that
+	// spawned-but-failed-handshake is still attributable. Gated/no-op when off.
+	if m.emitter.Enabled() && cmd.Process != nil {
+		m.emitter.EmitCtx(ctx, "lifecycle", "backend.spawn", "info", "supervisor", name, "start",
+			map[string]any{"pid": cmd.Process.Pid, "ppid": os.Getpid()})
+	}
 	// Close the write end so the scanner gets EOF when the child exits.
 	stderrW.Close()
 	if err != nil {
@@ -474,6 +517,7 @@ func (m *Manager) connectStdio(ctx context.Context, name string, client *mcp.Cli
 		// path so any grandchildren the MCP server spawned before the
 		// handshake failed are also cleaned up.
 		if cmd.Process != nil {
+			m.emitKill(ctx, name, cmd.Process.Pid, "connect-fail", "handshake-failed", "terminate+kill-group")
 			_ = terminateProcessGroup(cmd.Process)
 			_ = killProcessGroup(cmd.Process)
 			_ = cmd.Wait()
@@ -502,6 +546,7 @@ func (m *Manager) connectStdio(ctx context.Context, name string, client *mcp.Cli
 			// Close the MCP session first so the SDK's transport goroutines
 			// drain cleanly, then kill the underlying OS process.
 			_ = session.Close()
+			m.emitKill(ctx, name, cmd.Process.Pid, "job-assign-fail", "job-assign-failed", "terminate+kill-group")
 			_ = terminateProcessGroup(cmd.Process)
 			_ = killProcessGroup(cmd.Process)
 			_ = cmd.Wait()
@@ -522,6 +567,12 @@ func (m *Manager) connectStdio(ctx context.Context, name string, client *mcp.Cli
 			m.logger.Warn("subprocess registry: Add failed (orphan reaping degraded)",
 				"server", name, "pid", cmd.Process.Pid, "error", err)
 		}
+	}
+
+	// obs: backend.connect — handshake succeeded; record connect duration.
+	if m.emitter.Enabled() {
+		m.emitter.EmitCtx(ctx, "lifecycle", "backend.connect", "info", "supervisor", name, "connected",
+			map[string]any{"ms": time.Since(connectStart).Milliseconds(), "pid": cmd.Process.Pid})
 	}
 
 	return session, client, transport, cmd, nil
@@ -690,7 +741,8 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 	// return suture.ErrDoNotRestart on every managed restart, silently
 	// removing the backend from the suture tree. Tested by:
 	// TestBackendSupervisor_RestartWithRealSession_NoErrDoNotRestart.
-	if e.Status != models.StatusRestarting {
+	wasRestarting := e.Status == models.StatusRestarting
+	if !wasRestarting {
 		e.Status = models.StatusStopped
 	}
 	e.PID = 0
@@ -722,6 +774,17 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 	// process group) is dead. T13A.2/F-5: use process-group signalling
 	// on POSIX so any grandchildren of the MCP server also get reaped.
 	if cmd != nil && cmd.Process != nil {
+		// obs: backend.kill — actor depends on whether this Stop is part of a
+		// Restart (StatusRestarting was preserved above) or a plain stop.
+		if m.emitter.Enabled() {
+			actor := "manual"
+			reason := "stop"
+			if wasRestarting {
+				actor = "supervisor"
+				reason = "restart"
+			}
+			m.emitKill(ctx, name, cmd.Process.Pid, actor, reason, "terminate+kill-group")
+		}
 		done := make(chan struct{})
 		go func() {
 			_ = cmd.Wait()
@@ -774,7 +837,23 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 	}
 	e.RestartCount++
 	e.Status = models.StatusRestarting
+	restartCount := e.RestartCount
 	m.mu.Unlock()
+
+	// obs: backend.restart — an explicit restart was requested (REST handler
+	// or config reconcile). actor:"manual" distinguishes this from a
+	// suture-driven crash-restart (attributed by the supervisor, PLAN item 5).
+	// Recorded in the KillRing too: a restart is a kill followed by a respawn.
+	if m.emitter.Enabled() {
+		m.emitter.EmitCtx(ctx, "lifecycle", "backend.restart", "info", "manual", name, "restart",
+			map[string]any{"restart_count": restartCount})
+		m.emitter.Kills().Push(obs.KillEvent{
+			Backend: name,
+			Actor:   "manual",
+			Reason:  "restart",
+			Method:  "stop+start",
+		})
+	}
 
 	if err := m.Stop(ctx, name); err != nil {
 		m.logger.Warn("stop during restart failed", "server", name, "error", err)

@@ -22,6 +22,7 @@ import (
 	"mcp-gateway/internal/health"
 	"mcp-gateway/internal/lifecycle"
 	"mcp-gateway/internal/models"
+	"mcp-gateway/internal/obs"
 	"mcp-gateway/internal/patchstate"
 	"mcp-gateway/internal/pidfile"
 	"mcp-gateway/internal/plugin"
@@ -126,11 +127,13 @@ func main() {
 		envFile    string
 		showVer    bool
 		noAuth     bool
+		logLevel   string
 	)
 	flag.StringVar(&configPath, "config", "", "path to config.json (default ~/.mcp-gateway/config.json)")
 	flag.StringVar(&envFile, "env-file", "", "path to .env file for variable expansion (env: MCP_GATEWAY_ENV_FILE)")
 	flag.BoolVar(&showVer, "version", false, "print version and exit")
 	flag.BoolVar(&noAuth, "no-auth", false, "disable Bearer authentication (DANGEROUS: combined with allow_remote requires "+envNoAuthUnderstood+"=1)")
+	flag.StringVar(&logLevel, "log-level", "", "log level: debug|info|warn|error (env: MCP_GATEWAY_LOG_LEVEL; default info)")
 	flag.Parse()
 
 	// Env var fallback for --env-file (flag overrides env var).
@@ -143,8 +146,13 @@ func main() {
 		return
 	}
 
+	// Log level resolved flag → MCP_GATEWAY_LOG_LEVEL env → info (PLAN §B.1).
+	// A *slog.LevelVar backs the handler so a future SIGHUP can re-tune the
+	// level without a daemon restart.
+	levelVar := new(slog.LevelVar)
+	levelVar.Set(obs.ResolveLevel(logLevel, os.Getenv("MCP_GATEWAY_LOG_LEVEL")))
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: levelVar,
 	}))
 
 	if err := run(configPath, envFile, logger, noAuth); err != nil {
@@ -210,11 +218,26 @@ func run(configPath, envFile string, logger *slog.Logger, noAuth bool) error {
 		return err
 	}
 
+	// Observability emitter (PLAN-logging-instrument.md Phase 1). Constructed
+	// once, shared across the lifecycle + api layers. Off by default: when
+	// MCP_GATEWAY_TRACE is unset the emitter is a no-op (Emit/EmitCtx return on
+	// their first line; no file is opened). The per-process JSONL sink lives
+	// under <configDir>/events/. Closed on daemon exit so the file handle is
+	// released cleanly. Never fatal — a sink-open failure leaves the daemon
+	// running with events dropped.
+	emitter := obs.NewEmitter(filepath.Dir(configPath), logger)
+	defer func() { _ = emitter.Close() }()
+	if emitter.Enabled() {
+		logger.Info("obs event stream enabled", "run_id", emitter.RunID())
+	}
+
 	// Create components.
 	lm := lifecycle.NewManager(cfg, version, logger)
+	lm.SetEmitter(emitter)
 	gw := proxy.New(cfg, lm, version, logger)
 	monitor := health.NewMonitor(lm, time.Duration(cfg.Gateway.PingInterval), logger)
 	apiServer := api.NewServer(lm, gw, monitor, cfg, configPath, logger, authCfg, version)
+	apiServer.SetEmitter(emitter)
 
 	// TASK C2.3 — manifest wiring (§4.5). When lazy-spawn is enabled, load the
 	// durable tool-manifest from disk and wire it into both the gateway (so

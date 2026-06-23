@@ -26,6 +26,7 @@ import (
 	"mcp-gateway/internal/health"
 	"mcp-gateway/internal/lifecycle"
 	"mcp-gateway/internal/models"
+	"mcp-gateway/internal/obs"
 	"mcp-gateway/internal/patchstate"
 	"mcp-gateway/internal/plugin"
 	"mcp-gateway/internal/proxy"
@@ -176,6 +177,19 @@ type Server struct {
 	// proxy.ClientCounter to the idle-exit monitor (TASK A). Nil before
 	// Handler() is first called; the sessionCountAdapter is nil-safe.
 	streamableHandler *ResumableStreamableHTTPHandler
+
+	// emitter is the shared obs event emitter (PLAN-logging-instrument.md
+	// Phase 1). Set once at startup via SetEmitter, before traffic. Nil-safe:
+	// every obs.Emitter method tolerates a nil receiver, so a Server built
+	// without SetEmitter (tests, legacy callers) simply emits nothing.
+	emitter *obs.Emitter
+}
+
+// SetEmitter wires the shared obs event emitter into the API server. Called
+// once at startup from main.go before any traffic. A nil emitter is tolerated
+// (all emit call sites go through the emitter's own nil-safe methods).
+func (s *Server) SetEmitter(e *obs.Emitter) {
+	s.emitter = e
 }
 
 // Addr returns the bound listener address, or nil if ListenAndServe has
@@ -1764,7 +1778,32 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.gw.Router().CallDirect(r.Context(), name, req.Tool, req.Arguments)
+	// Trace propagation (PLAN §B.5): read the inbound X-Trace-Id header
+	// (minted in the orchestrator, set on gateway_invoke) and carry it on the
+	// request context so the proxy.call event below — and any backend event
+	// triggered downstream — correlates back to the originating step. The
+	// header read is always cheap; only the emit is gated. Matches the
+	// existing r.Header.Get(...) precedent in this file.
+	ctx := r.Context()
+	traceID := r.Header.Get("X-Trace-Id")
+	if traceID != "" {
+		ctx = context.WithValue(ctx, obs.TraceKey, traceID)
+	}
+
+	callStart := time.Now()
+	result, err := s.gw.Router().CallDirect(ctx, name, req.Tool, req.Arguments)
+	// obs: proxy.call — the gateway end of an orchestrator PAL/tool call. A
+	// long duration_ms with the same trace_id as a `pal.call timed_out:true`
+	// proves the timeout was the external model, not the orchestrator (F3).
+	if s.emitter.Enabled() {
+		s.emitter.EmitCtx(ctx, "proxy", "proxy.call", "info", "gateway", name, "",
+			map[string]any{
+				"tool":        req.Tool,
+				"trace_id":    traceID,
+				"duration_ms": time.Since(callStart).Milliseconds(),
+				"ok":          err == nil,
+			})
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
