@@ -150,6 +150,29 @@ export function expandKey(sid: string, client: string, component: Component): st
 	return `${sid}-${client}-${component}`;
 }
 
+/** DROP-UV (window-storm fix, spike Part A): map a sap-gui-control project
+ *  directory to its venv console entry point
+ *  `<project>/.venv/Scripts/sap-gui-server.exe`. Launching this directly
+ *  (instead of `uv run --project <project> sap-gui-server`) removes the uv
+ *  console grandchild that escapes the gateway's CREATE_NO_WINDOW flag. The
+ *  exe is the hatchling-generated `[project.scripts] sap-gui-server =
+ *  "sap_gui_server:main"` entry point, so it is behaviourally identical.
+ *
+ *  Pure / node-free: preserves the project path's existing separator style
+ *  (Windows backslash configs stay backslash) and tolerates a trailing
+ *  separator. This module is deliberately free of `node:path` so it unit-tests
+ *  on plain node and in the browser webview. */
+export function guiServerExeFromProject(project: string): string {
+	let trimmed = project.trim();
+	// Strip trailing path separators with string ops (Regex Discipline: a
+	// trailing-char trim does not need a regex).
+	while (trimmed.endsWith('\\') || trimmed.endsWith('/')) {
+		trimmed = trimmed.slice(0, -1);
+	}
+	const sep = trimmed.includes('\\') ? '\\' : '/';
+	return [trimmed, '.venv', 'Scripts', 'sap-gui-server.exe'].join(sep);
+}
+
 /** Build the vsp launcher args for a `cloud` SAP row. Pure — no env, no
  *  secrets. The cookie file is passed by PATH as two tokens
  *  (`--cookie-file <path>`); its contents are never read here. `--read-only`
@@ -288,15 +311,24 @@ export function buildOpsListWithDefaults(rows: RowState[], defaults: PickerDefau
 				const overrideProject = (r.override.guiUvProject && r.override.guiUvProject.trim())
 					|| (defaults.guiUvProject && defaults.guiUvProject.trim())
 					|| '';
-				const uv = defaults.uvPath && defaults.uvPath.trim();
 				let config: Record<string, unknown> | undefined;
 				let reason = '';
 				if (overrideCmd) {
 					config = { command: overrideCmd };
-				} else if (defaults.defaultGuiMode === 'uv' && uv && overrideProject) {
+				} else if (defaults.defaultGuiMode === 'uv' && overrideProject) {
+					// DROP-UV (window-storm fix, spike Part A): launch the venv
+					// console-exe DIRECTLY instead of `uv run --project <p>
+					// sap-gui-server`. uv spawns an extra console grandchild
+					// (sap-gui-server.exe) that escapes the gateway's
+					// CREATE_NO_WINDOW flag -> visible SAP console bursts. The
+					// hatchling-generated <project>/.venv/Scripts/sap-gui-server.exe
+					// IS the sap_gui_server:main entry point and `uv run --project`
+					// does not change cwd, so a direct swap is behaviourally
+					// identical with no window. uvPath is no longer required for
+					// GUI in uv mode (kept only as a legacy non-uv fallback below).
 					config = {
-						command: uv,
-						args: ['run', '--project', overrideProject, 'sap-gui-server'],
+						command: guiServerExeFromProject(overrideProject),
+						args: [],
 					};
 				} else if (defaults.vspCommand && defaults.vspCommand.trim() && defaults.defaultGuiMode !== 'uv') {
 					// Same launcher as VSP when not in uv mode (common
@@ -304,15 +336,15 @@ export function buildOpsListWithDefaults(rows: RowState[], defaults: PickerDefau
 					config = { command: defaults.vspCommand.trim() };
 				} else {
 					if (defaults.defaultGuiMode === 'uv') {
-						if (!uv) {
-							reason = 'GUI uv mode needs mcpGateway.uvPath';
-						} else if (!overrideProject) {
+						// DROP-UV: uv mode now launches the venv exe directly, so
+						// only the project path is required (uvPath unused here).
+						if (!overrideProject) {
 							reason = 'GUI uv mode needs mcpGateway.defaultGuiUvProject';
 						} else {
 							reason = 'GUI command not resolved';
 						}
 					} else {
-						reason = 'GUI command not set — fill the row override, or set mcpGateway.defaultGuiMode=uv + mcpGateway.uvPath + mcpGateway.defaultGuiUvProject';
+						reason = 'GUI command not set — fill the row override, or set mcpGateway.defaultGuiMode=uv + mcpGateway.defaultGuiUvProject';
 					}
 				}
 				if (config) {

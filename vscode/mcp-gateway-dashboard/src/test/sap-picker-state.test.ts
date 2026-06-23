@@ -13,6 +13,7 @@ import {
 	buildOpsList,
 	buildOpsListWithDefaults,
 	buildCloudVspArgs,
+	guiServerExeFromProject,
 	type CloudParams,
 	initRowsFromSnapshot,
 	transitionRow,
@@ -601,5 +602,77 @@ describe('sap-picker-state — buildOpsListWithDefaults cloud vs on-prem (module
 		const { ops } = buildOpsListWithDefaults(rows, {});
 		assert.strictEqual(ops.length, 1);
 		assert.deepStrictEqual(ops[0].config, { command: '/opt/vsp' });
+	});
+});
+
+describe('sap-picker-state — GUI drop-uv (window-storm fix, spike Part A)', () => {
+	it('guiServerExeFromProject builds the venv exe path (Windows backslash project)', () => {
+		assert.strictEqual(
+			guiServerExeFromProject('C:\\Users\\me\\sap-gui-control'),
+			'C:\\Users\\me\\sap-gui-control\\.venv\\Scripts\\sap-gui-server.exe');
+	});
+
+	it('guiServerExeFromProject tolerates a trailing separator and posix paths', () => {
+		assert.strictEqual(
+			guiServerExeFromProject('C:\\Users\\me\\sap-gui-control\\'),
+			'C:\\Users\\me\\sap-gui-control\\.venv\\Scripts\\sap-gui-server.exe');
+		assert.strictEqual(
+			guiServerExeFromProject('/home/me/sap-gui-control/'),
+			'/home/me/sap-gui-control/.venv/Scripts/sap-gui-server.exe');
+	});
+
+	it('GUI uv-mode add → direct venv exe with empty args (NO uv, NO --project)', () => {
+		const rows: RowState[] = [
+			rs({
+				snapshot: snapRow({ sid: 'DEV', client: '100', registered: { vsp: false, gui: false } }),
+				desired: { vsp: false, gui: true },
+			}),
+		];
+		const { ops } = buildOpsListWithDefaults(rows, {
+			defaultGuiMode: 'uv',
+			guiUvProject: 'C:\\proj\\sap-gui-control',
+			// uvPath intentionally omitted — no longer required for GUI in uv mode.
+		});
+		assert.strictEqual(ops.length, 1);
+		assert.strictEqual(ops[0].component, 'gui');
+		assert.deepStrictEqual(ops[0].config, {
+			command: 'C:\\proj\\sap-gui-control\\.venv\\Scripts\\sap-gui-server.exe',
+			args: [],
+		});
+		const cmd = (ops[0].config as Record<string, unknown>).command as string;
+		assert.ok(!cmd.includes('uv'), 'command must not reference uv');
+		assert.ok(!(ops[0].config as Record<string, unknown>).args ||
+			!((ops[0].config as Record<string, unknown>).args as string[]).includes('--project'),
+			'args must not carry --project');
+	});
+
+	it('GUI uv-mode add without a project path → skipped with a clear reason', () => {
+		const rows: RowState[] = [
+			rs({
+				snapshot: snapRow({ sid: 'DEV', client: '100', registered: { vsp: false, gui: false } }),
+				desired: { vsp: false, gui: true },
+			}),
+		];
+		const { ops, skipped } = buildOpsListWithDefaults(rows, { defaultGuiMode: 'uv' });
+		assert.strictEqual(ops.length, 0);
+		assert.strictEqual(skipped.length, 1);
+		assert.strictEqual(skipped[0].component, 'gui');
+		assert.ok(skipped[0].reason.includes('defaultGuiUvProject'));
+	});
+
+	it('GUI override command still wins over uv-mode derivation', () => {
+		const rows: RowState[] = [
+			rs({
+				snapshot: snapRow({ sid: 'DEV', client: '100', registered: { vsp: false, gui: false } }),
+				desired: { vsp: false, gui: true },
+				override: { guiCommand: 'C:\\custom\\my-gui.exe' },
+			}),
+		];
+		const { ops } = buildOpsListWithDefaults(rows, {
+			defaultGuiMode: 'uv',
+			guiUvProject: 'C:\\proj\\sap-gui-control',
+		});
+		assert.strictEqual(ops.length, 1);
+		assert.deepStrictEqual(ops[0].config, { command: 'C:\\custom\\my-gui.exe' });
 	});
 });
