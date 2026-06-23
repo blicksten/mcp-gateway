@@ -199,6 +199,12 @@ func (e *Emitter) EmitCtx(ctx context.Context, subsys, event, level, actor, targ
 }
 
 // emitWithTrace is the shared body. Callers have already passed the gate.
+//
+// Finding #3: actor/target/reason were written UNREDACTED (only attrs went
+// through Redact), so a secret accidentally passed as a target (e.g. a URL with
+// embedded credentials, or a token) would leak. Run each through the same value
+// scrub as attrs strings. These are usually short enums, so the scrub is cheap
+// and a no-op for non-secret values.
 func (e *Emitter) emitWithTrace(traceID, subsys, event, level, actor, target, reason string, attrs map[string]any) {
 	ev := Event{
 		Ts:       time.Now().UTC().Format(time.RFC3339Nano),
@@ -213,9 +219,9 @@ func (e *Emitter) emitWithTrace(traceID, subsys, event, level, actor, target, re
 		Ppid:     e.ppid,
 		Seq:      e.seq.Add(1),
 		TraceID:  traceID,
-		Actor:    actor,
-		Target:   target,
-		Reason:   reason,
+		Actor:    scrubString(actor),
+		Target:   scrubString(target),
+		Reason:   scrubString(reason),
 		Attrs:    Redact(attrs),
 	}
 	e.write(&ev)

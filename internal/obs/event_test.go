@@ -213,3 +213,52 @@ func TestNewEmitter_EnabledMintsRunID(t *testing.T) {
 		t.Errorf("run_id = %q, want gw- prefix", e.RunID())
 	}
 }
+
+// Finding #3: actor/target/reason were written UNREDACTED. A secret passed in
+// any of those columns (e.g. a target that is a credentialed URL, or a token in
+// reason) must be scrubbed before the Event is built. Synthetic secrets only;
+// we assert the secret SUBSTRING does not survive.
+func TestEmit_ActorTargetReasonRedacted(t *testing.T) {
+	e, dir := newEnabledEmitter(t)
+
+	e.Emit("proxy", "proxy.call", "info",
+		/*actor*/ "sk-SYNTHSECRETactor0123456789",
+		/*target*/ "https://user:SYNTHSECRETpw@host.example/path",
+		/*reason*/ "Bearer SYNTHSECRETreason0123456789",
+		nil)
+
+	events := readEvents(t, dir)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	ev := events[0]
+
+	if strings.Contains(ev.Actor, "SYNTHSECRET") {
+		t.Errorf("actor secret leaked: %q", ev.Actor)
+	}
+	if strings.Contains(ev.Target, "SYNTHSECRET") {
+		t.Errorf("target secret leaked: %q", ev.Target)
+	}
+	if strings.Contains(ev.Reason, "SYNTHSECRET") {
+		t.Errorf("reason secret leaked: %q", ev.Reason)
+	}
+	// Non-secret structure preserved: target keeps scheme/host/path.
+	if !strings.HasPrefix(ev.Target, "https://") || !strings.Contains(ev.Target, "host.example/path") {
+		t.Errorf("target scheme/host/path not preserved: %q", ev.Target)
+	}
+}
+
+// A plain enum actor/target/reason (the common case) must pass through
+// unchanged — the scrub must not over-redact normal values.
+func TestEmit_PlainActorTargetReasonUnchanged(t *testing.T) {
+	e, dir := newEnabledEmitter(t)
+	e.Emit("lifecycle", "backend.kill", "warn", "reaper", "vsp-PC1", "owner-absent", nil)
+	events := readEvents(t, dir)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	ev := events[0]
+	if ev.Actor != "reaper" || ev.Target != "vsp-PC1" || ev.Reason != "owner-absent" {
+		t.Errorf("plain enum actor/target/reason altered: %q/%q/%q", ev.Actor, ev.Target, ev.Reason)
+	}
+}
