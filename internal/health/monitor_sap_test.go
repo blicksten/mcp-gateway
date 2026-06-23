@@ -104,34 +104,15 @@ func (tm *testableMonitor) checkOneWithSAPProbe(ctx context.Context, entry model
 			state.uptimeStart = time.Now()
 		}
 
-		// SAP reachability — two-counter blip mask mirrors monitor.go checkOne
-		// (design step 4, review MEDIUM-2). Never StatusUnreachable for stdio.
-		switch sapStatus {
-		case models.StatusUnreachable:
-			state.sapUnreachableStreak++
-			state.sapDegradedStreak = 0
-			streak := state.sapUnreachableStreak
+		// SAP reachability — delegate to the REAL updateSAPStreaks so the helper
+		// stays faithful to production (including the sap-gui-* connection gate:
+		// a persistent COM I/O failure publishes StatusUnreachable, while vsp-*
+		// I/O failure and any "not signed in" stays Degraded/routable).
+		if pub, reason, handled := tm.updateSAPStreaks(state, sapStatus, sapReason, sapname.IsSAPGUI(name)); handled {
 			tm.mu.Unlock()
-			if streak < tm.SAPProbeFailureThreshold {
-				tm.lm.SetStatus(name, models.StatusRunning, "")
-				return
-			}
-			tm.lm.SetStatus(name, models.StatusDegraded, sapReason)
-			return
-		case models.StatusDegraded:
-			state.sapDegradedStreak++
-			state.sapUnreachableStreak = 0
-			streak := state.sapDegradedStreak
-			tm.mu.Unlock()
-			if streak < tm.SAPDegradedConfirmThreshold {
-				tm.lm.SetStatus(name, models.StatusRunning, "")
-				return
-			}
-			tm.lm.SetStatus(name, models.StatusDegraded, sapReason)
+			tm.lm.SetStatus(name, pub, reason)
 			return
 		}
-		state.sapUnreachableStreak = 0
-		state.sapDegradedStreak = 0
 		tm.mu.Unlock()
 		tm.lm.SetStatus(name, models.StatusRunning, "")
 		return
@@ -286,13 +267,14 @@ func TestCheckOne_VSP_WithClientSuffix_SAPUnreachable(t *testing.T) {
 
 // ---- sap-gui-* tests --------------------------------------------------------
 
-// TestCheckOne_SAPGUI_NoSession_YieldsUnreachable verifies BUG-STDIO-2/4:
-// when a sap-gui-* backend's MCP ping succeeds but lm.Session returns false
-// (no active session), checkOne must yield StatusUnreachable, not StatusRunning.
-//
-// Fail-without-fix: before the fix checkSAPGUISession did not exist;
-// checkOneWithSAPProbe would call SetStatus(Running) — this assertion fails.
-func TestCheckOne_SAPGUI_NoSession_YieldsDegradedAfterThreshold(t *testing.T) {
+// TestCheckOne_SAPGUI_NoSession_YieldsUnreachableAfterThreshold verifies the
+// spike Part B connection gate: when a sap-gui-* backend's MCP ping succeeds
+// but there is no live session (probeSAPOnce returns a "no live sap-gui
+// session" I/O error → COM engine effectively unavailable), the persistent
+// I/O failure beyond SAPProbeFailureThreshold must publish StatusUnreachable
+// (the suture ErrDoNotRestart gate), NOT StatusDegraded. Pre-gate this yielded
+// Degraded, which let suture lockstep-restart-storm the backends.
+func TestCheckOne_SAPGUI_NoSession_YieldsUnreachableAfterThreshold(t *testing.T) {
 	mock := newMockLM()
 	entry := sapGUIEntry(t, "sap-gui-Q00", models.StatusRunning)
 	mock.addEntry(entry.Name, entry.Status, entry.Config)
@@ -306,8 +288,8 @@ func TestCheckOne_SAPGUI_NoSession_YieldsDegradedAfterThreshold(t *testing.T) {
 		tm.checkOneWithSAPProbe(ctx, entry, true)
 	}
 
-	assert.Equal(t, models.StatusDegraded, mock.lastStatus(entry.Name),
-		"sap-gui-* with no MCP session must become StatusDegraded after threshold (never StatusUnreachable for stdio)")
+	assert.Equal(t, models.StatusUnreachable, mock.lastStatus(entry.Name),
+		"sap-gui-* with persistent COM I/O failure must become StatusUnreachable after threshold (suture gate)")
 }
 
 // TestCheckSAPGUISession_NoSession is a direct unit test of checkSAPGUISession
@@ -343,8 +325,8 @@ func TestCheckOne_SAPGUI_WithClientSuffix_NoSession(t *testing.T) {
 		tm.checkOneWithSAPProbe(ctx, entry, true)
 	}
 
-	assert.Equal(t, models.StatusDegraded, mock.lastStatus(entry.Name),
-		"sap-gui-<SID>-<Client> must route through checkSAPGUISession; persistent failure -> Degraded")
+	assert.Equal(t, models.StatusUnreachable, mock.lastStatus(entry.Name),
+		"sap-gui-<SID>-<Client> must route through checkSAPGUISession; persistent COM failure -> Unreachable (gate)")
 }
 
 // ---- non-SAP backend tests --------------------------------------------------
@@ -818,39 +800,81 @@ func TestSAPDualCounter_DegradedConfirm(t *testing.T) {
 	state := &serverState{}
 
 	// Tick 1: streak 1 < 2 → tolerated (Running).
-	pub, _, handled := mon.updateSAPStreaks(state, models.StatusDegraded, "no session")
+	pub, _, handled := mon.updateSAPStreaks(state, models.StatusDegraded, "no session", false)
 	require.True(t, handled)
 	assert.Equal(t, models.StatusRunning, pub, "first Degraded tick tolerated")
 	assert.Equal(t, 1, state.sapDegradedStreak)
 
 	// Tick 2: streak 2 == threshold → confirmed Degraded with the reason.
-	pub, reason, handled := mon.updateSAPStreaks(state, models.StatusDegraded, "no session")
+	pub, reason, handled := mon.updateSAPStreaks(state, models.StatusDegraded, "no session", false)
 	require.True(t, handled)
 	assert.Equal(t, models.StatusDegraded, pub, "second Degraded tick confirms Degraded")
 	assert.Equal(t, "no session", reason)
 	assert.Equal(t, 2, state.sapDegradedStreak)
 
 	// Good verdict: SAP path does not handle it; both streaks reset.
-	_, _, handled = mon.updateSAPStreaks(state, models.StatusRunning, "")
+	_, _, handled = mon.updateSAPStreaks(state, models.StatusRunning, "", false)
 	assert.False(t, handled, "a good verdict falls through to the Running/REST path")
 	assert.Equal(t, 0, state.sapDegradedStreak, "good tick resets sapDegradedStreak")
 	assert.Equal(t, 0, state.sapUnreachableStreak, "good tick resets sapUnreachableStreak")
 }
 
 // TestSAPDualCounter_UnreachableThreshold drives the REAL updateSAPStreaks I/O-error
-// path: tolerated up to SAPProbeFailureThreshold (3), then confirmed Degraded.
+// path for a NON-sap-gui (vsp-like) backend: tolerated up to
+// SAPProbeFailureThreshold (3), then confirmed Degraded (stays routable, no gate).
 func TestSAPDualCounter_UnreachableThreshold(t *testing.T) {
 	mon := NewMonitor(newMockLM(), 1*time.Second, nil)
 	require.Equal(t, 3, mon.SAPProbeFailureThreshold)
 	state := &serverState{}
 
 	for i := 1; i < mon.SAPProbeFailureThreshold; i++ {
-		pub, _, handled := mon.updateSAPStreaks(state, models.StatusUnreachable, "io")
+		pub, _, handled := mon.updateSAPStreaks(state, models.StatusUnreachable, "io", false)
 		require.True(t, handled)
 		assert.Equal(t, models.StatusRunning, pub, "tick %d tolerated", i)
 	}
-	pub, _, _ := mon.updateSAPStreaks(state, models.StatusUnreachable, "io")
-	assert.Equal(t, models.StatusDegraded, pub, "Unreachable confirmed at threshold")
+	pub, _, _ := mon.updateSAPStreaks(state, models.StatusUnreachable, "io", false)
+	assert.Equal(t, models.StatusDegraded, pub, "vsp-* Unreachable confirmed as Degraded at threshold")
+}
+
+// TestSAPDualCounter_SAPGUI_UnreachableGate drives the REAL updateSAPStreaks
+// I/O-error path for a sap-gui-* backend (isSAPGUI=true): the COM connection
+// gate. The transient I/O failure is tolerated up to SAPProbeFailureThreshold
+// (3) as StatusRunning, then PUBLISHES StatusUnreachable (NOT Degraded) so the
+// suture ErrDoNotRestart gate stops the lockstep restart storm. This is the
+// core of spike Part B and FAILS before the fix (old code returned Degraded).
+func TestSAPDualCounter_SAPGUI_UnreachableGate(t *testing.T) {
+	mon := NewMonitor(newMockLM(), 1*time.Second, nil)
+	require.Equal(t, 3, mon.SAPProbeFailureThreshold)
+	state := &serverState{}
+
+	for i := 1; i < mon.SAPProbeFailureThreshold; i++ {
+		pub, _, handled := mon.updateSAPStreaks(state, models.StatusUnreachable, "COM hung", true)
+		require.True(t, handled)
+		assert.Equal(t, models.StatusRunning, pub, "tick %d tolerated (blip absorb)", i)
+	}
+	pub, reason, handled := mon.updateSAPStreaks(state, models.StatusUnreachable, "COM hung", true)
+	require.True(t, handled)
+	assert.Equal(t, models.StatusUnreachable, pub,
+		"sap-gui-* persistent COM I/O failure must publish StatusUnreachable (suture gate), not Degraded")
+	assert.Equal(t, "COM hung", reason)
+}
+
+// TestSAPDualCounter_SAPGUI_NotSignedInStaysDegraded verifies the connection
+// gate does NOT swallow the "not signed in" case: a sap-gui-* with a SUCCESSFUL
+// probe but no logged-in session (StatusDegraded verdict) must stay Degraded
+// (routable, self-recovers each tick) — it must NOT be gated to Unreachable,
+// because that is not a restart storm.
+func TestSAPDualCounter_SAPGUI_NotSignedInStaysDegraded(t *testing.T) {
+	mon := NewMonitor(newMockLM(), 1*time.Second, nil)
+	state := &serverState{}
+
+	for i := 1; i < mon.SAPDegradedConfirmThreshold; i++ {
+		pub, _, _ := mon.updateSAPStreaks(state, models.StatusDegraded, "not signed in", true)
+		assert.Equal(t, models.StatusRunning, pub, "tick %d tolerated", i)
+	}
+	pub, _, _ := mon.updateSAPStreaks(state, models.StatusDegraded, "not signed in", true)
+	assert.Equal(t, models.StatusDegraded, pub,
+		"sap-gui-* not-signed-in must stay Degraded (routable), never gated to Unreachable")
 }
 
 // TestSAPDualCounter_NoCrossContamination verifies that alternating
@@ -870,7 +894,7 @@ func TestSAPDualCounter_NoCrossContamination(t *testing.T) {
 		models.StatusUnreachable,
 	}
 	for i, v := range verdicts {
-		pub, _, handled := mon.updateSAPStreaks(state, v, "blip")
+		pub, _, handled := mon.updateSAPStreaks(state, v, "blip", false)
 		require.True(t, handled)
 		assert.Equal(t, models.StatusRunning, pub,
 			"tick %d (%s): alternating verdicts must stay tolerated", i, v)
@@ -949,6 +973,36 @@ func TestOrderSAPCandidates(t *testing.T) {
 	got = orderSAPCandidates(names, map[string]int{"sap-gui-S23-100": 1}, "sap-gui-S23-100")
 	assert.Equal(t, "sap-gui-S23-100", got[len(got)-1],
 		"fail-count takes precedence over last-good preference")
+}
+
+// TestSAPGUIRestartJitter pins the de-lockstep jitter contract used by the
+// sap-gui-* slow-poll recovery: deterministic per name, bounded to
+// [0, sapGUIRestartJitterMax), and de-correlated across the real sap-gui-*
+// names so the 8 backends gated on the same STA-hang tick do not re-attempt
+// Start together.
+func TestSAPGUIRestartJitter(t *testing.T) {
+	// Bounded and deterministic.
+	for _, name := range []string{"sap-gui-CTC-100", "sap-gui-Q25-100", "sap-gui-T23-000"} {
+		j := sapGUIRestartJitter(name)
+		assert.GreaterOrEqual(t, j, time.Duration(0), "jitter must be >= 0")
+		assert.Less(t, j, sapGUIRestartJitterMax, "jitter must be < max")
+		assert.Equal(t, j, sapGUIRestartJitter(name), "jitter must be deterministic per name")
+	}
+
+	// De-correlation: the real 9 sap-gui-* names must not all collapse to one
+	// value (a constant jitter would not de-lockstep). Require at least 3
+	// distinct buckets across the fleet.
+	names := []string{
+		"sap-gui-CTC-100", "sap-gui-DEV-100", "sap-gui-Q12-100", "sap-gui-Q25-100",
+		"sap-gui-Q26-100", "sap-gui-S23-100", "sap-gui-S25-100", "sap-gui-T23-000",
+		"sap-gui-TST-100",
+	}
+	distinct := map[time.Duration]struct{}{}
+	for _, n := range names {
+		distinct[sapGUIRestartJitter(n)] = struct{}{}
+	}
+	assert.GreaterOrEqual(t, len(distinct), 3,
+		"jitter must spread the sap-gui-* fleet across multiple buckets (de-lockstep)")
 }
 
 // Compile-time guard: ensure the tests reference the real Monitor methods/funcs so

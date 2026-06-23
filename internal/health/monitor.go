@@ -384,6 +384,22 @@ func (m *Monitor) checkAll(ctx context.Context) {
 // flapping (start succeeds, ping fails repeatedly), not for VPN-off
 // network partitions.
 func (m *Monitor) maybeProbeUnreachable(ctx context.Context, entry models.ServerEntry) {
+	// sap-gui-* connection-gate recovery (spike Part B): sap-gui-* backends
+	// drive SAP via the COM STA engine and have NO SAP_URL host to TCP-dial,
+	// so unreachableProbeURL returns "" for them. They reach StatusUnreachable
+	// only via the COM-I/O-error gate in updateSAPStreaks (the STA engine is
+	// hung/absent). Recovery cannot re-probe the shared SAP snapshot here —
+	// that needs a LIVE sap-gui session, which a gated (un-restarted) backend
+	// does not have, so the snapshot would be a circular dead-end. Instead we
+	// directly RE-ATTEMPT Start() on the slow-poll cadence: if the STA engine
+	// is still hung the new child's KeepAlive misses and it returns to the
+	// gate (bounded by the 60s/5min cadence — NOT suture's 15s lockstep);
+	// if the engine recovered, Start succeeds and the backend serves again.
+	if sapname.IsSAPGUI(entry.Name) {
+		m.maybeRestartSAPGUIUnreachable(ctx, entry)
+		return
+	}
+
 	// Determine the probe URL for this backend:
 	//   - HTTP/SSE backends: use Config.URL (original path).
 	//   - TASK C1 — stdio backends skipped at spawn time (vsp-* with SAP_URL):
@@ -432,28 +448,99 @@ func (m *Monitor) maybeProbeUnreachable(ctx context.Context, entry models.Server
 	state.nextReachProbeAt = time.Time{}
 	m.mu.Unlock()
 
-	// Start runs the full lifecycle (TCP pre-check + MCP handshake).
-	// If anything fails, the classifier re-routes back to
-	// StatusUnreachable / StatusError as appropriate. We don't touch
-	// status here directly — Start owns that.
-	if err := m.lm.Start(ctx, entry.Name); err != nil {
-		m.logger.Warn("auto-restart after reachability recovery failed",
-			"server", entry.Name, "error", err)
+	m.startAfterRecovery(ctx, entry.Name)
+}
+
+// maybeRestartSAPGUIUnreachable is the connection-gate recovery path for a
+// sap-gui-* backend sitting in StatusUnreachable (COM STA engine unavailable).
+// It throttles on the same nextReachProbeAt cadence as the URL slow-poll
+// (60s for the first UnreachableProbeInitialBurstCount probes, then 5min) but
+// has no host to dial — the only recovery signal is "did a fresh Start()
+// succeed", so it attempts Start() directly. A small per-backend jitter is
+// added to the schedule so the 8 sap-gui-* gated on the same STA-hang tick do
+// not re-attempt Start in lockstep (PAL review: avoid a once-a-minute burst).
+func (m *Monitor) maybeRestartSAPGUIUnreachable(ctx context.Context, entry models.ServerEntry) {
+	now := time.Now()
+	m.mu.Lock()
+	state := m.getOrCreateState(entry.Name)
+	if !state.nextReachProbeAt.IsZero() && now.Before(state.nextReachProbeAt) {
+		m.mu.Unlock()
+		return // throttled — next restart attempt scheduled for later
+	}
+	state.reachProbeCount++
+	probeCount := state.reachProbeCount
+	delay := UnreachableProbeInitial
+	if probeCount > UnreachableProbeInitialBurstCount {
+		delay = UnreachableProbeMax
+	}
+	// De-lockstep jitter: spread same-tick sap-gui-* restarts by name hash
+	// (deterministic, 0–sapGUIRestartJitterMax) so they don't fire together.
+	delay += sapGUIRestartJitter(entry.Name)
+	state.nextReachProbeAt = now.Add(delay)
+	m.mu.Unlock()
+
+	m.logger.Info("sap-gui backend unreachable (COM engine); attempting slow-poll restart",
+		"server", entry.Name, "probe_count", probeCount, "next_attempt_in", delay)
+
+	// Reset the cadence on a SUCCESSFUL start so a recovered backend gets a
+	// fresh burst window if it fails again later. On failure we keep the
+	// scheduled (backed-off) nextReachProbeAt so we don't hot-loop.
+	if !m.startAfterRecovery(ctx, entry.Name) {
 		return
 	}
+	m.mu.Lock()
+	state.reachProbeCount = 0
+	state.nextReachProbeAt = time.Time{}
+	m.mu.Unlock()
+}
 
-	// H-1 fix: the backend's BackendSupervisor.Serve returned ErrDoNotRestart
-	// when the backend entered StatusUnreachable, removing it from the suture
-	// tree. Now that Start() succeeded, re-register so suture owns crash-restart
-	// policy again. AddBackendToSupervisor is idempotent (no-op if already
-	// registered) and is a no-op when the supervisor is not active (legacy/test
-	// path). Gate on SupervisorActive() to avoid calling into an uninitialised
-	// supervisorTokens map.
-	if m.lm.SupervisorActive() {
-		m.lm.AddBackendToSupervisor(entry.Name, m.logger)
-		m.logger.Info("re-registered backend with supervisor after reachability recovery",
-			"server", entry.Name)
+// startAfterRecovery runs the full lifecycle Start (TCP pre-check + MCP
+// handshake) for a backend recovering from StatusUnreachable and, on success,
+// re-registers it with the suture supervisor. Returns true when Start
+// succeeded. Shared by the URL slow-poll path and the sap-gui-* COM-gate path.
+//
+// On Start failure the lifecycle classifier re-routes the backend back to
+// StatusUnreachable / StatusError as appropriate — this function does not
+// touch status directly (Start owns it).
+//
+// H-1 fix: the backend's BackendSupervisor.Serve returned ErrDoNotRestart
+// when it entered StatusUnreachable, removing it from the suture tree. Once
+// Start() succeeds we AddBackendToSupervisor so suture owns crash-restart
+// policy again. AddBackendToSupervisor is idempotent (no-op if already
+// registered) and a no-op when the supervisor is not active (legacy/test
+// path); gate on SupervisorActive() to avoid touching an uninitialised
+// supervisorTokens map.
+func (m *Monitor) startAfterRecovery(ctx context.Context, name string) bool {
+	if err := m.lm.Start(ctx, name); err != nil {
+		m.logger.Warn("auto-restart after unreachable recovery failed",
+			"server", name, "error", err)
+		return false
 	}
+	if m.lm.SupervisorActive() {
+		m.lm.AddBackendToSupervisor(name, m.logger)
+		m.logger.Info("re-registered backend with supervisor after recovery",
+			"server", name)
+	}
+	return true
+}
+
+// sapGUIRestartJitterMax bounds the deterministic per-backend jitter added to
+// the sap-gui-* slow-poll restart schedule so simultaneously-gated backends do
+// not re-attempt Start in lockstep on the same monitor tick.
+const sapGUIRestartJitterMax = 10 * time.Second
+
+// sapGUIRestartJitter returns a deterministic per-name delay in
+// [0, sapGUIRestartJitterMax) derived from a simple FNV-style string hash.
+// Deterministic (not random) so the schedule is stable and unit-testable;
+// the only goal is to de-correlate the 8 sap-gui-* restart attempts, not to
+// be cryptographically uniform.
+func sapGUIRestartJitter(name string) time.Duration {
+	var h uint32 = 2166136261
+	for i := 0; i < len(name); i++ {
+		h ^= uint32(name[i])
+		h *= 16777619
+	}
+	return time.Duration(h%uint32(sapGUIRestartJitterMax/time.Second)) * time.Second
 }
 
 // unreachableProbeURL returns the URL to TCP-probe for a backend in
@@ -573,7 +660,7 @@ func (m *Monitor) checkOne(ctx context.Context, entry models.ServerEntry) {
 		// decision live in updateSAPStreaks (unit-testable without a live MCP
 		// session); a handled verdict is published here, otherwise we fall
 		// through to the normal Running/REST path with both streaks reset.
-		if pub, reason, handled := m.updateSAPStreaks(state, sapStatus, sapReason); handled {
+		if pub, reason, handled := m.updateSAPStreaks(state, sapStatus, sapReason, sapname.IsSAPGUI(name)); handled {
 			m.mu.Unlock()
 			m.lm.SetStatus(name, pub, reason)
 			return
@@ -1181,7 +1268,6 @@ func orderSAPCandidates(names []string, fails map[string]int, lastGood string) [
 //
 //   - StatusUnreachable — probe I/O failure (transport error / timeout);
 //     tolerated up to SAPProbeFailureThreshold (3). VPN/host blips fit here.
-//     vsp-* only ever yields this, so it rides the I/O-error streak unchanged.
 //   - StatusDegraded — RELIABLE "not logged in" from a SUCCESSFUL probe;
 //     tolerated up to SAPDegradedConfirmThreshold (2). One tolerated tick
 //     absorbs the race where the STA engine returns the list a split-second
@@ -1191,13 +1277,32 @@ func orderSAPCandidates(names []string, fails map[string]int, lastGood string) [
 //
 // The two counters are reset across each other so an alternating
 // Unreachable/Degraded sequence cannot accumulate toward either threshold.
-func (m *Monitor) updateSAPStreaks(state *serverState, sapStatus models.ServerStatus, sapReason string) (pub models.ServerStatus, reason string, handled bool) {
+//
+// CONNECTION-GATE (sap-gui-* only, spike Part B): when the verdict is a
+// transport/COM I/O failure (StatusUnreachable) and the backend is a
+// sap-gui-* (COM STA engine, isSAPGUI), the threshold breach publishes
+// StatusUnreachable rather than StatusDegraded. This routes the backend
+// through BackendSupervisor's ErrDoNotRestart gate so the shared STA engine
+// hanging cannot lockstep-restart-storm all 8 sap-gui-* via suture; the
+// health monitor's maybeProbeUnreachable then slow-poll-restarts it
+// (60s/5min cadence) instead of suture's 15s lockstep. vsp-* keep the
+// StatusDegraded verdict: they have a SAP_URL host, stay routable, and
+// already self-recover each tick via the TCP probe (never need the gate).
+// The "not logged in" (StatusDegraded) path is unchanged for BOTH kinds —
+// it is not a storm and the backend must stay routable.
+func (m *Monitor) updateSAPStreaks(state *serverState, sapStatus models.ServerStatus, sapReason string, isSAPGUI bool) (pub models.ServerStatus, reason string, handled bool) {
 	switch sapStatus {
 	case models.StatusUnreachable:
 		state.sapUnreachableStreak++
 		state.sapDegradedStreak = 0
 		if state.sapUnreachableStreak < m.SAPProbeFailureThreshold {
 			return models.StatusRunning, "", true
+		}
+		if isSAPGUI {
+			// Connection-gate: COM STA engine unavailable beyond tolerance.
+			// Publish StatusUnreachable so suture stops restarting and the
+			// monitor slow-poll-restarts on the de-lockstepped cadence.
+			return models.StatusUnreachable, sapReason, true
 		}
 		return models.StatusDegraded, sapReason, true
 	case models.StatusDegraded:

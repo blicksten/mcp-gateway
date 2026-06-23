@@ -20,6 +20,7 @@ package health
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -68,9 +69,9 @@ func TestUnreachableProbeURL_StdioNoSAPURL(t *testing.T) {
 // TestUnreachableProbeURL_TableDriven: full matrix.
 func TestUnreachableProbeURL_TableDriven(t *testing.T) {
 	tests := []struct {
-		name      string
-		entry     models.ServerEntry
-		wantURL   string
+		name    string
+		entry   models.ServerEntry
+		wantURL string
 	}{
 		{
 			name: "http backend",
@@ -221,10 +222,15 @@ func TestMaybeProbeUnreachable_StdioSAP_ThrottledOnSecondCall(t *testing.T) {
 		"second immediate CheckOnce must be throttled (nextReachProbeAt not elapsed)")
 }
 
-// TestMaybeProbeUnreachable_SAPGUINoURL_NoOp: sap-gui-* backends have no
-// SAP_URL (they use COM automation). They must not be probed even in
-// StatusUnreachable (same defensive no-op as other non-URL stdio backends).
-func TestMaybeProbeUnreachable_SAPGUINoURL_NoOp(t *testing.T) {
+// TestMaybeProbeUnreachable_SAPGUI_Recovers: spike Part B connection-gate
+// recovery. A sap-gui-* backend has NO SAP_URL (COM automation), so the old
+// URL slow-poll was a no-op and the backend would be STRANDED once gated to
+// StatusUnreachable. The new sap-gui-* branch instead RE-ATTEMPTS Start()
+// directly on the slow-poll cadence — there is no host to dial; the only
+// recovery signal is a successful Start. The mock Start succeeds, so the
+// backend recovers to StatusRunning. This FAILS before the fix (old code
+// returned early with starts == 0).
+func TestMaybeProbeUnreachable_SAPGUI_Recovers(t *testing.T) {
 	mock := newMockLM()
 	mock.addEntry("sap-gui-Q00", models.StatusUnreachable, models.ServerConfig{
 		Command: "/fake/sap-gui-ctl",
@@ -233,8 +239,33 @@ func TestMaybeProbeUnreachable_SAPGUINoURL_NoOp(t *testing.T) {
 	tm := newTestableMonitor(mock)
 	tm.CheckOnce(context.Background())
 
-	assert.Equal(t, 0, mock.starts,
-		"sap-gui-* without SAP_URL in StatusUnreachable must not trigger Start")
+	require.Equal(t, 1, mock.starts,
+		"sap-gui-* in StatusUnreachable must attempt Start (no snapshot dependency, no TCP dial)")
+	assert.Equal(t, models.StatusRunning, mock.getEntry("sap-gui-Q00").Status,
+		"a successful Start recovers the gated sap-gui-* backend to Running")
+}
+
+// TestMaybeProbeUnreachable_SAPGUI_StillHung: when the COM engine is still
+// unavailable, the slow-poll Start attempt fails. The backend must NOT
+// hot-loop: the second immediate CheckOnce is throttled (nextReachProbeAt set
+// into the future), so Start is attempted exactly once per cadence window —
+// the de-storm guarantee (bounded by 60s/5min, never suture's 15s lockstep).
+func TestMaybeProbeUnreachable_SAPGUI_StillHung(t *testing.T) {
+	mock := newMockLM()
+	mock.startErr = errors.New("COM STA engine still hung")
+	mock.addEntry("sap-gui-Q00", models.StatusUnreachable, models.ServerConfig{
+		Command: "/fake/sap-gui-ctl",
+	})
+	tm := newTestableMonitor(mock)
+
+	// First tick: one Start attempt (fails), nextReachProbeAt scheduled ahead.
+	tm.CheckOnce(context.Background())
+	assert.Equal(t, 1, mock.starts, "first tick: exactly one Start attempt")
+
+	// Second immediate tick: throttled — no second hot-loop Start.
+	tm.CheckOnce(context.Background())
+	assert.Equal(t, 1, mock.starts,
+		"still-hung sap-gui-* must be throttled on the slow-poll cadence, not hot-loop (de-storm)")
 }
 
 // TestMaybeProbeUnreachable_HTTPBackend_Unchanged: the original HTTP path still
