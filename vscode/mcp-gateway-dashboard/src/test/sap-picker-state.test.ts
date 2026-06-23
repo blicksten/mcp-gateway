@@ -11,6 +11,9 @@ import {
 	degenerateGuard,
 	applyFilter,
 	buildOpsList,
+	buildOpsListWithDefaults,
+	buildCloudVspArgs,
+	type CloudParams,
 	initRowsFromSnapshot,
 	transitionRow,
 	isFailed,
@@ -429,5 +432,133 @@ describe('sap-picker-state — runWithConcurrency', () => {
 	it('handles empty ops list cleanly', async () => {
 		const r = await runWithConcurrency<number>([], async () => 0);
 		assert.deepStrictEqual(r, []);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Cloud SAP support (feature-a16d8b44 module 1).
+// A cloud vsp add must emit config.args with the cookie-file launcher tokens;
+// an on-prem vsp add must remain byte-identical to before (no `args` key).
+// SECURITY: these assertions are on token SHAPE / KEYS only — no secret value
+// (cookie contents) is ever present; the cookie file is referenced by PATH.
+// ---------------------------------------------------------------------------
+
+describe('sap-picker-state — buildCloudVspArgs (module 1)', () => {
+	const fullCloud: CloudParams = {
+		sapUrl: 'https://my-tenant.s4hana.cloud',
+		cookieFile: '/abs/path/cookies.txt',
+		readOnly: true,
+		featureRap: true,
+	};
+
+	it('emits read-only + feature-rap on + cookie-file (two tokens) in order', () => {
+		assert.deepStrictEqual(buildCloudVspArgs(fullCloud), [
+			'--read-only',
+			'--feature-rap', 'on',
+			'--cookie-file', '/abs/path/cookies.txt',
+		]);
+	});
+
+	it('omits --read-only when readOnly is false', () => {
+		assert.deepStrictEqual(
+			buildCloudVspArgs({ ...fullCloud, readOnly: false }),
+			['--feature-rap', 'on', '--cookie-file', '/abs/path/cookies.txt'],
+		);
+	});
+
+	it('omits --feature-rap when featureRap is false', () => {
+		assert.deepStrictEqual(
+			buildCloudVspArgs({ ...fullCloud, featureRap: false }),
+			['--read-only', '--cookie-file', '/abs/path/cookies.txt'],
+		);
+	});
+
+	it('keeps --cookie-file + path as two separate tokens', () => {
+		const args = buildCloudVspArgs(fullCloud);
+		const idx = args.indexOf('--cookie-file');
+		assert.ok(idx >= 0, '--cookie-file flag must be present');
+		assert.strictEqual(args[idx + 1], '/abs/path/cookies.txt');
+	});
+
+	it('contains no secret-bearing token (cookie referenced by path only)', () => {
+		const args = buildCloudVspArgs(fullCloud);
+		for (const tok of args) {
+			assert.ok(!/password|token|cookie=/i.test(tok),
+				`unexpected secret-like token: ${tok}`);
+		}
+	});
+});
+
+describe('sap-picker-state — buildOpsListWithDefaults cloud vs on-prem (module 1)', () => {
+	const cloud: CloudParams = {
+		sapUrl: 'https://my-tenant.s4hana.cloud',
+		cookieFile: '/abs/path/cookies.txt',
+		readOnly: true,
+		featureRap: true,
+	};
+
+	it('cloud vsp add → config.args deep-equals expected token array + command', () => {
+		const rows: RowState[] = [
+			rs({
+				snapshot: snapRow({ sid: 'CLD', client: '100', registered: { vsp: false, gui: false } }),
+				desired: { vsp: true, gui: false },
+				kind: 'cloud',
+				cloud,
+			}),
+		];
+		const { ops } = buildOpsListWithDefaults(rows, { vspCommand: '/opt/vsp' });
+		assert.strictEqual(ops.length, 1);
+		assert.strictEqual(ops[0].kind, 'add');
+		assert.strictEqual(ops[0].component, 'vsp');
+		assert.deepStrictEqual(ops[0].config, {
+			command: '/opt/vsp',
+			args: ['--read-only', '--feature-rap', 'on', '--cookie-file', '/abs/path/cookies.txt'],
+		});
+	});
+
+	it('on-prem vsp add → config has NO args key (byte-identical regression)', () => {
+		// Same row WITHOUT kind/cloud must produce exactly { command } — no args.
+		const rows: RowState[] = [
+			rs({
+				snapshot: snapRow({ sid: 'DEV', client: '100', registered: { vsp: false, gui: false } }),
+				desired: { vsp: true, gui: false },
+				override: { vspCommand: '/opt/vsp' },
+			}),
+		];
+		const { ops } = buildOpsListWithDefaults(rows, {});
+		assert.strictEqual(ops.length, 1);
+		// deepStrictEqual against the exact pre-feature shape: just { command }.
+		assert.deepStrictEqual(ops[0].config, { command: '/opt/vsp' });
+		assert.ok(!('args' in (ops[0].config as Record<string, unknown>)),
+			'on-prem config must not carry an args key');
+	});
+
+	it('buildOpsList (legacy signature) on-prem vsp add stays { command } only', () => {
+		// Regression guard via the legacy path the existing suite already uses.
+		const rows = [
+			rs({
+				snapshot: snapRow({ sid: 'DEV', client: '100', registered: { vsp: false, gui: false } }),
+				desired: { vsp: true, gui: false },
+				override: { vspCommand: '/opt/vsp' },
+			}),
+		];
+		const ops = buildOpsList(rows);
+		assert.strictEqual(ops.length, 1);
+		assert.deepStrictEqual(ops[0].config, { command: '/opt/vsp' });
+	});
+
+	it('cloud flag without cloud params falls back to on-prem shape (defensive)', () => {
+		const rows: RowState[] = [
+			rs({
+				snapshot: snapRow({ sid: 'CLD', client: '100', registered: { vsp: false, gui: false } }),
+				desired: { vsp: true, gui: false },
+				override: { vspCommand: '/opt/vsp' },
+				kind: 'cloud',
+				// cloud intentionally undefined
+			}),
+		];
+		const { ops } = buildOpsListWithDefaults(rows, {});
+		assert.strictEqual(ops.length, 1);
+		assert.deepStrictEqual(ops[0].config, { command: '/opt/vsp' });
 	});
 });

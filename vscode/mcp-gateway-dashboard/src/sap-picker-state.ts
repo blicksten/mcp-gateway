@@ -24,6 +24,26 @@
 /** Component label — only `vsp` and `gui` are shipped in v1. */
 export type Component = 'vsp' | 'gui';
 
+/** Backend flavour for a SAP row. `on-prem` is the legacy KeePass-credential
+ *  path (vsp.exe + SAP_USER/SAP_PASSWORD env); `cloud` targets an ADT-over-HTTPS
+ *  endpoint authenticated by a browser cookie file — no password ever leaves
+ *  KeePass, and the vsp launcher is configured with explicit args instead. */
+export type SapKind = 'on-prem' | 'cloud';
+
+/** Connection parameters for a `cloud` SAP row. `cookieFile` is referenced by
+ *  PATH only — its contents (the SAP session cookie) are never read into this
+ *  module, never logged, and never embedded in config. `readOnly` + `featureRap`
+ *  default true for these systems (see buildCloudVspArgs). */
+export interface CloudParams {
+	sapUrl: string;
+	cookieFile: string;
+	readOnly: boolean;
+	featureRap: boolean;
+	/** ADT logon language injected as SAP_LANGUAGE. Optional — defaults to
+	 *  'EN' at config-build time when absent. */
+	lang?: string;
+}
+
 /** Row-level status for a single component (vsp or gui). */
 export type RowStatus =
 	| 'idle'
@@ -83,6 +103,13 @@ export interface RowState {
 	vspError?: string;
 	guiError?: string;
 	override: RowOverride;
+	/** Backend flavour. Absent / 'on-prem' = legacy KeePass path (unchanged).
+	 *  'cloud' switches the vsp add to the cookie-file ADT-over-HTTPS launcher
+	 *  and suppresses all password-based credential injection. */
+	kind?: SapKind;
+	/** Cloud connection params — required when `kind === 'cloud'`, ignored
+	 *  otherwise. Cookie file is referenced by path only. */
+	cloud?: CloudParams;
 }
 
 /** Single op produced by buildOpsList — consumed by the batch driver. */
@@ -121,6 +148,21 @@ export function serverName(component: Component, sid: string, client: string): s
 /** Stable key for the [⋮] expand-state map. */
 export function expandKey(sid: string, client: string, component: Component): string {
 	return `${sid}-${client}-${component}`;
+}
+
+/** Build the vsp launcher args for a `cloud` SAP row. Pure — no env, no
+ *  secrets. The cookie file is passed by PATH as two tokens
+ *  (`--cookie-file <path>`); its contents are never read here. `--read-only`
+ *  and `--feature-rap on` are conditional on the row's flags (both default
+ *  true for cloud systems) so an operator can opt out per row without the
+ *  launcher receiving a contradictory flag. Order is deterministic so the
+ *  emitted config is stable across re-adds and snapshot-comparable in tests. */
+export function buildCloudVspArgs(cloud: CloudParams): string[] {
+	const args: string[] = [];
+	if (cloud.readOnly) { args.push('--read-only'); }
+	if (cloud.featureRap) { args.push('--feature-rap', 'on'); }
+	args.push('--cookie-file', cloud.cookieFile);
+	return args;
 }
 
 /** Map a snapshot row to its visual category (filter axis). */
@@ -213,6 +255,15 @@ export function buildOpsListWithDefaults(rows: RowState[], defaults: PickerDefau
 						rowKey: r.key,
 						component: 'vsp',
 						reason: 'VSP command not set — fill the row override or mcpGateway.defaultVspCommand',
+					});
+				} else if (r.kind === 'cloud' && r.cloud) {
+					// Cloud flavour: cookie-file ADT-over-HTTPS launcher. The
+					// vsp binary receives explicit args instead of relying on
+					// password env vars; SAP_URL etc. are injected as env later
+					// by the panel's cloud branch of enrichConfigWithCreds.
+					ops.push({
+						kind: 'add', component: 'vsp', rowKey: r.key, serverName: name,
+						config: { command: cmd, args: buildCloudVspArgs(r.cloud) },
 					});
 				} else {
 					ops.push({
