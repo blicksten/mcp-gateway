@@ -276,6 +276,65 @@ func TestSaveAndLoad_RoundTrip(t *testing.T) {
 	assert.True(t, loaded.Servers["orch"].ExposeToolsEnabled())
 }
 
+// TestSaveAndLoad_CloudSAPArgsEnvDurability verifies that a cloud-SAP-shaped
+// ServerConfig — Command + Args (the cookie-file vsp launcher tokens) plus an
+// Env array that contains NO password key — survives a Save→Load round-trip
+// byte-for-byte at the field level. Guards the daemon-side durability of the
+// dashboard's cloud-SAP feature (feature-a16d8b44): args and the non-secret
+// SAP_URL/SAP_CLIENT/SAP_LANGUAGE env must persist exactly across daemon
+// restarts. Cookie contents are never in config (referenced by path in Args),
+// and no SAP_PASSWORD/SAP_USER is present — asserted explicitly below.
+func TestSaveAndLoad_CloudSAPArgsEnvDurability(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	args := []string{"--read-only", "--feature-rap", "on", "--cookie-file", "/abs/path/cookies.txt"}
+	// Non-secret env only — exactly what the cloud branch injects.
+	env := []string{
+		"SAP_URL=https://my-tenant.s4hana.cloud",
+		"SAP_CLIENT=100",
+		"SAP_LANGUAGE=EN",
+	}
+
+	original := &models.Config{
+		Servers: map[string]*models.ServerConfig{
+			"vsp-CLD-100": {
+				Command: absCmd(t),
+				Args:    args,
+				Env:     env,
+			},
+		},
+	}
+
+	require.NoError(t, Save(path, original))
+
+	loaded, err := Load(path)
+	require.NoError(t, err)
+
+	sc := loaded.Servers["vsp-CLD-100"]
+	require.NotNil(t, sc, "cloud server entry must survive round-trip")
+
+	// Args survive unchanged — cookie-file tokens intact and in order.
+	assert.Equal(t, args, sc.Args, "Args must round-trip unchanged")
+	// Env survives unchanged.
+	assert.Equal(t, env, sc.Env, "Env must round-trip unchanged")
+	assert.Equal(t, absCmd(t), sc.Command)
+	assert.Equal(t, "stdio", sc.TransportType())
+
+	// Durability of the security contract: no password/user key present after
+	// the round-trip (the cloud path must never have written one).
+	for _, e := range sc.Env {
+		assert.NotContains(t, e, "SAP_PASSWORD", "no password key may appear in env")
+		assert.NotContains(t, e, "SAP_USER", "no user key may appear in env")
+	}
+
+	// SAP_URL is extractable post-load (proves the env entry round-tripped
+	// in the daemon's expected KEY=VALUE form).
+	gotURL, ok := sc.SAPEnvURL()
+	assert.True(t, ok, "SAP_URL must be present after round-trip")
+	assert.Equal(t, "https://my-tenant.s4hana.cloud", gotURL)
+}
+
 func TestCreateDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
