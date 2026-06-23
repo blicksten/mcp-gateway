@@ -67,6 +67,30 @@ export function validateUrl(v: string): string | null {
 	return null;
 }
 
+/**
+ * Cloud-SAP HTTPS endpoint check. Returns true only when `url` is a non-empty
+ * string that begins with the literal `https://` scheme. Plain `http://`,
+ * relative paths, and other schemes are rejected — a cloud ADT cookie session
+ * must run over TLS. String prefix check only (no regex, no URL parse: the
+ * scheme prefix is the entire contract here).
+ */
+export function validateHttpsUrl(url: string): boolean {
+	if (typeof url !== 'string') { return false; }
+	return url.trim().startsWith('https://');
+}
+
+/**
+ * Cloud-SAP cookie-file path check. Returns true only when `p` is a non-empty
+ * absolute path. The file's contents (a SAP session cookie) are never read or
+ * validated here — only the path shape is checked, reusing the platform-agnostic
+ * {@link isAbsolutePath} so the cookie file is referenced by an unambiguous
+ * absolute location.
+ */
+export function validateCookieFilePath(p: string): boolean {
+	if (typeof p !== 'string') { return false; }
+	return isAbsolutePath(p);
+}
+
 /** Validate stdio command: must be a non-empty, absolute path (platform-agnostic). */
 export function validateStdioCommand(v: string): string | null {
 	if (!v.trim()) { return 'Command is required'; }
