@@ -118,6 +118,9 @@ func TestEmit_SchemaFieldsPopulated(t *testing.T) {
 	}
 	ev := events[0]
 
+	if ev.SchemaVersion != 1 {
+		t.Errorf("schema_version = %d, want 1", ev.SchemaVersion)
+	}
 	if ev.Ts == "" || !strings.HasSuffix(ev.Ts, "Z") {
 		t.Errorf("ts not RFC3339Nano UTC: %q", ev.Ts)
 	}
@@ -147,6 +150,28 @@ func TestEmit_SchemaFieldsPopulated(t *testing.T) {
 	}
 	if got, ok := ev.Attrs["pid"]; !ok || got != float64(21044) {
 		t.Errorf("attrs.pid = %v (ok=%v), want 21044", got, ok)
+	}
+}
+
+// schema_version must be emitted as the FIRST key of every line (consumers
+// dispatch on it before parsing the rest). Read the raw JSONL, not the
+// unmarshalled struct, so the assertion actually checks key ordering.
+func TestEmit_SchemaVersionFirstKey(t *testing.T) {
+	e, dir := newEnabledEmitter(t)
+	e.Emit("lifecycle", "backend.kill", "warn", "reaper", "vsp-PC1", "owner-absent", nil)
+
+	matches, err := filepath.Glob(filepath.Join(dir, "events", "*.jsonl"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("glob events: err=%v matches=%v", err, matches)
+	}
+	raw, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatalf("read events file: %v", err)
+	}
+	line := strings.TrimSpace(string(raw))
+	const wantPrefix = `{"schema_version":1,`
+	if !strings.HasPrefix(line, wantPrefix) {
+		t.Errorf("line does not start with %q; got %.60q", wantPrefix, line)
 	}
 }
 

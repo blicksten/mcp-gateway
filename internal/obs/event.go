@@ -52,27 +52,37 @@ func TraceIDFromContext(ctx context.Context) string {
 // (PLAN §A). Identical key set across all four services so a single CLI can
 // merge and correlate. json tags use snake_case to match the schema.
 type Event struct {
-	Ts           string         `json:"ts"`             // RFC3339Nano, UTC, Z
-	TsMonoNs     int64          `json:"ts_mono_ns"`     // per-process monotonic ns
-	RunID        string         `json:"run_id"`         // one id per process lifetime
-	HostID       string         `json:"host_id"`        // machine identity
-	Service      string         `json:"service"`        // gateway|orchestrator|reaper|watchdog
-	Subsys       string         `json:"subsys"`         // lifecycle|health|proxy|api|...
-	Event        string         `json:"event"`          // dotted verb: backend.kill, proxy.call
-	Level        string         `json:"level"`          // debug|info|warn|error
-	Pid          int            `json:"pid"`            // OS process id
-	Ppid         int            `json:"ppid"`           // parent pid
-	Seq          uint64         `json:"seq"`            // per-process strict total order
-	TraceID      string         `json:"trace_id"`       // minted in orchestrator, propagated
-	ParentSpanID string         `json:"parent_span_id"` // nesting within a trace
-	Actor        string         `json:"actor"`          // who acted: reaper|suture|...
-	Target       string         `json:"target"`         // what was acted on
-	Reason       string         `json:"reason"`         // why: keepalive-miss|owner-absent|...
-	Attrs        map[string]any `json:"attrs"`          // event-specific, redacted payload
+	// SchemaVersion is the event-envelope version, emitted FIRST in every line
+	// so a consumer can dispatch on it before parsing the rest. Bump only on a
+	// breaking shape change; mirrors the Python/PS emitters. encoding/json
+	// marshals struct fields in declaration order, so this is the first key.
+	SchemaVersion int            `json:"schema_version"` // envelope version (currently 1)
+	Ts            string         `json:"ts"`             // RFC3339Nano, UTC, Z
+	TsMonoNs      int64          `json:"ts_mono_ns"`     // per-process monotonic ns
+	RunID         string         `json:"run_id"`         // one id per process lifetime
+	HostID        string         `json:"host_id"`        // machine identity
+	Service       string         `json:"service"`        // gateway|orchestrator|reaper|watchdog
+	Subsys        string         `json:"subsys"`         // lifecycle|health|proxy|api|...
+	Event         string         `json:"event"`          // dotted verb: backend.kill, proxy.call
+	Level         string         `json:"level"`          // debug|info|warn|error
+	Pid           int            `json:"pid"`            // OS process id
+	Ppid          int            `json:"ppid"`           // parent pid
+	Seq           uint64         `json:"seq"`            // per-process strict total order
+	TraceID       string         `json:"trace_id"`       // minted in orchestrator, propagated
+	ParentSpanID  string         `json:"parent_span_id"` // nesting within a trace
+	Actor         string         `json:"actor"`          // who acted: reaper|suture|...
+	Target        string         `json:"target"`         // what was acted on
+	Reason        string         `json:"reason"`         // why: keepalive-miss|owner-absent|...
+	Attrs         map[string]any `json:"attrs"`          // event-specific, redacted payload
 }
 
 // serviceName is the fixed `service` value for the gateway emitter.
 const serviceName = "gateway"
+
+// schemaVersion is the current event-envelope version, written as the first
+// key of every emitted line. Mirrors the Python/PS emitters; bump only on a
+// breaking shape change.
+const schemaVersion = 1
 
 // Emitter writes structured events to a per-process JSONL file when enabled.
 // A single instance is constructed at startup and shared across the gateway's
@@ -207,22 +217,23 @@ func (e *Emitter) EmitCtx(ctx context.Context, subsys, event, level, actor, targ
 // and a no-op for non-secret values.
 func (e *Emitter) emitWithTrace(traceID, subsys, event, level, actor, target, reason string, attrs map[string]any) {
 	ev := Event{
-		Ts:       time.Now().UTC().Format(time.RFC3339Nano),
-		TsMonoNs: time.Since(e.anchor).Nanoseconds(),
-		RunID:    e.runID,
-		HostID:   e.hostID,
-		Service:  serviceName,
-		Subsys:   subsys,
-		Event:    event,
-		Level:    level,
-		Pid:      e.pid,
-		Ppid:     e.ppid,
-		Seq:      e.seq.Add(1),
-		TraceID:  traceID,
-		Actor:    scrubString(actor),
-		Target:   scrubString(target),
-		Reason:   scrubString(reason),
-		Attrs:    Redact(attrs),
+		SchemaVersion: schemaVersion,
+		Ts:            time.Now().UTC().Format(time.RFC3339Nano),
+		TsMonoNs:      time.Since(e.anchor).Nanoseconds(),
+		RunID:         e.runID,
+		HostID:        e.hostID,
+		Service:       serviceName,
+		Subsys:        subsys,
+		Event:         event,
+		Level:         level,
+		Pid:           e.pid,
+		Ppid:          e.ppid,
+		Seq:           e.seq.Add(1),
+		TraceID:       traceID,
+		Actor:         scrubString(actor),
+		Target:        scrubString(target),
+		Reason:        scrubString(reason),
+		Attrs:         Redact(attrs),
 	}
 	e.write(&ev)
 }
