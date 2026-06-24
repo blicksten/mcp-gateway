@@ -1163,6 +1163,20 @@ export class SapPickerPanel {
 					envOut.push('SAP_ENABLE_TRANSPORTS=true');
 				}
 			}
+			// Inject SAP_MODE so the vsp backend exposes the full named toolset.
+			// vsp.exe defaults to --mode hyperfocused (a single universal tool);
+			// without this every (re-)added vsp server would come up with no named
+			// tools (CallRFC, RunQuery, InstallZADTVSP, ...). Robust to delete/re-add
+			// because enrichConfigWithCreds runs on every add. Operator-provided
+			// SAP_MODE in baseConfig stays authoritative.
+			const modeExists = envOut.some((e) => e.startsWith('SAP_MODE='));
+			if (!modeExists) {
+				const modeCfg = vscode.workspace.getConfiguration('mcpGateway');
+				const sapMode = modeCfg.get<string>('sapMode', 'expert');
+				if (sapMode) {
+					envOut.push(`SAP_MODE=${sapMode}`);
+				}
+			}
 		}
 
 		logger.info('sap-picker',

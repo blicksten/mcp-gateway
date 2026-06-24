@@ -512,6 +512,12 @@
           "default": true,
           "description": "[SAP Picker] Inject SAP_ENABLE_TRANSPORTS=true into vsp-* env on Picker Apply. Required for vsp ListTransports/GetTransport tools — without it vsp returns 'transports not enabled'."
         },
+        "mcpGateway.sapMode": {
+          "type": "string",
+          "enum": ["expert", "focused", "hyperfocused"],
+          "default": "expert",
+          "description": "[SAP Picker] Inject SAP_MODE into vsp-* env on Picker Apply. vsp.exe defaults to 'hyperfocused' (1 universal tool); 'expert' (147 tools) or 'focused' (100) expose named tools (CallRFC, RunQuery, InstallZADTVSP, ...). Without it a (re-)added vsp server comes up with no named tools."
+        },
         "mcpGateway.pythonPath": {
           "type": "string",
           "default": "",
