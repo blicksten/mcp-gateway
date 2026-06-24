@@ -498,14 +498,14 @@
         },
         "mcpGateway.sapAdtUrlTemplate": {
           "type": "string",
-          "default": "http://sap{sid_lower}.ebydos.local:50000",
+          "default": "http://sap{sid_lower}.example.invalid:50000",
           "description": "[SAP Picker] Template for SAP_URL env var injected into vsp-* servers on Picker Apply. Tokens: {sid_lower} (3-char SID lowercased, e.g. q26), {sid_upper}. vsp.exe needs SAP_URL or it exits with 'SAP URL is required' on stdio initialize. Override per-system via mcpGateway.sapAdtUrls."
         },
         "mcpGateway.sapAdtUrls": {
           "type": "object",
           "default": {},
           "additionalProperties": { "type": "string" },
-          "description": "[SAP Picker] Per-system SAP_URL overrides. Keys are '<SID>-<CLIENT>' or '<SID>', values are HTTP endpoints (e.g. {\"Q26-100\": \"http://sapq26.ebydos.local:50000\"}). When set, wins over sapAdtUrlTemplate."
+          "description": "[SAP Picker] Per-system SAP_URL overrides. Keys are '<SID>-<CLIENT>' or '<SID>', values are HTTP endpoints (e.g. {\"Q26-100\": \"http://sapq26.example.invalid:50000\"}). When set, wins over sapAdtUrlTemplate."
         },
         "mcpGateway.sapEnableTransports": {
           "type": "boolean",

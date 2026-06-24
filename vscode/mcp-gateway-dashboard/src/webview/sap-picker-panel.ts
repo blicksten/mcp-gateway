@@ -1187,7 +1187,7 @@ export class SapPickerPanel {
 		if (typeof overrides[sid] === 'string' && overrides[sid].length > 0) {
 			return overrides[sid];
 		}
-		const tmpl = cfg.get<string>('sapAdtUrlTemplate', 'http://sap{sid_lower}.ebydos.local:50000');
+		const tmpl = cfg.get<string>('sapAdtUrlTemplate', 'http://sap{sid_lower}.example.invalid:50000');
 		if (!tmpl) { return null; }
 		const sidLower = sid.toLowerCase();
 		const sidUpper = sid.toUpperCase();
